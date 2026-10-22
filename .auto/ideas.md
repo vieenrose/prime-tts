@@ -12,7 +12,10 @@
 - Quality: per-node gate 0 over gate (unoptimized build) + SNDR 70.09 dB on all 5 cases, both
   boxes, both paths. Worst case sid1_T29/T120 at 67-68 dB (>= 60 gate).
 - What remains, all needing operator approval: (1) batch-4 lockstep driver; (2) full device
-  residency + CUDA graphs (~190 ms ceiling at ~1.4 ms/MB, run 88); (3) server-mode weights.
+  residency + CUDA graphs (~190 ms ceiling at ~1.4 ms/MB, run 88); (3) server-mode weights;
+  (4) Winograd F(2,3) on the K=3 convs (15% of MACs, ~2.25x fewer multiplies there, ~80-130 ms
+  net — the only remaining GPU FLOP reduction, run 70 — but numerics-changing, needs the
+  per-node gate + a new kernel family + dispatch, i.e. project-scale, run 135).
 - Everything else: banked, falsified with data/bounds, or explicitly out of bounds (see kill
   sections below). Next single-experiment step, if any: none with positive risk-adjusted EV.
   Recommended: autoresearch-finalize.
