@@ -645,6 +645,14 @@ pt_ctx *pt_v21_open(const char *container) {
     free(c);
     return 0;
   }
+  /* Contexts are opened concurrently (one per stream thread). Without this lock all of them find
+   * the shared fp32 cache empty at the same moment and each converts its own copy (measured: peak
+   * RSS ~195 MB per stream). Serializing the record pass lets the first context publish the
+   * conversions and the rest alias them. */
+  static pthread_mutex_t open_lock = PTHREAD_MUTEX_INITIALIZER;
+  static int open_ser = -1;
+  if (open_ser < 0) open_ser = getenv("PT_V21_OPEN_SERIAL") ? atoi(getenv("PT_V21_OPEN_SERIAL")) : 1;
+  if (open_ser) pthread_mutex_lock(&open_lock);
   for (uint32_t i = 0; i < h.n_tensor; i++) {
     const uint8_t *r = (const uint8_t *) c->map + V21_HDR_SIZE + (size_t) i * V21_REC_SIZE;
     char nm[65];
@@ -678,6 +686,7 @@ pt_ctx *pt_v21_open(const char *container) {
       }
     }
   }
+  if (open_ser) pthread_mutex_unlock(&open_lock);
   free(itemsize_tab);
   c->V = (pt_tv *) calloc(PT_N_TENSOR, sizeof(pt_tv));
   g_ctx = c;
