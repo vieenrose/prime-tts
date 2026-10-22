@@ -299,6 +299,15 @@ mean ~2326, tight cluster, no drift. All 5 golden cases bit-identical GPU vs CPU
 dB sid1_T29). pesi health check: 2427 (+2.9% over its earlier mean, within noise; identical parity,
 min_free 250 MB, no crash). Standing: 9.9 s -> ~2.33 s (4.25x) with quality preserved.
 
+## Startup endgame: exact ceilings (run 108) -- all remaining startup ideas closed
+- fp16 upload of the 39 fp16 records + same-table GPU convert (bit-exact by construction):
+  ships 83.8 MB not 111 MB, saves 27.2 MB @ 0.8 GB/s = 34 ms minus ~8 ms convert = NET ~25 ms max,
+  and touches weights_upload (the run #55 race zone). Below bar + risk: NO.
+- Parallel record pass: 165 MB @ ~5 GB/s = 33 ms floor + ~10 ms loop = ~43 ms vs serialized 99 ms,
+  so saves ~54 ms max, needs per-record claiming in the g_hcache lock zone. Below bar + risk: NO.
+- Combined ceiling for every remaining startup idea: ~80 ms across 2 risky changes; no single
+  change clears the bar and the combination is not one experiment. Startup is CLOSED as a lever.
+
 ## Run 70 findings (measurement budget: what is left)
 MAC-weighted conv wave efficiency is already 0.921, so batching the four streams for wave
 quantisation buys at most ~8% of the GPU total. No conv has cout % 4 != 0 and none runs with
