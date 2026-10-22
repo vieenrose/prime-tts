@@ -2093,12 +2093,25 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
          * at offset +pad and the kernel is handed the row start (no negative indexing). */
         size_t xpad_bytes =
             (size_t) ((((size_t) N * cin * ldxp) * 4 + 63) & ~(size_t) 63);
-        float *xp = (float *) aligned_alloc(64, xpad_bytes);
-        memset(xp, 0, xpad_bytes);
-        for (int64_t b = 0; b < N; b++)
-          for (int ci = 0; ci < cin; ci++)
-            memcpy(xp + ((int64_t) b * cin + ci) * ldxp + pad,
-                   (const float *) X->p + ((int64_t) b * cin + ci) * T, (size_t) (T * 4));
+        /* The GEMM conv kernel applies the zero padding itself (out-of-row taps read as 0), so on
+         * the CUDA path the unpadded tensor is handed over as is: no padded host copy per conv. */
+        static int nopad = -1;
+        if (nopad < 0) nopad = getenv("PT_V21_CONV_NOPAD") ? atoi(getenv("PT_V21_CONV_NOPAD")) : 1;
+        int unpadded = nopad && c->use_cuda && pt_v21_conv_pads_in_kernel(c);
+        float *xp;
+        if (unpadded) {
+          xp = (float *) X->p;
+          ldxp = T;
+          c->conv_pad_in = pad;
+        } else {
+          c->conv_pad_in = -1;
+          xp = (float *) aligned_alloc(64, xpad_bytes);
+          memset(xp, 0, xpad_bytes);
+          for (int64_t b = 0; b < N; b++)
+            for (int ci = 0; ci < cin; ci++)
+              memcpy(xp + ((int64_t) b * cin + ci) * ldxp + pad,
+                     (const float *) X->p + ((int64_t) b * cin + ci) * T, (size_t) (T * 4));
+        }
         int64_t ybytes = (size_t) ((((size_t) N * cout4 * Tout) * 4 + 63) & ~(size_t) 63);
         float *yp = cout4 == cout ? (float *) out[0]->p
                                   : (float *) aligned_alloc(64, ybytes);   /* Cout=1 layers pad to 4 */
@@ -2176,7 +2189,8 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
                    (size_t) (cout * Tout * 4));
           free(yp);
         }
-        free(xp);
+        if (!unpadded)
+          free(xp);
         c->t_conv += pt_v21_now() - t0;
         break;
       }

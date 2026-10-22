@@ -92,6 +92,14 @@ static int weights_upload(pt_ctx *c, int verbose) {
   return 0;
 }
 
+int pt_v21_conv_pads_in_kernel(pt_ctx *c) {
+  /* only when the GEMM kernel takes *every* conv (PT_V21_IG_MINT unset or 0): the other kernels
+   * read the padded row layout */
+  (void) c;
+  const char *e = getenv("PT_V21_IG_MINT");
+  return !e || atol(e) == 0;
+}
+
 double pt_v21_cuda_weights_mib(pt_ctx *c) { (void) c; return (double) (g_wdev_bytes >> 20); }
 
 static void *weight_ctab(int idx) {
@@ -341,7 +349,7 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig(
     const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
     float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
     const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
-    float ea1) {
+    float ea1, int64_t pad_in) {
   __shared__ float4 Ws[IG_RK][16];
   __shared__ float4 Xs[IG_RK][16];   /* [r][column quad] */
   const int tid = threadIdx.x;
@@ -370,12 +378,25 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig(
     float4 xv = make_float4(0.f, 0.f, 0.f, 0.f);
     if (r < kc) {
       int k = r / cin, ci = r - k * cin;
-      const float *row = xb + (int64_t) ci * ldx + (int64_t) k * dil;
       int64_t tc = t0 + lq * 4;
-      if (tc + 0 < Tout) xv.x = row[(tc + 0) * stride];
-      if (tc + 1 < Tout) xv.y = row[(tc + 1) * stride];
-      if (tc + 2 < Tout) xv.z = row[(tc + 2) * stride];
-      if (tc + 3 < Tout) xv.w = row[(tc + 3) * stride];
+      if (pad_in < 0) {
+        const float *row = xb + (int64_t) ci * ldx + (int64_t) k * dil;
+        if (tc + 0 < Tout) xv.x = row[(tc + 0) * stride];
+        if (tc + 1 < Tout) xv.y = row[(tc + 1) * stride];
+        if (tc + 2 < Tout) xv.z = row[(tc + 2) * stride];
+        if (tc + 3 < Tout) xv.w = row[(tc + 3) * stride];
+      } else {
+        /* unpadded row of length ldx: positions outside [0, ldx) are the zero padding */
+        const float *row = xb + (int64_t) ci * ldx;
+        int64_t s0 = tc * stride + (int64_t) k * dil - pad_in;
+        if (tc + 0 < Tout && s0 >= 0 && s0 < ldx) xv.x = row[s0];
+        int64_t s1 = s0 + stride;
+        if (tc + 1 < Tout && s1 >= 0 && s1 < ldx) xv.y = row[s1];
+        int64_t s2 = s1 + stride;
+        if (tc + 2 < Tout && s2 >= 0 && s2 < ldx) xv.z = row[s2];
+        int64_t s3 = s2 + stride;
+        if (tc + 3 < Tout && s3 >= 0 && s3 < ldx) xv.w = row[s3];
+      }
     }
     Xs[lr][lq] = xv;
     __syncthreads();
@@ -493,7 +514,7 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     dim3 gig((unsigned) ((Tout + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
     pt_conv_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1);
+        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
   } else if (wsm) {
     pt_conv_kernel_wsm<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,

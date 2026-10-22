@@ -132,6 +132,7 @@ struct pt_ctx {
   void *g_arena;     /* resident device arena base (M3) */
   void *g_stream;    /* per-stream CUDA stream so concurrent requests actually overlap (M3) */
   size_t g_arena_bytes, g_arena_used;
+  int64_t conv_pad_in;   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
 };
 
 
@@ -181,6 +182,8 @@ int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_
                      const float *bias, int64_t batch, int wtab, int btab);
 /* MiB of resident container weights on the GPU (shared by all streams in the process) */
 double pt_v21_cuda_weights_mib(pt_ctx *c);
+/* 1 when the CUDA conv path takes unpadded inputs (the GEMM kernel pads in-kernel) */
+int pt_v21_conv_pads_in_kernel(pt_ctx *c);
 int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda,
                       const float *B, int64_t ldb, int64_t nn, float *C, int64_t ldc);
 
