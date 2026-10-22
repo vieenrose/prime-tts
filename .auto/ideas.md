@@ -67,6 +67,16 @@ without evidence from a packing-aware measurement, not a single-stream model.
   is the slowest stream, which waited for all weights) and needs per-layer upload ordering + events
   in the same race zone. Secondary-only gain for correctness risk: rejected.
 
+## Killed by analysis #8 (run 92): arena suballoc, pinned host arena, ctx duplication
+- **Arena suballocation (1x32 MB carved 4 ways vs 4x8 MB cudaMalloc):** run 57 prices cudaMalloc at
+  ~0.3-0.8 ms each; 3 saved allocs ~= 1-2.5 ms wall. Below even matched-pair practicality.
+- **Pinned host arena (cudaMallocHost for the fp32 payloads):** would dodge run 77's extra staging
+  memcpy by converting directly into pinned memory. Killed by run 77's own numbers: they diagnose
+  the copy ENGINE at ~0.8 GB/s (direct 138 + staging memcpy ~22 = ~160 predicted vs 153 measured),
+  and unified memory has no separate DRAM to DMA between, so pinned uploads at the same 139 ms.
+- **Context-creation duplication:** would show as ~600 ms+ startup; measured ~400 ms with PHASE
+  showing waits not work. Later cudaFree(0) calls attach fast. Confirmed no duplication.
+
 ## Killed by analysis #8 (run 91): staggered stream starts + bar-semantics correction
 - **Staggered starts are pointless here, not just neutral.** Stream inference phases are ~1900 ms;
   natural offsets from serialized open are already ~25-100 ms. An artificial stagger D adds ~3D to
