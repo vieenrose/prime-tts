@@ -907,6 +907,26 @@ static int op_slice(pt_ctx *c, const pt_tv *A, const int64_t *starts, const int6
   for (int i = nd - 2; i >= 0; i--) si[i] = si[i + 1] * A->d[i + 1];
   so[nd - 1] = 1;
   for (int i = nd - 2; i >= 0; i--) so[i] = so[i + 1] * d[i + 1];
+  static int sfast = -1;
+  if (sfast < 0) sfast = getenv("PT_V21_SLICE_ROWS") ? atoi(getenv("PT_V21_SLICE_ROWS")) : 1;
+  if (sfast && nd >= 1 && sp[nd - 1] == 1 && O->n > 0) {
+    /* innermost axis is a unit-step range: every output row is one contiguous source run, so
+     * decode the row's offset once and copy the row with a single memcpy instead of a div/mod
+     * decode plus a 4-byte memcpy per element */
+    int64_t row = d[nd - 1];
+    int64_t nrows = O->n / row;
+    size_t rb = (size_t) (row * es);
+    for (int64_t ri = 0; ri < nrows; ri++) {
+      int64_t r = ri * row, oa = st[nd - 1];
+      for (int q = 0; q < nd - 1; q++) {
+        int64_t idx = r / so[q];
+        r %= so[q];
+        oa += (st[q] + idx * sp[q]) * si[q];
+      }
+      memcpy((char *) O->p + ri * rb, (const char *) A->p + oa * es, rb);
+    }
+    return 0;
+  }
   for (int64_t i = 0; i < O->n; i++) {
     int64_t r = i, oa = 0;
     for (int q = 0; q < nd; q++) {
