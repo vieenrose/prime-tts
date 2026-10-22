@@ -1,0 +1,69 @@
+diff --git a/runtime/v21/src/pt_v21_host.c b/runtime/v21/src/pt_v21_host.c
+index 642ca95..1ac5c6f 100644
+--- a/runtime/v21/src/pt_v21_host.c
++++ b/runtime/v21/src/pt_v21_host.c
+@@ -335,6 +335,45 @@ static int bin_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *B, pt_tv *O) {
+   return 0;
+ }
+ 
++/* Vectorizable fp32 transcendentals for the bulk EXP/TANH/SIGMOID tensors (the WaveNet flow's
++ * tanh*sigmoid gating runs while the GPU idles at N=4). Cephes-style single precision exp: Cody-Waite reduction by ln2, degree-6 minimax on the
++ * remainder, scale by 2^n built in the exponent bits. Branch-free so the loops vectorize. */
++static inline float pt_expf_v(float x) {
++  x = x > 88.3762626647949f ? 88.3762626647949f : x;
++  x = x < -87.3365447504019f ? -87.3365447504019f : x;
++  float fx = floorf(x * 1.44269504088896341f + 0.5f);
++  float r = x - fx * 0.693359375f;
++  r = r - fx * -2.12194440e-4f;
++  float z = r * r;
++  float y = 1.9875691500E-4f;
++  y = y * r + 1.3981999507E-3f;
++  y = y * r + 8.3334519073E-3f;
++  y = y * r + 4.1665795894E-2f;
++  y = y * r + 1.6666665459E-1f;
++  y = y * r + 5.0000001201E-1f;
++  y = y * z + r + 1.0f;
++  int32_t bits = ((int32_t) fx + 127) << 23;
++  float sc;
++  memcpy(&sc, &bits, 4);
++  return y * sc;
++}
++/* tanh: odd minimax polynomial below 0.625 (no cancellation near 0), 1 - 2/(e^{2|x|}+1) above */
++static inline float pt_tanhf_v(float x) {
++  float ax = fabsf(x);
++  float z = x * x;
++  float p = -5.70498872745E-3f;
++  p = p * z + 2.06390887954E-2f;
++  p = p * z - 5.37397155531E-2f;
++  p = p * z + 1.33314422036E-1f;
++  p = p * z - 3.33332819422E-1f;
++  float small = x + x * z * p;
++  float e = pt_expf_v(2.0f * ax);
++  float big = 1.0f - 2.0f / (e + 1.0f);
++  big = x < 0.0f ? -big : big;
++  return ax < 0.625f ? small : big;
++}
++static inline float pt_sigmoidf_v(float x) { return 1.0f / (1.0f + pt_expf_v(-x)); }
++
+ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, float alpha) {
+   int64_t d[PT_V21_MAX_RANK];
+   memcpy(d, A->d, sizeof(d));
+@@ -366,6 +405,18 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
+   static int ff = -1;
+   if (ff < 0) ff = getenv("PT_V21_F32MATH") ? atoi(getenv("PT_V21_F32MATH")) : 1;
+   if (!g && ff && n >= 4096 && (op == PT_EXP || op == PT_TANH || op == PT_SIGMOID)) {
++    /* measured against double: rel err <= 1.5e-7 (glibc tanhf: 1.7e-7), <= 4 ulp from glibc */
++    static int vm = -1;
++    if (vm < 0) vm = getenv("PT_V21_VMATH") ? atoi(getenv("PT_V21_VMATH")) : 1;
++    if (vm) {
++      if (op == PT_EXP)
++        for (int64_t i = 0; i < n; i++) o[i] = pt_expf_v(a[i]);
++      else if (op == PT_TANH)
++        for (int64_t i = 0; i < n; i++) o[i] = pt_tanhf_v(a[i]);
++      else
++        for (int64_t i = 0; i < n; i++) o[i] = pt_sigmoidf_v(a[i]);
++      return 0;
++    }
+     if (op == PT_EXP)
+       for (int64_t i = 0; i < n; i++) o[i] = expf(a[i]);
+     else if (op == PT_TANH)

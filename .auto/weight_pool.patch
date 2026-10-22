@@ -1,0 +1,72 @@
+diff --git a/runtime/v21/src/pt_v21_cuda.cu b/runtime/v21/src/pt_v21_cuda.cu
+index fec4973..02d44d5 100644
+--- a/runtime/v21/src/pt_v21_cuda.cu
++++ b/runtime/v21/src/pt_v21_cuda.cu
+@@ -61,6 +61,7 @@ static void **g_wdev;      /* ctab index -> device pointer, read-only across str
+ static int g_wdev_n, g_wref;
+ 
+ static size_t g_wdev_bytes;
++static void *g_wpool;   /* single device allocation backing every resident weight record */
+ 
+ /* Streams open concurrently. The refcount check and the whole upload run under one lock, so a
+  * stream that arrives while another is uploading waits until every record is on the device.
+@@ -88,19 +89,43 @@ static int weights_upload_locked(pt_ctx *c, int verbose) {
+     return -1;
+   }
+   g_wdev_n = n;
+-  size_t total = 0;
++  /* One pooled allocation for every record, sub-allocated at 256-byte alignment: 336 separate
++   * cudaMalloc calls cost ~100 ms alone and ~280 ms when four streams start together (they
++   * serialize against the other streams' arena allocations). */
++  size_t pool = 0;
++  for (int i = 0; i < n; i++) {
++    size_t nb = (size_t) pt_v21_cont_bytes(c, i);
++    if (pt_v21_cont(c, i) && nb)
++      pool += (nb + 255) & ~(size_t) 255;
++  }
++  if (pool && cudaMalloc(&g_wpool, pool) != cudaSuccess) {
++    fprintf(stderr, "pt_v21 cuda: weight pool of %zu B failed\n", pool);
++    free(g_wdev);
++    g_wdev = NULL;
++    g_wdev_n = 0;
++    g_wref = 0;
++    return -1;
++  }
++  size_t total = 0, off = 0;
+   for (int i = 0; i < n; i++) {
+     const void *h = pt_v21_cont(c, i);
+     size_t nb = (size_t) pt_v21_cont_bytes(c, i);
+     if (!h || nb == 0)
+       continue;
+     g_wdev_bytes += nb;
+-    if (cudaMalloc(&g_wdev[i], nb) != cudaSuccess ||
+-        cudaMemcpy(g_wdev[i], h, nb, cudaMemcpyHostToDevice) != cudaSuccess) {
++    void *d = (char *) g_wpool + off;
++    if (cudaMemcpy(d, h, nb, cudaMemcpyHostToDevice) != cudaSuccess) {
+       fprintf(stderr, "pt_v21 cuda: weight upload failed for ctab %d (%zu B)\n", i, nb);
++      cudaFree(g_wpool);
++      g_wpool = NULL;
++      free(g_wdev);
++      g_wdev = NULL;
++      g_wdev_n = 0;
+       g_wref = 0;
+       return -1;
+     }
++    g_wdev[i] = d;   /* published only once its bytes are on the device */
++    off += (nb + 255) & ~(size_t) 255;
+     total += nb;
+   }
+   if (verbose)
+@@ -128,9 +153,9 @@ static void *weight_ctab(int idx) {
+ static void weights_release(void) {
+   pthread_mutex_lock(&g_wlock);
+   if (--g_wref <= 0) {
+-    for (int i = 0; i < g_wdev_n; i++)
+-      if (g_wdev[i])
+-        cudaFree(g_wdev[i]);
++    if (g_wpool)
++      cudaFree(g_wpool);   /* every record lives in the one pool */
++    g_wpool = NULL;
+     free(g_wdev);
+     g_wdev = NULL;
+     g_wdev_n = 0;

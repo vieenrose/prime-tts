@@ -5,11 +5,14 @@
 CC      ?= gcc
 NVCC    ?= /usr/local/cuda/bin/nvcc
 PY      ?= .venv/bin/python
-CFLAGS  ?= -O2 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
+# -O3: gcc 8 only auto-vectorizes at -O3 (-ftree-vectorize); the interpreter's elementwise fast
+# paths (bin_op, un_op, slice/pad/transpose rows) rely on it for NEON on the A57. No fast-math:
+# fp semantics are unchanged and float reductions are not reassociated.
+CFLAGS  ?= -O3 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 CUF     ?= -O3 -arch=sm_53 -std=c++11
 CUDA    ?= /usr/local/cuda
 GEN      = runtime/v21/gen/pt_graph.c
-HDR      = runtime/v21/src/pt_v21.h runtime/v21/gen/pt_graph_tab.h
+HDR      = runtime/v21/src/pt_v21.h runtime/v21/gen/pt_graph_tab.h runtime/v21/Makefile   # flag changes rebuild
 SRC      = runtime/v21/src/pt_v21_host.c runtime/v21/src/main_v21.c
 INC      = -Iruntime/v21/src -Iruntime/v21/gen
 
