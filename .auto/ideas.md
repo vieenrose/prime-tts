@@ -1,6 +1,6 @@
 # Ideas backlog (v2.1 Nano latency)
 
-## SESSION STATUS (run 125): converged -- see 'Convergence ledger' at the end for the full record
+## SESSION STATUS (run 272): converged -- see 'Convergence ledger' at the end for the full record
 - Best: **n4_wall 2288 ms** (cluster 2288-2375 over 30+ official draws, mean ~2335, stdev ~1.7%,
   zero drift, draws independent). Baseline was 9900 ms: **4.3x faster**.
 - Runs 118-125 (no code changes except run 120's 1-word CONVLOG label fix): box-parity
@@ -9,13 +9,18 @@
   conv dispatch audit (122 ig8 + 2 wsm, plain kernel intentionally retained as bisection
   fallback), pesi health re-check (2341, headroom stable-low), disk hygiene (all clean),
   T120/sid1 re-verification (identical SNDR, no drift).
+- Runs 270-272: ledger draws; pesi health re-check -- parity identical (2414, SNDR 70.09) but
+  min_free 66 MB = the guard boundary (co-tenant growth, not our code); arena 8->4 MiB killed
+  (see 'Killed by measurement #9'), full per-stream memory map measured and banked.
 - Quality: per-node gate 0 over gate (unoptimized build) + SNDR 70.09 dB on all 5 cases, both
   boxes, both paths. Worst case sid1_T29/T120 at 67-68 dB (>= 60 gate).
 - What remains, all needing operator approval: (1) batch-4 lockstep driver; (2) full device
   residency + CUDA graphs (~190 ms ceiling at ~1.4 ms/MB, run 88); (3) server-mode weights;
   (4) Winograd F(2,3) on the K=3 convs (15% of MACs, ~2.25x fewer multiplies there, ~80-130 ms
   net — the only remaining GPU FLOP reduction, run 70 — but numerics-changing, needs the
-  per-node gate + a new kernel family + dispatch, i.e. project-scale, run 135).
+  per-node gate + a new kernel family + dispatch, i.e. project-scale, run 135); (5) NEW run 272 --
+  per-record host liveness for the 84 MiB container copy (weight records feed only the one-time
+  upload): the only real memory lever, now important because pesi bottoms at 66 MB free in N=4.
 - Everything else: banked, falsified with data/bounds, or explicitly out of bounds (see kill
   sections below). Next single-experiment step, if any: none with positive risk-adjusted EV.
   Recommended: autoresearch-finalize.
@@ -172,6 +177,24 @@ hidden STRUCTURALLY, not just empirically (this upgrades run 70's observation to
 reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only synchronized phases
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
+
+## Killed by measurement #9 (run 272): arena-size tuning + the real memory map
+Per-stream memory, measured with PT_V21_MEM on all 5 golden cases (N=1 and N=4, picard):
+host container_fp32 84 MiB SHARED across streams (one record pass), host activation_peak 2/5/10/15/4 MiB
+per stream (T20/T40/T81/T120/sid1_T29), device weights 110 MiB SHARED (one upload), device arena
+HIGH-WATER 0/0/1/2/0 MiB (allocated 8), `dev_bytes_stray` is a cumulative traffic counter, NOT a live
+footprint (do not read 60 MiB as memory).
+Shrinking the arena 8 -> 4 MiB (2x margin over the worst case): order-alternating 4 pairs (8 runs):
+arena8 mean 2349 vs arena4 2388 (no gain), min_free 1821 vs 1825 MB (+4 MB, not the expected +16):
+Tegra CUDA suballocates from a lazily-grown heap pool, so arena size does not convert to system RAM.
+Arena tuning CLOSED. The only real footprint lever left is per-record host liveness (84 MiB container
+copy whose weight records are needed only for the one-time upload) -- project-scale, #55/#56 lock zone.
+Memory context: pesi min_free is now 66 MB during an N=4 run (767 MB at session start, 82-90 MB in
+run 127) from co-tenant growth; picard is healthy (1820-2043 MB). Headroom, not latency, is the
+binding constraint on pesi.
+METHOD NOTE (run 272): the 1st run of an A/B pair is ~30-50 ms faster (clock/thermal asymmetry). A
+fixed-order harness produced a spurious -146 ms for arena=4; ALWAYS alternate pair order (session
+rule, re-proved).
 
 ## Dispatch audit (run 121): the plain conv kernel is intentionally retained
 All 124 T81 convs dispatch as: 122x ig8 (GEMM 4x8 tile), 2x wsm (narrow: cout=1 final
