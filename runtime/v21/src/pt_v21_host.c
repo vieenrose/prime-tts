@@ -1143,6 +1143,39 @@ static int op_einsum(pt_ctx *c, const char *eq, const pt_tv *A, const pt_tv *B, 
   }
   if (nO > PT_V21_MAX_RANK) return -1;
   if (tv_alloc(c, O, DT_F32, dO, nO) < 0) return -1;
+  /* Batched-matmul einsum: A = a0 a1 a2, B = a1 a3, O = a0 a3 a2 (v2.1's iSTFT basis contraction
+   * is exactly `bkt,kn->bnt`). The generic path below walks the letter product space with a
+   * modulo-decode per element, which cost 377 ms for 231k FMAs - two calls, the single biggest
+   * non-GPU item in a stream. This path is the plain b-k-n-t loop with the innermost index
+   * contiguous in both A and the output, and it keeps the same summation order (the summed index
+   * ascends, in double, into a scratch row) so the result is bit-identical. */
+  if (nA == 3 && nB == 2 && nO == 3 && sB[0] == sA[1] && sO[0] == sA[0] && sO[1] == sB[1] &&
+      sO[2] == sA[2] && sA[0] != sA[1] && sA[1] != sA[2] && sA[0] != sA[2] && B->dt == DT_F32) {
+    int64_t Bb = dA[0], K = dA[1], T = dA[2], N = dB[1];
+    const float *pa = (const float *) A->p, *pb = (const float *) B->p;
+    float *po = (float *) O->p;
+    double *acc = (double *) malloc((size_t) N * T * sizeof(double) + 64);
+    if (acc) {
+      for (int64_t b = 0; b < Bb; b++) {
+        for (int64_t i = 0; i < N * T; i++) acc[i] = 0.0;
+        for (int64_t k = 0; k < K; k++) {
+          const float *arow = pa + (b * K + k) * T;
+          for (int64_t n = 0; n < N; n++) {
+            double bv = (double) pb[k * N + n];
+            if (bv == 0.0) continue;
+            double *an = acc + n * T;   /* each (b,n) output row has its own k-sum */
+            for (int64_t t = 0; t < T; t++) an[t] += bv * (double) arow[t];
+          }
+        }
+        for (int64_t n = 0; n < N; n++) {
+          float *orow = po + (b * N + n) * T;
+          for (int64_t t = 0; t < T; t++) orow[t] = (float) acc[n * T + t];
+        }
+      }
+      free(acc);
+      return 0;   /* the generic letter-space loop below would redo the same work */
+    }
+  }
   /* strides for A/B per letter index */
   int64_t stA[16] = {0}, stB[16] = {0}, stO[16] = {0};
   stA[nA - 1] = 1;
