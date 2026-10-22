@@ -174,6 +174,19 @@ Conv activations move 67.5 MB out + 63.2 MB in per stream, but at the ramped clo
 ~3 GB/s (the 63.2 MB shows up as the 21 ms `copy` split), so all PCIe traffic is only ~43 ms of the
 ~380 ms GPU block. Transfers are NOT a lever; the GPU compute (34.9 GFLOP at ~44% of fp32 peak) is.
 
+## GPU saturation trace (run 87): no idle left during inference
+`nvprof` cannot hook on this box ("No kernels were profiled", twice -- Tegra/CUPTI limitation, do
+not retry). Fallback that worked: sampling `/sys/.../57000000.gpu/load` + `cur_freq` at ~30 ms
+during an N=4 run (80 samples over 2.66 s). Result: 12 low-load samples, ALL in the first ~0.8 s
+(startup, expected); 58/58 inference-window samples show load >= 200, mostly 700-999. The GPU is
+essentially saturated for the whole inference phase -- there is no idle time for a scheduler to
+reclaim. Correction to the run-79 note: per-stream cost falls with N (better statistical
+multiplexing of tails), but at N=4 the SMs are already full; the remaining per-stream overhead is
+congestion/throughput (kernels at local optima), not schedulable idle. The ~250 ms "packing
+ceiling" was a model artifact -- the measured ceiling is ~0. Do not propose graphs/full-residency
+for idle-reclamation; its only remaining argument would be launch overhead (~1-2 ms), which is
+far below bar.
+
 ## Scaling probe (run 79): the wall is GPU-total, and packing improves with N
 N=1 inference-only 638 ms (= 583 graph + ~55 SNDR/close; open/cuda are before t0) vs N=2 wall 1551
 (slowest 1139) vs N=4 wall ~2330 (slowest ~1920) vs N=8 wall 3961. Per-stream wall cost (wall-400)/N:
