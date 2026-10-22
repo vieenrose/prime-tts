@@ -44,6 +44,16 @@ tail waste but a much slower per-element rate (0.66 vs 0.88 effective -- ig8 sti
 Tout to 128 and trimming needs padded intermediates that break the conv->conv chain. Do not pursue
 without evidence from a packing-aware measurement, not a single-stream model.
 
+## Killed by analysis #7 (run 86): parallel record pass + N=1 upload/inference overlap
+- **Parallel record pass (per-record claiming instead of the open_lock).** The ~99 ms serialized pass
+  moves ~165 MB (84 MB memcpy + 27 MB fp16 reads + 54 MB LUT writes): bandwidth floor ~33 ms + loop
+  overhead ~10 ms, so even perfect 4-way claiming saves ~54 ms wall -- below the ~93 ms bar and
+  unconfirmable, while replacing the coarse lock that fixed run #56 with fine-grained claiming in
+  the exact #55-race zone (double-convert leaks, refcount skew). Rejected on size AND risk.
+- **Overlapping stream-0 early inference with the upload tail.** Saves ~50 ms of N=1 only (the wall
+  is the slowest stream, which waited for all weights) and needs per-layer upload ordering + events
+  in the same race zone. Secondary-only gain for correctness risk: rejected.
+
 ## Killed by measurement #6 (run 82): pre-faulting the container mmap
 `MAP_POPULATE` (+`WILLNEED`, env-gated `PT_V21_POPULATE`, page cache hot post-rsync) on the 111 MB
 container mapping. Record-pass+map, alternating 3 pairs: 99.0/98.7/99.2 vs 101.9/102.1/101.0 --
