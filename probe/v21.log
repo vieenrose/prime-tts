@@ -1,0 +1,35 @@
+total MACs: 19605461409 ( 19.605 GMAC )
+output shapes: [('wav', [1, 1, 52992])]
+top ops by MAC:
+   Conv                    16046.3 M
+   ConvTranspose            3479.9 M
+   MatMul                     51.6 M
+   LeakyRelu                  10.9 M
+   Add                        10.0 M
+   Mul                         3.1 M
+   Div                         0.8 M
+   Tanh                        0.6 M
+   Sigmoid                     0.6 M
+   Relu                        0.4 M
+   Exp                         0.2 M
+   Sin                         0.2 M
+top nodes:
+   ConvTranspose     1736.4M [1, 256, 828]                /dec/ups.0/ConvTranspose
+   ConvTranspose     1736.4M [1, 128, 3312]               /dec/ups.1/ConvTranspose
+   Conv               596.9M [1, 256, 828]                /dec/resblocks.2/convs1.0/Conv
+   Conv               596.9M [1, 256, 828]                /dec/resblocks.2/convs2.0/Conv
+   Conv               596.9M [1, 256, 828]                /dec/resblocks.2/convs1.1/Conv
+   Conv               596.9M [1, 256, 828]                /dec/resblocks.2/convs2.1/Conv
+   Conv               596.9M [1, 256, 828]                /dec/resblocks.2/convs1.2/Conv
+   Conv               596.9M [1, 256, 828]                /dec/resblocks.2/convs2.2/Conv
+   Conv               596.9M [1, 128, 3312]               /dec/resblocks.5/convs1.0/Conv
+   Conv               596.9M [1, 128, 3312]               /dec/resblocks.5/convs2.0/Conv
+   Conv               596.9M [1, 128, 3312]               /dec/resblocks.5/convs1.1/Conv
+   Conv               596.9M [1, 128, 3312]               /dec/resblocks.5/convs2.1/Conv
+   Conv               596.9M [1, 128, 3312]               /dec/resblocks.5/convs1.2/Conv
+   Conv               596.9M [1, 128, 3312]               /dec/resblocks.5/convs2.2/Conv
+   Conv               379.8M [1, 256, 828]                /dec/resblocks.1/convs1.0/Conv
+   Conv               379.8M [1, 256, 828]                /dec/resblocks.1/convs2.0/Conv
+   Conv               379.8M [1, 256, 828]                /dec/resblocks.1/convs1.1/Conv
+   Conv               379.8M [1, 256, 828]                /dec/resblocks.1/convs2.1/Conv
+dumped 4071 tensors to probe/v21

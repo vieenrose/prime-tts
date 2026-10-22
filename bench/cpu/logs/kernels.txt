@@ -1,0 +1,23 @@
+# bench_cpu: PrimeTTS v1b_8k on 4 cores, model load 14.7 ms, 6 requests
+
+## kernels: conv path GFLOP/s (fp32, epilogue included)
+
+| layer shape | n cols | 4x16, 1 thr | 8x12, 1 thr, no packing | 8x12 + packing K=1 only, 1 thr | 8x12 + packing incl. K>1 (default), 4 thr | **8x12 + packing incl. K>1 (default), 1 thr** |
+|---|---|---|---|---|---|---|
+| voc stage0 resblock conv 48x48 K11 d5 +snake | 1200 | 6.67 | 6.60 | 6.68 | 21.22 | **7.28** |
+| voc stage0 resblock conv 48x48 K3 d1 | 1200 | 6.65 | 6.76 | 6.74 | 23.11 | **7.82** |
+| voc stage1 resblock conv 24x24 K7 d3 +snake | 4400 | 6.52 | 6.68 | 6.62 | 21.28 | **6.62** |
+| voc stage2 resblock conv 12x12 K11 d1 | 8400 | 8.98 | 8.61 | 8.70 | 26.95 | **8.63** |
+| voc stage3 resblock conv 6x6 K7 d3 +snake | 16500 | 4.31 | 4.27 | 4.36 | 13.12 | **4.39** |
+| voc ups0 (8 phases) 384x96 K2 | 150 | 6.36 | 6.62 | 6.63 | 20.16 | **8.18** |
+| voc conv_pre 96x80 K7 +snake | 150 | 6.56 | 6.59 | 6.59 | 14.12 | **7.36** |
+| dec ff0 504x168 (linear) +silu | 500 | 4.42 | 4.55 | 6.28 | 19.46 | **6.28** |
+| dec ff3 168x504 (linear) | 500 | 4.84 | 4.57 | 7.39 | 17.19 | **7.39** |
+| dec gru input proj 504x168 | 500 | 5.37 | 5.53 | 8.26 | 24.48 | **8.25** |
+| dec postnet 168x168 K5 +tanh | 500 | 5.19 | 5.39 | 5.39 | 16.28 | **6.90** |
+| enc ff0 672x168 (linear, T=40) | 40 | 4.39 | 4.27 | 5.52 | 15.67 | **5.52** |
+
+micro-kernel, operands L1-resident (nk=256): k4x16 9.64 GFLOP/s, k8x12 9.10 GFLOP/s (A57 peak 8 flop/cycle = 11.8 GFLOP/s at 1.479 GHz)
+activations (16K elements, in L1): snake 212 Melem/s  silu 85 Melem/s  tanh 57 Melem/s  
+
+peak RSS (VmHWM): 24.5 MB

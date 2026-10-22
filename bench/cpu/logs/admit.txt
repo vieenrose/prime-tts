@@ -1,0 +1,23 @@
+# bench_cpu: PrimeTTS v1b_8k on 4 cores, model load 5.8 ms, 6 requests
+
+## single stream, 1 thread (chunks: 3 frames first, doubling to 32 frames)
+
+| request | phones | audio s | synth s (best of 3) | RTF | mel ready ms | first chunk ms | non-streamed synth s | streaming overhead |
+|---|---|---|---|---|---|---|---|---|
+| zh_greeting | 21 | 2.61 | 0.483 | 0.185 | 118.4 | 139.4 | 0.488 | -1.0% |
+| en_thanks | 19 | 1.55 | 0.301 | 0.194 | 79.1 | 99.6 | 0.300 | +0.4% |
+| mix_booking | 24 | 2.38 | 0.444 | 0.186 | 110.8 | 131.4 | 0.449 | -1.1% |
+| zh_phone_sid1 | 29 | 2.21 | 0.418 | 0.189 | 107.9 | 128.7 | 0.421 | -0.8% |
+| random_T90 | 90 | 8.48 | 1.539 | 0.182 | 388.8 | 409.7 | 1.629 | -5.5% |
+| random_T23 | 23 | 2.26 | 0.419 | 0.186 | 103.0 | 123.7 | 0.423 | -1.0% |
+| **all** | | 19.49 | 3.605 | **0.185** | | | | |
+
+stream arena: 11.9 MB (limits 400 phones / 1000 frames = 16 s)
+
+## admission policy: capacity 5.41 audio-s/s per core (1 / single-stream RTF 0.185), safety 0.85, max 8 streams; 16 requests arriving every 100 ms
+
+| N cap | requests | audio s | wall s | audio-s per wall-s | mean RTF/request | max RTF | mean first-chunk ms | max first-chunk ms | worst lateness ms | max queue wait ms | ok |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 8 | 16 | 54.3 | 3.67 | **14.79** | 0.345 | 0.478 | 361 | 931 | +1 | 245 | 16/16 |
+
+peak RSS (VmHWM): 77.0 MB

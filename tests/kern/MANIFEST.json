@@ -1,0 +1,15 @@
+{
+ "conv_cases": [
+  "conv_dec_point",
+  "conv_dec_ff0",
+  "conv_dec_ff3_res",
+  "conv_refiner0",
+  "conv_postnet0",
+  "conv_voc_s0_k11d5",
+  "conv_voc_s0_k7d1_res",
+  "conv_voc_s1_k7d3",
+  "conv_voc_s2_k11d1",
+  "conv_voc_s3_k3d5_res",
+  "conv_post"
+ ]
+}

@@ -1,0 +1,3820 @@
+{
+ "model": "model/v1b_8k/vocoder.onnx",
+ "feed_shapes": {
+  "mel": [
+   1,
+   80,
+   81
+  ]
+ },
+ "total_macs": 621946236,
+ "top_nodes": [
+  {
+   "op": "ConvTranspose",
+   "name": "/ups.0/ConvTranspose",
+   "macs": 47775744,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "ConvTranspose",
+   "name": "/ups.1/ConvTranspose",
+   "macs": 23887872,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.2/convs1.0/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.2/convs2.0/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.2/convs1.1/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.2/convs2.1/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.2/convs1.2/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.2/convs2.2/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.5/convs1.0/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.5/convs2.0/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.5/convs1.1/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.5/convs2.1/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.5/convs1.2/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.5/convs2.2/Conv",
+   "macs": 16422912,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.1/convs1.0/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.1/convs2.0/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.1/convs1.1/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.1/convs2.1/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.1/convs1.2/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.1/convs2.2/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.4/convs1.0/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.4/convs2.0/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.4/convs1.1/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.4/convs2.1/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.4/convs1.2/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.4/convs2.2/Conv",
+   "macs": 10450944,
+   "out_shape": [
+    1,
+    24,
+    2592
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.8/convs1.0/Conv",
+   "macs": 8211456,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.8/convs2.0/Conv",
+   "macs": 8211456,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.8/convs1.1/Conv",
+   "macs": 8211456,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.8/convs2.1/Conv",
+   "macs": 8211456,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.8/convs1.2/Conv",
+   "macs": 8211456,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.8/convs2.2/Conv",
+   "macs": 8211456,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "ConvTranspose",
+   "name": "/ups.2/ConvTranspose",
+   "macs": 5971968,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.7/convs1.0/Conv",
+   "macs": 5225472,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.7/convs2.0/Conv",
+   "macs": 5225472,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.7/convs1.1/Conv",
+   "macs": 5225472,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.7/convs2.1/Conv",
+   "macs": 5225472,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.7/convs1.2/Conv",
+   "macs": 5225472,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.7/convs2.2/Conv",
+   "macs": 5225472,
+   "out_shape": [
+    1,
+    12,
+    5184
+   ]
+  },
+  {
+   "op": "Conv",
+   "name": "/resblocks.0/convs1.0/Conv",
+   "macs": 4478976,
+   "out_shape": [
+    1,
+    48,
+    648
+   ]
+  }
+ ],
+ "by_group": {
+  "resblocks.5": 100590624,
+  "resblocks.2": 99564480,
+  "resblocks.4": 64758816,
+  "resblocks.1": 63732672,
+  "resblocks.8": 51321744,
+  "ups.0": 47775744,
+  "resblocks.7": 33405840,
+  "resblocks.3": 28927008,
+  "resblocks.0": 27900864,
+  "resblocks.11": 26687304,
+  "ups.1": 23887872,
+  "resblocks.10": 17729352,
+  "resblocks.6": 15489936,
+  "resblocks.9": 8771400,
+  "ups.2": 5971968,
+  "ups.3": 2985984,
+  "conv_post": 435456,
+  "up_acts.2": 311088,
+  "up_acts.3": 311064,
+  "post_act": 311052,
+  "up_acts.1": 155616,
+  "Add_3": 62208,
+  "Add_4": 62208,
+  "Add_5": 62208,
+  "Div_1": 62208,
+  "Add_6": 62208,
+  "Add_7": 62208,
+  "Add_8": 62208,
+  "Div_2": 62208,
+  "Add_9": 62208,
+  "Add_10": 62208,
+  "Add_11": 62208,
+  "Div_3": 62208,
+  "up_acts.0": 39072,
+  "Add": 31104,
+  "Add_1": 31104,
+  "Add_2": 31104,
+  "Div": 31104,
+  "Tanh": 10368,
+  "conv_pre": 0
+ },
+ "op_macs": {
+  "Clip": 1806,
+  "Constant": 0,
+  "Pow": 4144608,
+  "Add": 6757344,
+  "Conv": 517757184,
+  "ConvTranspose": 80621568,
+  "Mul": 4144608,
+  "Tanh": 10368,
+  "Sin": 4144608,
+  "Exp": 1806,
+  "Div": 4362336
+ },
+ "shapes": {
+  "wav": [
+   1,
+   1,
+   10368
+  ],
+  "/conv_pre/Conv_output_0": [
+   1,
+   96,
+   81
+  ],
+  "/up_acts.0/Exp_output_0": [
+   1,
+   96,
+   1
+  ],
+  "/up_acts.0/Clip_output_0": [
+   1,
+   96,
+   1
+  ],
+  "/up_acts.0/Mul_output_0": [
+   1,
+   96,
+   81
+  ],
+  "/up_acts.0/Sin_output_0": [
+   1,
+   96,
+   81
+  ],
+  "/up_acts.0/Pow_output_0": [
+   1,
+   96,
+   81
+  ],
+  "/up_acts.0/Div_output_0": [
+   1,
+   96,
+   81
+  ],
+  "/up_acts.0/Add_output_0": [
+   1,
+   96,
+   81
+  ],
+  "/ups.0/ConvTranspose_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.0/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts1.0/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts1.0/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.0/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.0/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.0/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.0/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/convs1.0/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.0/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts2.0/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts2.0/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.0/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.0/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.0/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.0/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/convs2.0/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.1/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts1.1/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts1.1/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.1/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.1/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.1/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/convs1.1/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.1/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts2.1/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts2.1/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.1/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.1/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.1/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/convs2.1/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/Add_1_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.2/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts1.2/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts1.2/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.2/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.2/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.2/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts1.2/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/convs1.2/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.2/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts2.2/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.0/acts2.2/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.2/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.2/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.2/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/acts2.2/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/convs2.2/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.0/Add_2_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.0/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts1.0/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts1.0/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.0/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.0/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.0/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.0/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/convs1.0/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.0/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts2.0/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts2.0/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.0/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.0/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.0/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.0/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/convs2.0/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.1/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts1.1/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts1.1/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.1/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.1/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.1/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/convs1.1/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.1/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts2.1/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts2.1/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.1/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.1/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.1/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/convs2.1/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/Add_1_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.2/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts1.2/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts1.2/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.2/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.2/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.2/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts1.2/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/convs1.2/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.2/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts2.2/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.1/acts2.2/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.2/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.2/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.2/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/acts2.2/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/convs2.2/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.1/Add_2_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/Add_1_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.0/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts1.0/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts1.0/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.0/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.0/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.0/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.0/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/convs1.0/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.0/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts2.0/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts2.0/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.0/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.0/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.0/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.0/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/convs2.0/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.1/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts1.1/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts1.1/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.1/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.1/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.1/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/convs1.1/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.1/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts2.1/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts2.1/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.1/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.1/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.1/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/convs2.1/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/Add_1_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.2/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts1.2/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts1.2/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.2/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.2/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.2/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts1.2/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/convs1.2/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.2/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts2.2/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/resblocks.2/acts2.2/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.2/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.2/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.2/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/acts2.2/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/convs2.2/Conv_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/resblocks.2/Add_2_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/Add_2_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/up_acts.1/Exp_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/up_acts.1/Clip_output_0": [
+   1,
+   48,
+   1
+  ],
+  "/up_acts.1/Mul_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/up_acts.1/Sin_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/up_acts.1/Pow_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/up_acts.1/Div_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/up_acts.1/Add_output_0": [
+   1,
+   48,
+   648
+  ],
+  "/ups.1/ConvTranspose_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.0/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts1.0/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts1.0/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.0/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.0/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.0/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.0/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/convs1.0/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.0/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts2.0/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts2.0/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.0/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.0/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.0/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.0/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/convs2.0/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.1/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts1.1/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts1.1/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.1/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.1/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.1/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.1/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/convs1.1/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.1/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts2.1/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts2.1/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.1/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.1/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.1/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.1/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/convs2.1/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/Add_1_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.2/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts1.2/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts1.2/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.2/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.2/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.2/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts1.2/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/convs1.2/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.2/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts2.2/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.3/acts2.2/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.2/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.2/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.2/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/acts2.2/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/convs2.2/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.3/Add_2_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/Add_3_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.0/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts1.0/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts1.0/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.0/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.0/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.0/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.0/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/convs1.0/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.0/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts2.0/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts2.0/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.0/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.0/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.0/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.0/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/convs2.0/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.1/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts1.1/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts1.1/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.1/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.1/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.1/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.1/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/convs1.1/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.1/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts2.1/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts2.1/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.1/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.1/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.1/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.1/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/convs2.1/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/Add_1_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.2/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts1.2/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts1.2/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.2/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.2/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.2/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts1.2/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/convs1.2/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.2/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts2.2/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.4/acts2.2/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.2/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.2/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.2/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/acts2.2/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/convs2.2/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.4/Add_2_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/Add_4_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.0/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts1.0/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts1.0/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.0/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.0/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.0/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.0/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/convs1.0/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.0/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts2.0/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts2.0/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.0/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.0/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.0/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.0/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/convs2.0/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.1/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts1.1/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts1.1/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.1/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.1/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.1/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.1/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/convs1.1/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.1/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts2.1/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts2.1/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.1/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.1/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.1/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.1/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/convs2.1/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/Add_1_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.2/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts1.2/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts1.2/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.2/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.2/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.2/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts1.2/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/convs1.2/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.2/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts2.2/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/resblocks.5/acts2.2/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.2/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.2/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.2/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/acts2.2/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/convs2.2/Conv_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/resblocks.5/Add_2_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/Add_5_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/Div_1_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/up_acts.2/Exp_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/up_acts.2/Clip_output_0": [
+   1,
+   24,
+   1
+  ],
+  "/up_acts.2/Mul_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/up_acts.2/Sin_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/up_acts.2/Pow_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/up_acts.2/Div_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/up_acts.2/Add_output_0": [
+   1,
+   24,
+   2592
+  ],
+  "/ups.2/ConvTranspose_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.0/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts1.0/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts1.0/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.0/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.0/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.0/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.0/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/convs1.0/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.0/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts2.0/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts2.0/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.0/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.0/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.0/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.0/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/convs2.0/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.1/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts1.1/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts1.1/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.1/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.1/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.1/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.1/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/convs1.1/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.1/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts2.1/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts2.1/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.1/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.1/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.1/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.1/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/convs2.1/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/Add_1_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.2/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts1.2/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts1.2/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.2/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.2/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.2/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts1.2/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/convs1.2/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.2/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts2.2/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.6/acts2.2/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.2/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.2/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.2/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/acts2.2/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/convs2.2/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.6/Add_2_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/Add_6_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.0/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts1.0/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts1.0/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.0/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.0/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.0/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.0/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/convs1.0/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.0/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts2.0/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts2.0/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.0/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.0/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.0/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.0/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/convs2.0/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.1/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts1.1/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts1.1/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.1/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.1/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.1/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.1/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/convs1.1/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.1/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts2.1/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts2.1/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.1/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.1/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.1/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.1/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/convs2.1/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/Add_1_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.2/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts1.2/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts1.2/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.2/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.2/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.2/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts1.2/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/convs1.2/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.2/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts2.2/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.7/acts2.2/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.2/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.2/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.2/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/acts2.2/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/convs2.2/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.7/Add_2_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/Add_7_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.0/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts1.0/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts1.0/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.0/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.0/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.0/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.0/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/convs1.0/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.0/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts2.0/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts2.0/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.0/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.0/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.0/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.0/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/convs2.0/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.1/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts1.1/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts1.1/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.1/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.1/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.1/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.1/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/convs1.1/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.1/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts2.1/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts2.1/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.1/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.1/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.1/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.1/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/convs2.1/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/Add_1_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.2/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts1.2/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts1.2/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.2/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.2/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.2/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts1.2/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/convs1.2/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.2/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts2.2/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/resblocks.8/acts2.2/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.2/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.2/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.2/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/acts2.2/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/convs2.2/Conv_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/resblocks.8/Add_2_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/Add_8_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/Div_2_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/up_acts.3/Exp_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/up_acts.3/Clip_output_0": [
+   1,
+   12,
+   1
+  ],
+  "/up_acts.3/Mul_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/up_acts.3/Sin_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/up_acts.3/Pow_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/up_acts.3/Div_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/up_acts.3/Add_output_0": [
+   1,
+   12,
+   5184
+  ],
+  "/ups.3/ConvTranspose_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.0/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts1.0/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts1.0/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.0/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.0/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.0/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.0/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/convs1.0/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.0/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts2.0/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts2.0/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.0/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.0/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.0/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.0/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/convs2.0/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.1/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts1.1/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts1.1/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.1/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.1/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.1/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.1/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/convs1.1/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.1/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts2.1/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts2.1/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.1/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.1/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.1/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.1/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/convs2.1/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/Add_1_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.2/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts1.2/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts1.2/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.2/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.2/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.2/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts1.2/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/convs1.2/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.2/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts2.2/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.9/acts2.2/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.2/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.2/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.2/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/acts2.2/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/convs2.2/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.9/Add_2_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/Add_9_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.0/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts1.0/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts1.0/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.0/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.0/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.0/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.0/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/convs1.0/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.0/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts2.0/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts2.0/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.0/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.0/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.0/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.0/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/convs2.0/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.1/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts1.1/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts1.1/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.1/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.1/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.1/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.1/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/convs1.1/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.1/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts2.1/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts2.1/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.1/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.1/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.1/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.1/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/convs2.1/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/Add_1_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.2/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts1.2/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts1.2/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.2/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.2/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.2/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts1.2/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/convs1.2/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.2/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts2.2/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.10/acts2.2/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.2/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.2/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.2/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/acts2.2/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/convs2.2/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.10/Add_2_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/Add_10_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.0/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts1.0/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts1.0/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.0/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.0/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.0/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.0/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/convs1.0/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.0/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts2.0/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts2.0/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.0/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.0/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.0/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.0/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/convs2.0/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.1/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts1.1/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts1.1/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.1/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.1/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.1/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.1/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/convs1.1/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.1/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts2.1/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts2.1/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.1/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.1/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.1/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.1/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/convs2.1/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/Add_1_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.2/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts1.2/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts1.2/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.2/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.2/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.2/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts1.2/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/convs1.2/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.2/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts2.2/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/resblocks.11/acts2.2/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.2/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.2/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.2/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/acts2.2/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/convs2.2/Conv_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/resblocks.11/Add_2_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/Add_11_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/Div_3_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/post_act/Exp_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/post_act/Clip_output_0": [
+   1,
+   6,
+   1
+  ],
+  "/post_act/Mul_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/post_act/Sin_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/post_act/Pow_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/post_act/Div_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/post_act/Add_output_0": [
+   1,
+   6,
+   10368
+  ],
+  "/conv_post/Conv_output_0": [
+   1,
+   1,
+   10368
+  ]
+ }
+}

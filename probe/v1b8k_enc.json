@@ -1,0 +1,1304 @@
+{
+ "model": "model/v1b_8k/acoustic_encoder.onnx",
+ "feed_shapes": {
+  "phone": [
+   1,
+   81
+  ],
+  "tone": [
+   1,
+   81
+  ],
+  "lang": [
+   1,
+   81
+  ],
+  "speaker": [
+   1
+  ]
+ },
+ "total_macs": 1648127,
+ "top_nodes": [
+  {
+   "op": "Add",
+   "name": "/encoder.0/ff/ff.0/Add",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.0/ff/ff.1/Sigmoid",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.0/ff/ff.1/Mul",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.1/ff/ff.0/Add",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.1/ff/ff.1/Sigmoid",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.1/ff/ff.1/Mul",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.2/ff/ff.0/Add",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.2/ff/ff.1/Sigmoid",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.2/ff/ff.1/Mul",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.3/ff/ff.0/Add",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.3/ff/ff.1/Sigmoid",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.3/ff/ff.1/Mul",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.4/ff/ff.0/Add",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.4/ff/ff.1/Sigmoid",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.4/ff/ff.1/Mul",
+   "macs": 54432,
+   "out_shape": [
+    1,
+    81,
+    672
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/Add",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/Add_1",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/Add_2",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/Mul",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "LayerNormalization",
+   "name": "/encoder.0/norm1/LayerNormalization",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.0/Sigmoid",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    168,
+    81
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.0/Mul_2",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    168,
+    81
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.0/Add_1",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "LayerNormalization",
+   "name": "/encoder.0/norm2/LayerNormalization",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.0/ff/ff.3/Add",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.0/Add_2",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.0/Mul_3",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "LayerNormalization",
+   "name": "/encoder.1/norm1/LayerNormalization",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.1/Sigmoid",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    168,
+    81
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.1/Mul_2",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    168,
+    81
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.1/Add_1",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "LayerNormalization",
+   "name": "/encoder.1/norm2/LayerNormalization",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.1/ff/ff.3/Add",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.1/Add_2",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.1/Mul_3",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "LayerNormalization",
+   "name": "/encoder.2/norm1/LayerNormalization",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "Sigmoid",
+   "name": "/encoder.2/Sigmoid",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    168,
+    81
+   ]
+  },
+  {
+   "op": "Mul",
+   "name": "/encoder.2/Mul_2",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    168,
+    81
+   ]
+  },
+  {
+   "op": "Add",
+   "name": "/encoder.2/Add_1",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  },
+  {
+   "op": "LayerNormalization",
+   "name": "/encoder.2/norm2/LayerNormalization",
+   "macs": 13608,
+   "out_shape": [
+    1,
+    81,
+    168
+   ]
+  }
+ ],
+ "by_group": {
+  "encoder.0": 272245,
+  "encoder.1": 272245,
+  "encoder.2": 272245,
+  "encoder.3": 272245,
+  "encoder.4": 272245,
+  "pitch_head": 54594,
+  "duration_head": 54513,
+  "energy_head": 34101,
+  "bright_head": 34101,
+  "Add": 13608,
+  "Add_1": 13608,
+  "Add_2": 13608,
+  "Mul": 13608,
+  "energy_proj": 13608,
+  "Add_3": 13608,
+  "bright_proj": 13608,
+  "Add_4": 13608,
+  "Clip": 81,
+  "Clip_1": 81,
+  "Cast": 81,
+  "Exp": 81,
+  "Sub": 81,
+  "Clip_2": 81,
+  "Clip_3": 81,
+  "Cast_1": 81,
+  "Clip_4": 81,
+  "Shape": 0,
+  "ConstantOfShape": 0,
+  "phone": 0,
+  "Constant": 0,
+  "tone": 0,
+  "Constant_1": 0,
+  "Constant_2": 0,
+  "lang": 0,
+  "speaker": 0,
+  "speaker_proj": 0,
+  "Constant_3": 0,
+  "Unsqueeze": 0,
+  "Constant_4": 0,
+  "Unsqueeze_1": 0
+ },
+ "op_macs": {
+  "Cast": 567,
+  "Gemm": 0,
+  "Constant": 0,
+  "Clip": 405,
+  "Round": 0,
+  "Add": 612770,
+  "Transpose": 0,
+  "Gather": 0,
+  "LayerNormalization": 190512,
+  "Shape": 0,
+  "Squeeze": 0,
+  "Conv": 0,
+  "Concat": 0,
+  "Mul": 462682,
+  "ConstantOfShape": 0,
+  "Div": 5,
+  "Exp": 81,
+  "Sigmoid": 381024,
+  "Slice": 0,
+  "Sub": 81,
+  "MatMul": 0,
+  "Unsqueeze": 0
+ },
+ "shapes": {
+  "conditioned": [
+   1,
+   81,
+   168
+  ],
+  "durations": [
+   1,
+   81
+  ],
+  "pitch": [
+   1,
+   81,
+   2
+  ],
+  "/ConstantOfShape_output_0": [
+   1,
+   81
+  ],
+  "/phone/Gather_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Clip_output_0": [
+   1,
+   81
+  ],
+  "/tone/Gather_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Clip_1_output_0": [
+   1,
+   81
+  ],
+  "/lang/Gather_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Add_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/speaker/Gather_output_0": [
+   1,
+   64
+  ],
+  "/speaker_proj/Gemm_output_0": [
+   1,
+   168
+  ],
+  "/Unsqueeze_output_0": [
+   1,
+   1,
+   168
+  ],
+  "/Add_2_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Unsqueeze_1_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/Cast_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/Mul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/norm1/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/Transpose_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.0/depth/Conv_output_0": [
+   1,
+   336,
+   81
+  ],
+  "/encoder.0/Slice_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.0/Slice_1_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.0/Sigmoid_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.0/Mul_2_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.0/point/Conv_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.0/Transpose_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/Add_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/norm2/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/ff/ff.0/MatMul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.0/ff/ff.0/Add_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.0/ff/ff.1/Sigmoid_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.0/ff/ff.1/Mul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.0/ff/ff.3/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/ff/ff.3/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/Add_2_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.0/Cast_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/encoder.0/Mul_3_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/norm1/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/Transpose_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.1/depth/Conv_output_0": [
+   1,
+   336,
+   81
+  ],
+  "/encoder.1/Slice_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.1/Slice_1_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.1/Sigmoid_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.1/Mul_2_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.1/point/Conv_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.1/Transpose_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/Add_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/norm2/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/ff/ff.0/MatMul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.1/ff/ff.0/Add_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.1/ff/ff.1/Sigmoid_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.1/ff/ff.1/Mul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.1/ff/ff.3/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/ff/ff.3/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/Add_2_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.1/Cast_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/encoder.1/Mul_3_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/norm1/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/Transpose_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.2/depth/Conv_output_0": [
+   1,
+   336,
+   81
+  ],
+  "/encoder.2/Slice_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.2/Slice_1_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.2/Sigmoid_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.2/Mul_2_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.2/point/Conv_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.2/Transpose_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/Add_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/norm2/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/ff/ff.0/MatMul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.2/ff/ff.0/Add_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.2/ff/ff.1/Sigmoid_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.2/ff/ff.1/Mul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.2/ff/ff.3/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/ff/ff.3/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/Add_2_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.2/Cast_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/encoder.2/Mul_3_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/norm1/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/Transpose_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.3/depth/Conv_output_0": [
+   1,
+   336,
+   81
+  ],
+  "/encoder.3/Slice_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.3/Slice_1_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.3/Sigmoid_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.3/Mul_2_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.3/point/Conv_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.3/Transpose_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/Add_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/norm2/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/ff/ff.0/MatMul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.3/ff/ff.0/Add_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.3/ff/ff.1/Sigmoid_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.3/ff/ff.1/Mul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.3/ff/ff.3/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/ff/ff.3/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/Add_2_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.3/Cast_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/encoder.3/Mul_3_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/norm1/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/Transpose_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.4/depth/Conv_output_0": [
+   1,
+   336,
+   81
+  ],
+  "/encoder.4/Slice_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.4/Slice_1_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.4/Sigmoid_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.4/Mul_2_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.4/point/Conv_output_0": [
+   1,
+   168,
+   81
+  ],
+  "/encoder.4/Transpose_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/Add_1_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/norm2/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/ff/ff.0/MatMul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.4/ff/ff.0/Add_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.4/ff/ff.1/Sigmoid_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.4/ff/ff.1/Mul_output_0": [
+   1,
+   81,
+   672
+  ],
+  "/encoder.4/ff/ff.3/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/ff/ff.3/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/Add_2_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/encoder.4/Cast_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/encoder.4/Mul_3_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/duration_head/duration_head.0/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/duration_head/duration_head.1/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/duration_head/duration_head.1/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/duration_head/duration_head.2/Sigmoid_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/duration_head/duration_head.2/Mul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/duration_head/duration_head.3/MatMul_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/duration_head/duration_head.3/Add_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/Squeeze_output_0": [
+   1,
+   81
+  ],
+  "/energy_head/energy_head.0/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/energy_head/energy_head.1/MatMul_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/energy_head/energy_head.1/Add_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/energy_head/energy_head.2/Sigmoid_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/energy_head/energy_head.2/Mul_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/energy_head/energy_head.3/MatMul_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/energy_head/energy_head.3/Add_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/Squeeze_1_output_0": [
+   1,
+   81
+  ],
+  "/bright_head/bright_head.0/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/bright_head/bright_head.1/MatMul_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/bright_head/bright_head.1/Add_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/bright_head/bright_head.2/Sigmoid_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/bright_head/bright_head.2/Mul_output_0": [
+   1,
+   81,
+   84
+  ],
+  "/bright_head/bright_head.3/MatMul_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/bright_head/bright_head.3/Add_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/Squeeze_2_output_0": [
+   1,
+   81
+  ],
+  "/pitch_head/pitch_head.0/LayerNormalization_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/pitch_head/pitch_head.1/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/pitch_head/pitch_head.1/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/pitch_head/pitch_head.2/Sigmoid_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/pitch_head/pitch_head.2/Mul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/pitch_head/pitch_head.3/MatMul_output_0": [
+   1,
+   81,
+   2
+  ],
+  "/pitch_head/pitch_head.3/Add_output_0": [
+   1,
+   81,
+   2
+  ],
+  "/Exp_output_0": [
+   1,
+   81
+  ],
+  "/Sub_output_0": [
+   1,
+   81
+  ],
+  "/Clip_2_output_0": [
+   1,
+   81
+  ],
+  "/Round_output_0": [
+   1,
+   81
+  ],
+  "/Clip_3_output_0": [
+   1,
+   81
+  ],
+  "/Unsqueeze_2_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/energy_proj/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/energy_proj/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Add_3_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Unsqueeze_3_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/bright_proj/MatMul_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/bright_proj/Add_output_0": [
+   1,
+   81,
+   168
+  ],
+  "/Gather_output_0": [
+   1,
+   81
+  ],
+  "/Gather_1_output_0": [
+   1,
+   81
+  ],
+  "/Clip_4_output_0": [
+   1,
+   81
+  ],
+  "/Unsqueeze_4_output_0": [
+   1,
+   81,
+   1
+  ],
+  "/Unsqueeze_5_output_0": [
+   1,
+   81,
+   1
+  ]
+ }
+}

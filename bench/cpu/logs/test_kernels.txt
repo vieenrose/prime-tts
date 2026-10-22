@@ -1,0 +1,48 @@
+micro-kernels vs reference:
+  k4x16                              n=    448 maxabs=0.000e+00 rel=0.000e+00 ok
+  k8x12                              n=    896 maxabs=0.000e+00 rel=0.000e+00 ok
+  snake_row |x|<30                   n=   4096 maxabs=1.907e-06 rel=6.359e-08 ok
+  snake_row a=37                     n=   4096 maxabs=1.907e-06 rel=6.362e-08 ok
+  silu_row                           n=   4096 maxabs=2.384e-07 rel=7.953e-09 ok
+  tanh_row                           n=   4096 maxabs=1.192e-07 rel=1.192e-07 ok
+  sigmul_row                         n=   4096 maxabs=4.768e-07 rel=7.969e-08 ok
+  dw_row K7                          n=   4080 maxabs=9.537e-07 rel=6.974e-08 ok
+  ln_res (x += r)                    n=  24192 maxabs=0.000e+00 rel=0.000e+00 ok
+  ln_res (y)                         n=  24192 maxabs=2.384e-07 rel=7.628e-08 ok
+  ln (no residual)                   n=  24192 maxabs=2.384e-07 rel=7.628e-08 ok
+conv driver vs direct loop:
+  conv 168x168xK1 d1 n81 a0 r0 t1    n=  13608 maxabs=2.265e-06 rel=3.905e-07 ok
+      -> 8.14 GFLOP/s
+  conv 672x168xK1 d1 n81 a1 r0 t1    n=  54432 maxabs=3.099e-06 rel=5.457e-07 ok
+      -> 8.21 GFLOP/s
+  conv 168x672xK1 d1 n530 a0 r1 t1   n=  89040 maxabs=1.335e-05 rel=1.150e-06 ok
+      -> 6.91 GFLOP/s
+  conv 96x178xK5 d1 n300 a1 r0 t1    n=  28800 maxabs=1.431e-05 rel=1.190e-06 ok
+      -> 7.53 GFLOP/s
+  conv 80x168xK5 d1 n300 a2 r0 t1    n=  24000 maxabs=4.828e-06 rel=4.828e-06 ok
+      -> 7.50 GFLOP/s
+  conv 48x48xK11 d5 n2000 a3 r0 t1   n=  96000 maxabs=1.287e-05 rel=9.722e-07 ok
+      -> 7.55 GFLOP/s
+  conv 48x48xK11 d1 n2000 a0 r1 t1   n=  96000 maxabs=8.106e-06 rel=7.761e-07 ok
+      -> 7.53 GFLOP/s
+  conv 24x24xK7 d3 n4000 a3 r0 t1    n=  96000 maxabs=4.768e-06 rel=5.368e-07 ok
+      -> 7.40 GFLOP/s
+  conv 12x12xK11 d5 n8000 a0 r1 t1   n=  96000 maxabs=2.146e-06 rel=3.800e-07 ok
+      -> 8.58 GFLOP/s
+  conv 6x6xK3 d1 n8000 a3 r0 t1      n=  48000 maxabs=7.153e-07 rel=2.364e-07 ok
+      -> 5.38 GFLOP/s
+  conv 384x96xK2 d1 n300 a0 r0 t1    n= 115200 maxabs=3.815e-06 rel=6.381e-07 ok
+      -> 8.52 GFLOP/s
+  conv 1x6xK7 d1 n4000 a2 r0 t1      n=   4000 maxabs=2.384e-07 rel=2.425e-07 ok
+      -> 2.04 GFLOP/s
+  conv 48x48xK11 d5 n2000 a3 r0 t4   n=  96000 maxabs=1.240e-05 rel=1.050e-06 ok
+      -> 21.29 GFLOP/s
+  conv 504x168xK1 d1 n530 a0 r0 t4   n= 267120 maxabs=3.338e-06 rel=5.282e-07 ok
+      -> 26.08 GFLOP/s
+  conv 168x672xK1 d1 n530 a0 r1 t1   n=  89040 maxabs=1.049e-05 rel=7.902e-07 ok
+      -> 3.97 GFLOP/s
+  conv 672x168xK1 d1 n81 a1 r0 t1    n=  54432 maxabs=2.384e-06 rel=4.138e-07 ok
+      -> 5.57 GFLOP/s
+  conv 84x168xK1 d1 n77 a1 r0 t1     n=   6468 maxabs=2.384e-06 rel=4.995e-07 ok
+      -> 7.46 GFLOP/s
+KERNELS: PASS

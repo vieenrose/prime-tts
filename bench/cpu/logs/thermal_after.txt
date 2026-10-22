@@ -1,0 +1,6 @@
+AO-therm 43500
+CPU-therm 37000
+GPU-therm 37000
+PLL-therm 35000
+PMIC-Die 100000
+thermal-fan-est 41250
