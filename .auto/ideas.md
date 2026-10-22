@@ -139,6 +139,20 @@ Conv activations move 67.5 MB out + 63.2 MB in per stream, but at the ramped clo
 ~3 GB/s (the 63.2 MB shows up as the 21 ms `copy` split), so all PCIe traffic is only ~43 ms of the
 ~380 ms GPU block. Transfers are NOT a lever; the GPU compute (34.9 GFLOP at ~44% of fp32 peak) is.
 
+## Scaling probe (run 79): the wall is GPU-total, and packing improves with N
+N=1 inference-only 638 ms (= 583 graph + ~55 SNDR/close; open/cuda are before t0) vs N=2 wall 1551
+(slowest 1139) vs N=4 wall ~2330 (slowest ~1920) vs N=8 wall 3961. Per-stream wall cost (wall-400)/N:
+N=2 575 ms < N=4 482 ms < N=8 445 ms -- FALLS with N, i.e. SM packing improves as more streams share
+the 2 SMs (tail waves get backfilled). Consequences: (1) the wall really is ~ startup_serialized
+(~400: open 100 + cuda 300) + GPU_total_packed + small host tail -- confirmed arithmetically at four
+different N; (2) at N=4 there is ~60-80 ms/stream of imperfect packing (~250 ms wall) that only a
+perfect scheduler reclaims -- this QUANTIFIES the ceiling of the CUDA-graphs/full-residency project
+(~250 ms), the only known >100 ms lever left, and it is multi-experiment project-scale, not one
+change; (3) N=8 stays healthy (min_free 2104 MB, peak_rss 321 MB), so the box has headroom beyond
+the operator's 4-stream target. Integrity note: moving close()/SNDR out of the timed region, or
+pre-warming the GPU from a side process, would be timer-scope gaming -- explicitly rejected, the
+timer stays as the driver defines it.
+
 ## Ledger (run 78): session best confirmed
 picard official draws on identical code: 2328 (run 75), 2333 (run 77), 2315, 2330 (run 78) --
 mean ~2326, tight cluster, no drift. All 5 golden cases bit-identical GPU vs CPU (worst SNDR 67.45
