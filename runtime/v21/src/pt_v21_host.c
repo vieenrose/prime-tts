@@ -300,6 +300,23 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
   const float *g = G && G->p ? (const float *) G->p : 0;
   float *o = (float *) O->p;
   int64_t gn = G ? G->n : 1;
+  if (!g && (op == PT_LEAKYRELU || op == PT_RELU || op == PT_NEG || op == PT_ABS)) {
+    /* Pure arithmetic elementwise: the double-precision switch below compiles to a scalar
+     * round-trip per element, and LEAKYRELU alone was 215 ms of a 3.3 s stream in 35 calls. A
+     * plain loop over fp32 vectorizes to NEON on the A57. Bit-exact: alpha*v is exact in double
+     * and its rounding to fp32 equals the fp32 product, and the sign tests are identical. */
+    int64_t n2 = A->n;
+    if (op == PT_LEAKYRELU) {
+      for (int64_t i = 0; i < n2; i++) o[i] = a[i] >= 0.0f ? a[i] : alpha * a[i];
+    } else if (op == PT_RELU) {
+      for (int64_t i = 0; i < n2; i++) o[i] = a[i] > 0.0f ? a[i] : 0.0f;
+    } else if (op == PT_NEG) {
+      for (int64_t i = 0; i < n2; i++) o[i] = -a[i];
+    } else {
+      for (int64_t i = 0; i < n2; i++) o[i] = a[i] < 0.0f ? -a[i] : a[i];
+    }
+    return 0;
+  }
   for (int64_t i = 0; i < n; i++) {
     double v = (double) a[i];
     double gv = g ? (double) g[gn == 1 ? 0 : i % gn] : 0.0;
