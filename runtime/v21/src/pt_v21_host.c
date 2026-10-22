@@ -553,6 +553,9 @@ typedef struct {
   int ref;
 } pt_hrec;
 static pt_hrec *g_hcache;
+static char *g_harena;
+static size_t g_harena_bytes, g_harena_used;
+static int g_harena_failed;
 static size_t g_hcache_n;
 static char g_hcache_path[512];
 static pthread_mutex_t g_hlock = PTHREAD_MUTEX_INITIALIZER;
@@ -599,7 +602,10 @@ static void host_cont_shared_put(int k, float *p, int owned) {
   pthread_mutex_lock(&g_hlock);
   if (owned && (size_t) k < g_hcache_n && g_hcache[k].p == p) {
     if (--g_hcache[k].ref <= 0) {
-      free(p);
+      /* arena-backed payloads stay mapped (the arena is per process, freed at exit); only a
+       * fallback malloc'd record is released here */
+      if (!g_harena || (char *) p < g_harena || (char *) p >= g_harena + g_harena_bytes)
+        free(p);
       g_hcache[k].p = NULL;
       g_hcache[k].ref = 0;
     }
@@ -617,12 +623,43 @@ static void h2f_table_init(void) {
   h2f_table_ready = 1;
 }
 
+/* One arena for the fp32 container payloads instead of 336 separate mallocs. The container index
+ * gives every record's size up front, so the block can be mapped with MAP_POPULATE: the kernel then
+ * fills 84 MB with a handful of page-table operations instead of ~21k demand faults during a
+ * copy loop (measured: the record pass is 159 ms of the ~500 ms a cold process spends before it
+ * starts inference). Records are 64-byte aligned so the NEON paths keep their alignment. */
+static int harena_reserve(size_t bytes) {
+  if (g_harena || g_harena_failed || bytes == 0)
+    return g_harena ? 0 : -1;
+  void *p = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+  if (p == MAP_FAILED) {
+    g_harena_failed = 1;
+    return -1;
+  }
+  madvise(p, bytes, MADV_HUGEPAGE);   /* best effort: fewer TLB entries on the A57 */
+  g_harena = (char *) p;
+  g_harena_bytes = bytes;
+  g_harena_used = 0;
+  return 0;
+}
+
+static float *harena_alloc(size_t bytes) {
+  size_t off = (g_harena_used + 63) & ~(size_t) 63;
+  if (!g_harena || off + bytes > g_harena_bytes)
+    return NULL;
+  g_harena_used = off + bytes;
+  return (float *) (g_harena + off);
+}
+
 static float *v21_load_cont(pt_ctx *c, uint32_t i, const char *name, int64_t off, int64_t n,
                             int itemsize) {
-  float *f = (float *) malloc((size_t) (n * 4 + 64));
+  float *f = harena_alloc((size_t) (n * 4 + 64));
   if (!f) {
-    c->n_alloc_fail++;
-    return 0;
+    f = (float *) malloc((size_t) (n * 4 + 64));   /* arena exhausted: fall back */
+    if (!f) {
+      c->n_alloc_fail++;
+      return 0;
+    }
   }
   const uint8_t *src = (const uint8_t *) c->base + off;
   if (itemsize == 4) {
@@ -805,6 +842,24 @@ pt_ctx *pt_v21_open(const char *container) {
   static int open_ser = -1;
   if (open_ser < 0) open_ser = getenv("PT_V21_OPEN_SERIAL") ? atoi(getenv("PT_V21_OPEN_SERIAL")) : 1;
   if (open_ser) pthread_mutex_lock(&open_lock);
+  {
+    /* size the fp32 payload arena: every record that will be materialized on the host */
+    size_t need = 0;
+    for (uint32_t i = 0; i < h.n_tensor; i++) {
+      const uint8_t *r = (const uint8_t *) c->map + V21_HDR_SIZE + (size_t) i * V21_REC_SIZE;
+      char nm[65];
+      memcpy(nm, r, 64);
+      nm[64] = 0;
+      if (!nm[0])
+        continue;
+      int64_t nel;
+      memcpy(&nel, r + 64 + 4 + 4 + 48, 8);
+      if (nel <= 0)
+        continue;
+      need += (((size_t) nel * 4 + 64) + 63) & ~(size_t) 63;
+    }
+    harena_reserve(need);
+  }
   for (uint32_t i = 0; i < h.n_tensor; i++) {
     const uint8_t *r = (const uint8_t *) c->map + V21_HDR_SIZE + (size_t) i * V21_REC_SIZE;
     char nm[65];

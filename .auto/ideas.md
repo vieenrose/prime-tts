@@ -2,69 +2,48 @@
 
 Ordered by expected payoff per unit of risk. Measure the phase split before and after each.
 
-- **Host/GPU overlap.** Single stream is ~4.44 s: ~2.16 s GPU kernels, ~2.2 s host graph work
-  serialized against it. The graph is a strict chain, but each conv's *input staging copy* and the
-  host elementwise ops that feed the next node can run while the current kernel is in flight
-  (record event per op, defer sync to the point where the host actually needs the result).
 - **CUDA Graphs per stream.** ~180 launches (124 conv + 5 convT + 50 matmul) each with per-call
   copy/launch/sync; capture the per-request launch sequence once per shape bucket and replay with
   `cudaGraphLaunch`. Needs stable device addresses (the arena gives that) and a fixed shape bucket
-  per T.
+  per T. Biggest remaining structural win; but the graph is issued from the interpreter, so capture
+  needs one full warm run per shape first.
 - **Batch the four streams per layer.** One launch per conv covering all four requests
   (grid.z = stream count, per-stream row stride). Removes 3/4 of the launches and amortizes weight
   reads. Requires the driver to interleave four graph loops in lockstep (shared node loop, per-stream
   pt_ctx), not four independent threads.
 - **Pinned host staging buffers** (`cudaMallocHost`) for conv input/output staging: async copies get
-  roughly 2x bandwidth, and overlap becomes possible.
-- **Vectorize the host elementwise ops** on aarch64 (NEON fp32): the interpreter's
-  `bin_op`/`un_op`/`Cast`/`Concat`/`Transpose`/`Expand`/`Gather` loops are scalar. Measured A57 NEON
-  headroom is large (memcpy ~5-5.9 GB/s, fp32 NEON GEMM ~3.74 GFLOP/s/core).
+  roughly 2x bandwidth. NOTE: `cudaHostRegister` on the whole mmapped container fails on this box
+  ("operation not supported", tested); only freshly malloc'd staging buffers are candidates.
+- **Device-resident residuals (conv -> Add -> LeakyReLU -> conv).** Tried and reverted: the Add's
+  second operand is not device-resident, so falling back to `bin_op` reads the stale host buffer of
+  the chained conv (SNDR 0 dB). Needs both operands resident before it can work.
 - **Constant folding in the generator.** 1924 of 4066 nodes are `Constant`; they are materialized as
-  fresh tensors every request. Bake them into read-only pooled tables with no per-run copy, and drop
-  chains of Constants feeding shape ops.
-- **Shape-only op elision.** Reshape/Transpose/Squeeze/Unsqueeze/Expand/Copy that only rename a view
-  should not memcpy; carry a strided view (offsets + strides) through the interpreter and materialize
-  only at kernels that need contiguity.
-- **Kernel tuning** (`PT_V21_GPU=conv` to isolate): split cin across threads with shared-memory
-  reduction for the big encoder convs (cin=192..768, K=1..3), threads 128 vs 256, `__ldg`, float4
-  loads on 4-aligned padded rows, occupancy check at T81 shapes.
-- **fp16 activations in the decoder** (its weights are already fp16; measured rel 1.9e-3 today):
-  halves activation traffic in the deepest group. Gate hard on SNDR and the per-node gate.
-- **Reduce staging volume**: keep decoder activations resident on device across the whole dec group
-  so the iSTFT path does not round-trip over PCIe per node.
-- **Arena sizing/alignment**: 32 MB per stream is a guess; measure the true high-water mark at T120
-  and cache by size class so the bump pointer never fragments.
-- **Launch coalescing for tiny ops**: 26 dynamic matmuls + 50 matmul calls are latency-bound; batch
-  same-shape ones into one grid.
+  fresh tensors every request. Bake them into read-only pooled tables with no per-run copy.
+- **Shape-only op elision.** Reshape/Transpose/Squeeze/Unsqueeze/Expand that only rename a view
+  should not memcpy; carry a strided view and materialize only at kernels needing contiguity.
+- **Encoder convs (cin=768):** the 4-channel weight slice is 36 KB so they fall back to the unsliced
+  kernel. A float2-lane slice halves that to 18 KB and fits shared.
 
 ## Learned this session (do not relearn)
-- `__syncthreads()` must be reached by every thread in the block. A `continue` that can skip a
-  barrier is undefined behaviour and shows up as deterministic, sparse output corruption (this cost
-  a 6.6% faster convT kernel its first round: SNDR 6.47 dB on T20, bit-exact on the fallback nodes).
-- Staging weights cooperatively into shared memory is the big conv/convT lever: conv 2526 -> 1855 ms,
-  convT 359 -> 249 ms, both bit-identical. Staging the *input* tile as well (with per-chunk barriers)
-  was 2.7x SLOWER: barriers in the inner loop dominate on 2 SMs.
-- Host-side wins do not move the N=4 wall (GPU-bound); they show in n1_stream_ms. To move the primary
-  metric, attack GPU kernels.
-- Buffer pooling of activation tensors: no gain, costs ~200 MB (glibc already reuses the freed blocks).
-- Diagnostics: `PT_V21_EKIND=2` prints top-20 per-node GPU times; `PT_V21_DUMP_T=<node>` writes
-  /tmp/pt_dump_<node>.bin (raw fp32) for byte-exact A/B against the reference path.
-
-## Open ideas
-- Encoder convs (12 at ~42 ms each, output len ~81, cout=192, batch=4) waste 2/3 of every 256-thread
-  block: pick the launch block size from the problem shape (threads in {32,64,128,256}, maximize
-  fill*block-coverage). Bitwise safe - only the grid changes.
-- Encoder convs with cin=768: 4-channel weight slice is 36 KB (>16 KB gate) so they fall back to the
-  unsliced kernel. A 2-lane (float2) slice halves that to 18 KB and fits shared.
-- matmul: 50 calls, ~30-90 ms; same weight-staging idea.
-- Host: SLICE 205 ms in 214 calls (memcpy-bound, scalar), ADD 105, TANH 81 (libm per element), PAD 76.
+- `__syncthreads()` must be reached by every thread in the block.
+- Staging weights cooperatively into shared memory is the big conv/convT lever. Staging the *input*
+  tile too (per-chunk barriers) was 2.7x SLOWER.
+- Host-side wins under ~100 ms per stream do not move the N=4 wall; they show in n1_stream_ms.
+- Buffer pooling of activation tensors: no gain, costs ~200 MB.
+- gcc 8 does NOT auto-vectorize control flow: the `a[i] >= 0 ? a[i] : alpha*a[i]` LeakyReLU loop is
+  scalar even at -O3. NEON intrinsics (vcgeq/vbslq) are needed, and they halve the time.
+- The GEMM conv is register-bound at 64 registers / 4 blocks per SM: 8x8 tiles (104 regs) and
+  register prefetch (84 regs) both lose. `-maxrregcount` 48/56 also loses badly (measured).
+- A cold-start GPU clock ramp (76.8 MHz until ~0.6 s in) inflates the first process after a build;
+  that is why the official measure.sh N=4 run and warm paired runs disagree.
+- Diagnostics: `PT_V21_EKIND=2` prints per-node times; `PT_V21_DUMP_T=<node>` dumps raw fp32.
 
 ## Killed by measurement (do not retry without new evidence)
-- **fp16 conv activations**: measured by rounding every conv input to IEEE binary16 in the CPU conv
-  path (env-gated probe): SNDR 43.73 dB, max|d| 5.9e-3 against the 60 dB gate. The decoder is far
-  too sensitive to activation quantization; halving activation traffic this way is off the table.
-- 4 output columns per thread (16 accumulators): occupancy loss on 2 SMs; 39% slower in matched A/B.
-- 2-channel conv blocks (halve the weight slice): 52% slower - halving the channel group doubles the
-  blocks, and every block re-reads the activation rows (activation traffic, not weight traffic, binds).
-- Launch-shape heuristic (block size from output length): +10.5% at N=4; small blocks hurt the long
-  decoder outputs more than they help the short encoder convs.
+- **fp16 conv activations**: SNDR 43.73 dB, far below the gate.
+- 4 output columns per thread (16 accumulators): 39% slower.
+- 2-channel conv blocks: 52% slower.
+- Launch-shape heuristic (block size from output length): +10.5% at N=4.
+- Conv reduction chunk 16 -> 32: barriers are not the limiter; 16 KB tiles cost more.
+- Small 32x32 tiles for short outputs: arithmetic intensity matters more than block count.
+- Padé-approximant / coarse-table tanh+sigmoid: SNDR 67.4 / 64.3 dB. The 65536-point interpolated
+  table keeps 70.09 dB and is kept (TANH 62 -> 19 ms).
