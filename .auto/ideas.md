@@ -33,6 +33,19 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
   that is why the official measure.sh N=4 run and warm paired runs disagree.
 - Diagnostics: `PT_V21_EKIND=2` prints per-node times; `PT_V21_DUMP_T=<node>` dumps raw fp32.
 
+## Run 88 CORRECTION: copies are ~20-30% exposed -- device residency reopens (project-scale)
+A doubled-copy probe (every conv H2D+D2H issued twice, identical bytes, env-gated, reverted):
+off 2433/2340/2373 vs on 2562/2480/2505 (+129/+140/+132, 3/3, mean +134 ms for +94 MB/stream).
+That is ~1.4 ms/MB-per-stream; the kept chain corroborates independently (~36 MB -> ~89 ms).
+Run 85's "copy-removal saves ~0" is FALSIFIED -- revised to: copies mostly hidden, ~20-30%
+exposed/congested. What survives of run 85: GPU-work additions still hurt (#55, untouched); host-only
+removals still ~0. Consequence: remaining ~94 MB/stream of conv traffic x ~2 ms/MB ~= up to ~190 ms
+wall IF fully chained -- the only known >100 ms single-direction lever. But no single-link
+extension clears the bar alone (residual bundle: ~43 MB -> ~60-100 ms saved minus ~20 ms added GPU,
+net ~40-80 ms, borderline; convT/matmul links small). It needs the bundled project-scale residency
+work (device Add + device softmax + chain liveness for both), with operator approval -- the same
+bucket as batch-4/graphs, now with the best ceiling (~190 ms) and a measured price.
+
 ## Killed by analysis #5 (run 78): ig8 tail waste is real but unrecoverable
 MAC-weighted tail waste across the 124 convs is 8.5% of conv GPU (~36 ms/stream, ~140 ms wall at
 x4): Tout=904 (43% of all MACs) wastes 11.7% (8 blocks, tail covers 8 cols), Tout=226 wastes 11.7%,
