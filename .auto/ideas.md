@@ -57,6 +57,32 @@ tail waste but a much slower per-element rate (0.66 vs 0.88 effective -- ig8 sti
 Tout to 128 and trimming needs padded intermediates that break the conv->conv chain. Do not pursue
 without evidence from a packing-aware measurement, not a single-stream model.
 
+## Gate methodology, final (run 96): the unoptimized-gate + optimized-SNDR split is CORRECT
+Run 95 recommended teaching ck_save to D2H dev_resident tensors. That idea is WRONG -- analysis of
+the fusion block shows why it cannot work in general: (1) epi-fused convs never materialize their
+pre-epi output anywhere (the kernel accumulates post-epi directly), so no D2H can recover the
+probe-expected pre-epi tensor; (2) chained + tv_alloc_nz (run 69: no zero-fill) means stale host
+buffers are uninitialized mmap zeros, not even a stable wrong answer -- confirmed by the failure
+pattern (rel exactly 1.0/0.725, i.e. zeros-vs-truth, varying with value scale); (3) skipped (fused)
+nodes DO run ck_save on their aliased V entries (host.c:2179), so dumps are taken, just of garbage.
+Therefore the per-node gate REQUIRES unoptimized execution (CHAIN=0 FUSE=0); the SNDR gate covers
+the optimized path (every real corruption in this session showed up in SNDR instantly, while
+chained-buffer staleness never affects inference -- SNDR 70.09 IS the proof the chain liveness is
+correct). The split is not a stopgap, it is the only correct methodology. Do NOT implement
+ck_save-D2H; do NOT gate the optimized path per-node.
+
+## Full per-node gate (run 95): 0 over gate -- and what the 45 on-state fails mean
+Ran the prompt's arbiter (`v21_parity_c.py --from-dumps`) on T81 Nano dumps: with chaining+fusion
+DISABLED (env only): 4010 nodes compared, 2 exempt, **0 over gate, M2 parity PASS** (dec worst
+1.898e-3 vs 2e-3 tol on a LeakyReLU output = accumulated upstream table error; dp/enc/flow ~1e-6,
+root 9.8e-4). With chaining+fusion ON: 45 fails including rel=1.0 -- proven to be dump artifacts
+(stale host buffers left deliberately by the chain + fused intermediates that never exist as
+computed), NOT numerics bugs: same SNDR 70.09 either way, and every real corruption incident in
+this session showed up in SNDR immediately. Consequence: the per-node gate cannot validate
+chained/fused execution as-is; coverage = unoptimized-path gate + optimized-path SNDR x5 cases +
+CPU/GPU cross-check. Recommended (not in-loop): teach ck_save to D2H dev_resident tensors so
+future runs gate the optimized path too -- diagnostic-only, include in finalize review.
+
 ## Killed by analysis #7 (run 86): parallel record pass + N=1 upload/inference overlap
 - **Parallel record pass (per-record claiming instead of the open_lock).** The ~99 ms serialized pass
   moves ~165 MB (84 MB memcpy + 27 MB fp16 reads + 54 MB LUT writes): bandwidth floor ~33 ms + loop
