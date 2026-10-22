@@ -1,0 +1,13 @@
+diff --git a/runtime/v21/src/pt_v21_host.c b/runtime/v21/src/pt_v21_host.c
+index 0a687d6..951662a 100644
+--- a/runtime/v21/src/pt_v21_host.c
++++ b/runtime/v21/src/pt_v21_host.c
+@@ -917,7 +917,7 @@ static int op_slice(pt_ctx *c, const pt_tv *A, const int64_t *starts, const int6
+   so[nd - 1] = 1;
+   for (int i = nd - 2; i >= 0; i--) so[i] = so[i + 1] * d[i + 1];
+   static int sfast = -1;
+-  if (sfast < 0) sfast = getenv("PT_V21_SLICE_ROWS") ? atoi(getenv("PT_V21_SLICE_ROWS")) : 1;
++  if (sfast < 0) sfast = getenv("PT_V21_SLICE_ROWS") ? atoi(getenv("PT_V21_SLICE_ROWS")) : 0;
+   if (sfast && nd >= 1 && sp[nd - 1] == 1 && O->n > 0) {
+     /* innermost axis is a unit-step range: every output row is one contiguous source run, so
+      * decode the row's offset once and copy the row with a single memcpy instead of a div/mod

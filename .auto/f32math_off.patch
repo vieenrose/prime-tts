@@ -1,0 +1,13 @@
+diff --git a/runtime/v21/src/pt_v21_host.c b/runtime/v21/src/pt_v21_host.c
+index 0a687d6..9e03d5f 100644
+--- a/runtime/v21/src/pt_v21_host.c
++++ b/runtime/v21/src/pt_v21_host.c
+@@ -317,7 +317,7 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
+    * double-precision switch. Small tensors keep the double path: they feed Floor/Cast shape
+    * arithmetic, where a last-ulp difference could flip an integer length. */
+   static int ff = -1;
+-  if (ff < 0) ff = getenv("PT_V21_F32MATH") ? atoi(getenv("PT_V21_F32MATH")) : 1;
++  if (ff < 0) ff = getenv("PT_V21_F32MATH") ? atoi(getenv("PT_V21_F32MATH")) : 0;
+   if (!g && ff && n >= 4096 && (op == PT_EXP || op == PT_TANH || op == PT_SIGMOID)) {
+     if (op == PT_EXP)
+       for (int64_t i = 0; i < n; i++) o[i] = expf(a[i]);

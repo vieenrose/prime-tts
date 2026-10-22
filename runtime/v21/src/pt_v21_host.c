@@ -77,6 +77,12 @@ static void tv_free(pt_ctx *c, pt_tv *t) {
   t->n = 0;
 }
 
+static int host_rows_on(void) {
+  static int v = -1;
+  if (v < 0) v = getenv("PT_V21_HOSTROWS") ? atoi(getenv("PT_V21_HOSTROWS")) : 1;
+  return v;
+}
+
 static int tv_alloc(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim) {
   int64_t n = 1;
   for (int i = 0; i < ndim; i++) n *= d[i];
@@ -225,6 +231,45 @@ static int bin_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *B, pt_tv *O) {
                                     : op == PT_LEQ ? (AV <= BV)
                                     : op == PT_AND ? ((AV != 0) && (BV != 0))
                                     : op == PT_OR ? ((AV != 0) || (BV != 0)) : (AV != 0) ^ (BV != 0)));
+    } else if (!isbool && dt == DT_F32 && adt == DT_F32 && bdt == DT_F32 && host_rows_on() &&
+               (op == PT_ADD || op == PT_SUB || op == PT_MUL || op == PT_DIV || op == PT_MAX ||
+                op == PT_MIN) && ndim >= 1 && O->n > 0 &&
+               !(A->n == O->n && (B->n == O->n || B->n == 1))) {
+      /* general fp32 broadcast: walk the output row by row with an odometer over the outer axes;
+       * each operand's innermost stride is 0 (broadcast) or 1, so the inner loops are plain
+       * vectorizable loops instead of a per-element div/mod decode through double. fp32 +,-,*,/,
+       * max, min are correctly rounded, so results are bit-identical to the double path. */
+      const float *a = (const float *) A->p, *b = (const float *) B->p;
+      float *o = (float *) O->p;
+      int64_t inner = d[ndim - 1], sa = ba.st[ndim - 1], sb = bb.st[ndim - 1];
+      int64_t ix[PT_V21_MAX_RANK] = {0}, pa = 0, pb = 0;
+      int64_t nrows = O->n / inner;
+      for (int64_t ro = 0; ro < nrows; ro++) {
+        const float *ar = a + pa, *br = b + pb;
+        float *orow = o + ro * inner;
+#define PT_ROWOP(EXPR)                                                                           \
+  if (sa && sb) for (int64_t k = 0; k < inner; k++) { float x = ar[k], y = br[k]; orow[k] = EXPR; } \
+  else if (sa) { float y = br[0]; for (int64_t k = 0; k < inner; k++) { float x = ar[k]; orow[k] = EXPR; } } \
+  else if (sb) { float x = ar[0]; for (int64_t k = 0; k < inner; k++) { float y = br[k]; orow[k] = EXPR; } } \
+  else { float x = ar[0], y = br[0]; float v = EXPR; for (int64_t k = 0; k < inner; k++) orow[k] = v; }
+        if (op == PT_ADD) { PT_ROWOP(x + y) }
+        else if (op == PT_SUB) { PT_ROWOP(x - y) }
+        else if (op == PT_MUL) { PT_ROWOP(x * y) }
+        else if (op == PT_DIV) { PT_ROWOP(x / y) }
+        else if (op == PT_MAX) { PT_ROWOP(x > y ? x : y) }
+        else { PT_ROWOP(x < y ? x : y) }
+#undef PT_ROWOP
+        for (int j = ndim - 2; j >= 0; j--) {
+          ix[j]++;
+          pa += ba.st[j];
+          pb += bb.st[j];
+          if (ix[j] < d[j])
+            break;
+          pa -= ba.st[j] * d[j];
+          pb -= bb.st[j] * d[j];
+          ix[j] = 0;
+        }
+      }
     } else if (!isbool && dt == DT_F32 && adt == DT_F32 && bdt == DT_F32 &&
                (op == PT_ADD || op == PT_SUB || op == PT_MUL || op == PT_DIV || op == PT_MAX ||
                 op == PT_MIN) &&
@@ -798,6 +843,38 @@ static int op_transpose(pt_ctx *c, const pt_tv *A, const int *perm, pt_tv *O) {
   so[nd - 1] = 1;
   for (int i = nd - 2; i >= 0; i--) so[i] = so[i + 1] * d[i + 1];
   int es = dt_sz(A->dt);
+  if (host_rows_on() && nd >= 1 && O->n > 0) {
+    /* odometer over the output in order: output axis j advances the source offset by the source
+     * stride of the input axis it came from, so the innermost loop is a strided copy with no
+     * per-element div/mod decode */
+    int64_t ss[PT_V21_MAX_RANK], ix[PT_V21_MAX_RANK];
+    for (int j = 0; j < nd; j++) {
+      ss[j] = si[perm[j]];
+      ix[j] = 0;
+    }
+    int64_t inner = d[nd - 1], sl = ss[nd - 1], src = 0;
+    int64_t nrows = O->n / inner;
+    for (int64_t ro = 0; ro < nrows; ro++) {
+      if (es == 4) {
+        const uint32_t *a = (const uint32_t *) A->p + src;
+        uint32_t *o = (uint32_t *) O->p + ro * inner;
+        for (int64_t k = 0; k < inner; k++) o[k] = a[k * sl];
+      } else {
+        for (int64_t k = 0; k < inner; k++)
+          memcpy((char *) O->p + (ro * inner + k) * es, (const char *) A->p + (src + k * sl) * es,
+                 (size_t) es);
+      }
+      for (int j = nd - 2; j >= 0; j--) {
+        ix[j]++;
+        src += ss[j];
+        if (ix[j] < d[j])
+          break;
+        src -= ss[j] * d[j];
+        ix[j] = 0;
+      }
+    }
+    return 0;
+  }
   for (int64_t i = 0; i < A->n; i++) {
     int64_t r = i, oa = 0;
     for (int q = 0; q < nd; q++) {
@@ -965,6 +1042,29 @@ static int op_pad(pt_ctx *c, const pt_tv *A, const int64_t *pads, double cv, int
   so[nd - 1] = 1;
   for (int i = nd - 2; i >= 0; i--) so[i] = so[i + 1] * d[i + 1];
   (void) cv;   /* v2.1 pads with zeros only (the graph's constant_value inputs are all 0) */
+  int nonneg = 1;
+  for (int i = 0; i < 2 * nd; i++)
+    if (pads[i] < 0) nonneg = 0;
+  if (host_rows_on() && mode == 0 && nonneg) {
+    /* constant (zero) padding without cropping: zero the output once, then place every source row
+     * with one memcpy at its padded offset - instead of decoding each output element */
+    memset(O->p, 0, (size_t) (O->n * es));
+    int64_t row = A->d[nd - 1];
+    if (row > 0 && A->n > 0) {
+      int64_t nrows = A->n / row;
+      size_t rb = (size_t) (row * es);
+      for (int64_t ri = 0; ri < nrows; ri++) {
+        int64_t r = ri * row, oa = lo[nd - 1];
+        for (int q = 0; q < nd - 1; q++) {
+          int64_t idx = r / si[q];
+          r %= si[q];
+          oa += (idx + lo[q]) * so[q];
+        }
+        memcpy((char *) O->p + oa * es, (const char *) A->p + ri * rb, rb);
+      }
+    }
+    return 0;
+  }
   for (int64_t i = 0; i < O->n; i++) {
     int64_t r = i, oa = 0;
     int inside = 1;

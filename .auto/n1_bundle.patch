@@ -1,0 +1,219 @@
+diff --git a/runtime/v21/src/pt_v21.h b/runtime/v21/src/pt_v21.h
+index f15e3b6..d4cfeb6 100644
+--- a/runtime/v21/src/pt_v21.h
++++ b/runtime/v21/src/pt_v21.h
+@@ -83,6 +83,8 @@ typedef struct {
+   int64_t n;
+   void *p;              /* host payload (fp32 = float, i64 = int64_t, bool = uint8_t) */
+   int dev;              /* 1 = payload lives on the CUDA device (pt_v21_cuda.cu) */
++  int dev_res;          /* 1 = current values live only in dev_p (device arena, conv chain) */
++  void *dev_p;
+   int alive;
+ } pt_tv;
+ 
+@@ -132,7 +134,11 @@ struct pt_ctx {
+   void *g_arena;     /* resident device arena base (M3) */
+   void *g_stream;    /* per-stream CUDA stream so concurrent requests actually overlap (M3) */
+   size_t g_arena_bytes, g_arena_used;
+-  int64_t conv_pad_in;   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
++  int64_t conv_pad_in;
++  const float *conv_in_dev;   /* device-resident conv input (chain), or NULL */
++  int conv_keep;              /* 1 = keep this conv's output on the device for the next conv */
++  float *conv_out_dev;        /* set by the wrapper when the output was kept */
++  void *chain_mark;           /* arena mark held while a conv chain is in flight */   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
+ };
+ 
+ 
+diff --git a/runtime/v21/src/pt_v21_cuda.cu b/runtime/v21/src/pt_v21_cuda.cu
+index 5c5f359..f1e3bcd 100644
+--- a/runtime/v21/src/pt_v21_cuda.cu
++++ b/runtime/v21/src/pt_v21_cuda.cu
+@@ -551,7 +551,10 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
+   size_t wb = (size_t) (cout4 / 4) * K * cin * 4 * 4;
+   void *mark = arena_mark(c);
+   double tA = gpu_prof() ? gpu_now() : 0.0;
+-  dx = (float *) arena_alloc(c, xb);
++  const float *din = c->conv_in_dev;   /* chained input already on the device */
++  int keep = c->conv_keep;
++  c->conv_out_dev = NULL;
++  dx = din ? (float *) din : (float *) arena_alloc(c, xb);
+   dy = (float *) arena_alloc(c, yb);
+   if (gpu_prof()) c->g_alloc_ms += gpu_now() - tA;
+   if (!dx || !dy) {
+@@ -576,7 +579,8 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
+   }
+   tA = gpu_prof() ? gpu_now() : 0.0;
+   /* async on the stream: the copy queues behind the previous kernel instead of blocking the host */
+-  PTCHK(cudaMemcpyAsync(dx, X, xb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
++  if (!din)
++    PTCHK(cudaMemcpyAsync(dx, X, xb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
+   if (gpu_prof()) c->g_copy_ms += gpu_now() - tA;
+   if (bias) {
+     /* the bias is a container record: keep it resident like the weights, so a conv does not pay a
+@@ -637,6 +641,14 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
+   }
+   /* a launch that fails (e.g. too many registers for the block size) must not pass silently */
+   PTCHK(cudaGetLastError());
++  if (keep && !dy_own && !dx_own && !dw_own && !db_own) {
++    /* chain link: the next conv reads dy straight from the arena. No copy back, no sync; the arena
++     * range stays allocated until the chain's last conv releases it. */
++    if (!c->chain_mark)
++      c->chain_mark = mark;
++    c->conv_out_dev = dy;
++    return 0;
++  }
+   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
+   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
+   if (gpu_prof()) {
+@@ -652,7 +664,12 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
+     cudaFree(dx);
+   if (dy_own)
+     cudaFree(dy);
+-  arena_release(c, mark);   /* weights are resident: only the activation scratch is released */
++  if (c->chain_mark) {
++    arena_release(c, c->chain_mark);   /* end of a conv chain: release every link */
++    c->chain_mark = NULL;
++  } else {
++    arena_release(c, mark);   /* weights are resident: only the activation scratch is released */
++  }
+   if (gpu_prof()) c->g_free_ms += gpu_now() - tA;
+   return 0;
+ }
+diff --git a/runtime/v21/src/pt_v21_host.c b/runtime/v21/src/pt_v21_host.c
+index 0a687d6..078c09c 100644
+--- a/runtime/v21/src/pt_v21_host.c
++++ b/runtime/v21/src/pt_v21_host.c
+@@ -77,12 +77,20 @@ static void tv_free(pt_ctx *c, pt_tv *t) {
+   t->n = 0;
+ }
+ 
++static int host_rows_on(void) {
++  static int v = -1;
++  if (v < 0) v = getenv("PT_V21_HOSTROWS") ? atoi(getenv("PT_V21_HOSTROWS")) : 1;
++  return v;
++}
++
+ static int tv_alloc(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim) {
+   int64_t n = 1;
+   for (int i = 0; i < ndim; i++) n *= d[i];
+   t->dt = dt;
+   t->ndim = ndim;
+   t->n = n;
++  t->dev_res = 0;   /* a fresh tensor never refers to a chained device buffer */
++  t->dev_p = NULL;
+   for (int i = 0; i < PT_V21_MAX_RANK; i++) t->d[i] = i < ndim ? d[i] : 1;
+   size_t bytes = (size_t) (n * dt_sz(dt));
+   if (bytes == 0) bytes = dt_sz(dt);
+@@ -798,6 +806,38 @@ static int op_transpose(pt_ctx *c, const pt_tv *A, const int *perm, pt_tv *O) {
+   so[nd - 1] = 1;
+   for (int i = nd - 2; i >= 0; i--) so[i] = so[i + 1] * d[i + 1];
+   int es = dt_sz(A->dt);
++  if (host_rows_on() && nd >= 1 && O->n > 0) {
++    /* odometer over the output in order: output axis j advances the source offset by the source
++     * stride of the input axis it came from, so the innermost loop is a strided copy with no
++     * per-element div/mod decode */
++    int64_t ss[PT_V21_MAX_RANK], ix[PT_V21_MAX_RANK];
++    for (int j = 0; j < nd; j++) {
++      ss[j] = si[perm[j]];
++      ix[j] = 0;
++    }
++    int64_t inner = d[nd - 1], sl = ss[nd - 1], src = 0;
++    int64_t nrows = O->n / inner;
++    for (int64_t ro = 0; ro < nrows; ro++) {
++      if (es == 4) {
++        const uint32_t *a = (const uint32_t *) A->p + src;
++        uint32_t *o = (uint32_t *) O->p + ro * inner;
++        for (int64_t k = 0; k < inner; k++) o[k] = a[k * sl];
++      } else {
++        for (int64_t k = 0; k < inner; k++)
++          memcpy((char *) O->p + (ro * inner + k) * es, (const char *) A->p + (src + k * sl) * es,
++                 (size_t) es);
++      }
++      for (int j = nd - 2; j >= 0; j--) {
++        ix[j]++;
++        src += ss[j];
++        if (ix[j] < d[j])
++          break;
++        src -= ss[j] * d[j];
++        ix[j] = 0;
++      }
++    }
++    return 0;
++  }
+   for (int64_t i = 0; i < A->n; i++) {
+     int64_t r = i, oa = 0;
+     for (int q = 0; q < nd; q++) {
+@@ -965,6 +1005,29 @@ static int op_pad(pt_ctx *c, const pt_tv *A, const int64_t *pads, double cv, int
+   so[nd - 1] = 1;
+   for (int i = nd - 2; i >= 0; i--) so[i] = so[i + 1] * d[i + 1];
+   (void) cv;   /* v2.1 pads with zeros only (the graph's constant_value inputs are all 0) */
++  int nonneg = 1;
++  for (int i = 0; i < 2 * nd; i++)
++    if (pads[i] < 0) nonneg = 0;
++  if (host_rows_on() && mode == 0 && nonneg) {
++    /* constant (zero) padding without cropping: zero the output once, then place every source row
++     * with one memcpy at its padded offset - instead of decoding each output element */
++    memset(O->p, 0, (size_t) (O->n * es));
++    int64_t row = A->d[nd - 1];
++    if (row > 0 && A->n > 0) {
++      int64_t nrows = A->n / row;
++      size_t rb = (size_t) (row * es);
++      for (int64_t ri = 0; ri < nrows; ri++) {
++        int64_t r = ri * row, oa = lo[nd - 1];
++        for (int q = 0; q < nd - 1; q++) {
++          int64_t idx = r / si[q];
++          r %= si[q];
++          oa += (idx + lo[q]) * so[q];
++        }
++        memcpy((char *) O->p + oa * es, (const char *) A->p + ri * rb, rb);
++      }
++    }
++    return 0;
++  }
+   for (int64_t i = 0; i < O->n; i++) {
+     int64_t r = i, oa = 0;
+     int inside = 1;
+@@ -2164,9 +2227,26 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+             t = cd->out[0];
+           }
+         }
++        /* Device-resident conv chain: when the (post-epilogue) result's only consumer is another
++         * conv, leave it in the device arena; the next conv reads it there. Needs the unpadded GEMM
++         * path (in-kernel padding) and unpadded channel rows (cout % 4 == 0). */
++        int fin_t = nd->out[0];
++        for (int i = 0; i < n_fused; i++)
++          fin_t = pt_ndefs[fused_nodes[i]].out[0];
++        static int chain_on = -1;
++        if (chain_on < 0) chain_on = host_rows_on();
++        int keep = 0;
++        if (chain_on && unpadded && cout4 == cout && g_n_cons[fin_t] == 1) {
++          int cn = g_cons_node[fin_t];
++          keep = cn >= 0 && !c->skip[cn] && pt_ndefs[cn].op == PT_CONV && pt_ndefs[cn].in[0] == fin_t;
++        }
++        c->conv_in_dev = (unpadded && X->dev_res) ? (const float *) X->dev_p : NULL;
++        c->conv_keep = keep;
+         pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
+                     c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1, epi[0], epi[1],
+                     epa[0], epa[1]);
++        c->conv_in_dev = NULL;
++        c->conv_keep = 0;
+         if (n_fused) {
+           /* The conv's buffer becomes the last fused node's tensor: the conv's own tensor id stops
+            * owning it (dev 2 is never freed) so the buffer is freed exactly once, at the last use of
+@@ -2183,6 +2263,16 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+             c->V[nd->out[0]].dev = 2;
+           }
+         }
++        c->V[fin_t].dev_res = 0;
++        c->V[fin_t].dev_p = NULL;
++        if (c->conv_out_dev) {
++          /* the host buffer of fin_t is left stale on purpose: its only reader is the next conv,
++           * which takes the device copy */
++          c->V[fin_t].dev_res = 1;
++          c->V[fin_t].dev_p = c->conv_out_dev;
++          if (getenv("PT_V21_CHAINLOG")) fprintf(stderr, "chain: node %d keeps its output\n", ni);
++          c->conv_out_dev = NULL;
++        }
+         if (cout4 != cout) {
+           for (int64_t b = 0; b < N; b++)
+             memcpy((float *) out[0]->p + b * cout * Tout, yp + b * cout4 * Tout,
