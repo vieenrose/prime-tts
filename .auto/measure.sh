@@ -36,6 +36,7 @@ run4=$(ssh "$NANO" "NANO_ARENA=$ARENA NANO_CASE=$CASE NANO_N4=$N4 bash -s" <<'RE
 cd ~/primetts
 rm -f /tmp/ar_mem.txt /tmp/ar_freq.txt
 GF=/sys/devices/platform/host1x/57000000.gpu/devfreq/57000000.gpu/cur_freq
+CF=/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
 PT_V21_ARENA_MB="$NANO_ARENA" ./build/pt_v21_par --container build/v21.ptk   --case "$NANO_CASE" --cuda --parallel "$NANO_N4" > /tmp/ar_out.txt 2>&1 &
 pid=$!
 hwm=0
@@ -44,12 +45,14 @@ while kill -0 "$pid" 2>/dev/null; do
   h=$(awk '/VmHWM/{print $2}' /proc/"$pid"/status 2>/dev/null)
   f=$(free -m | sed -n 2p | tr -s " " | cut -d" " -f4)
   q=$(cat "$GF" 2>/dev/null)
+  cf=$(cat "$CF" 2>/dev/null)
   nsamp=$((nsamp + 1))
   [ -n "$h" ] && [ "$h" -gt "$hwm" ] && hwm=$h
   [ -n "$f" ] && echo "$f" >> /tmp/ar_mem.txt
   # skip the first second (startup is always at the idle clock): what matters is whether the
   # governor holds max clocks through the inference phase
   if [ "$nsamp" -gt 4 ] && [ -n "$q" ]; then echo "$q" >> /tmp/ar_freq.txt; fi
+  if [ "$nsamp" -gt 4 ] && [ -n "$cf" ]; then echo "$cf" >> /tmp/ar_cpufreq.txt; fi
   sleep 0.25
 done
 wait "$pid"
@@ -57,6 +60,7 @@ cat /tmp/ar_out.txt
 echo "MINFREE $(sort -n /tmp/ar_mem.txt | head -1)"
 echo "PEAKRSS $((hwm / 1024))"
 echo "MINFREQ $(sort -n /tmp/ar_freq.txt 2>/dev/null | head -1)"
+echo "MINCPUFREQ $(sort -n /tmp/ar_cpufreq.txt 2>/dev/null | head -1)"
 REMOTE
 )
 echo "$run4" | sed -n '1,4p'
@@ -66,6 +70,8 @@ minfree=$(echo "$run4" | sed -n 's/^MINFREE \([0-9][0-9]*\)$/\1/p' | head -1)
 peakrss=$(echo "$run4" | sed -n 's/^PEAKRSS \([0-9][0-9]*\)$/\1/p' | head -1)
 minfreq=$(echo "$run4" | sed -n 's/^MINFREQ \([0-9][0-9]*\)$/\1/p' | head -1)
 [ -n "${minfreq:-}" ] && echo "min GPU freq during N=4 run: $minfreq Hz (921600000 = full clock; lower means the governor throttled or idled)"
+mincpufreq=$(echo "$run4" | sed -n 's/^MINCPUFREQ \([0-9][0-9]*\)$/\1/p' | head -1)
+[ -n "${mincpufreq:-}" ] && echo "min CPU freq during N=4 run: $mincpufreq Hz (1479000 = max; low + slow run = thermal throttle, max + slow run = co-tenant contention)"
 [ -n "$wall" ] || fail "no wall time in N=4 output"
 [ -n "$sndr" ] || fail "no SNDR in N=4 output"
 
