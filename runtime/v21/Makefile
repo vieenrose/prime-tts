@@ -13,6 +13,16 @@ CUF     ?= -O3 -arch=sm_53 -std=c++11
 CUDA    ?= /usr/local/cuda
 GEN      = runtime/v21/gen/pt_graph.c
 HDR      = runtime/v21/src/pt_v21.h runtime/v21/gen/pt_graph_tab.h runtime/v21/Makefile   # flag changes rebuild
+# Fingerprint of the effective toolchain flags: an env-provided CFLAGS/CUF change must also
+# rebuild (a stale binary would silently benchmark the wrong code). Content changes only when
+# the flags do, so steady-state builds stay no-ops.
+BFLAGS   := build/flags.mk
+BFORCE: ;
+$(BFLAGS): BFORCE
+	@mkdir -p build
+	@echo "CC=$(CC) CFLAGS=$(CFLAGS) NVCC=$(NVCC) CUF=$(CUF) CUDA=$(CUDA)" > $@.new
+	@if cmp -s $@.new $@ 2>/dev/null; then rm -f $@.new; else mv $@.new $@; fi
+HDR      += $(BFLAGS)
 SRC      = runtime/v21/src/pt_v21_host.c runtime/v21/src/main_v21.c
 INC      = -Iruntime/v21/src -Iruntime/v21/gen
 
@@ -52,4 +62,4 @@ gen:
 
 clean:
 	rm -f build/pt_v21_host build/pt_v21_nano build/pt_v21_par build/*.o
-.PHONY: host nano par gen clean
+.PHONY: host nano par gen clean BFORCE
