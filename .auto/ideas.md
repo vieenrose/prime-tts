@@ -117,6 +117,14 @@ future runs gate the optimized path too -- diagnostic-only, include in finalize 
   fails one-change-per-experiment and risk-adjusted EV independent of size. Rejected finally, for
   the right reasons this time: multi-part + race risk, not size.
 
+## Critical-path timestamps (run 106): the 3-slow-1-fast upload pattern explained
+Absolute per-stream timestamps (temporary instrumentation, reverted): all 4 opens start at ~t+0
+and each reports ~107 ms (serialized record pass, ~105 ms total, not 4x). cuda phase ~282 ms per
+stream: waiters do stream/arena creation concurrently with the single warmup+upload (different
+locks) and block only on the remaining upload. Inference starts ~t+390 ms. The soak test's
+3-slow-1-fast upload numbers were lock-wait accounting (waiters report waits), not three uploads;
+the real upload happens once. No new lever; the startup model stands at higher resolution.
+
 ## Killed by measurement #7 (run 90): shortening the GPU warmup 64k -> 16k
 N=1 warmup+upload totals, 3 alternating pairs: 64k 279.0/288.6/259.4 (mean 275.7) vs 16k
 235.0/246.5/308.9 (mean 263.5). Tied on means, but pair 3 inverted (+49) on a 230 ms upload blowup
