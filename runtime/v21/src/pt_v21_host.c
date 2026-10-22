@@ -369,10 +369,14 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
   static int ff = -1;
   if (ff < 0) ff = getenv("PT_V21_F32MATH") ? atoi(getenv("PT_V21_F32MATH")) : 1;
   static int ft = -1;
-  if (ft < 0) ft = getenv("PT_V21_FASTTRIG") ? atoi(getenv("PT_V21_FASTTRIG")) : 1;
-  if (!g && ff && n >= 4096 && (op == PT_EXP || op == PT_TANH || op == PT_SIGMOID)) {
+  if (ft < 0) ft = getenv("PT_V21_FASTTRIG") ? atoi(getenv("PT_V21_FASTTRIG")) : 0;
+  if (!g && ff && n >= 4096 && (op == PT_EXP || op == PT_TANH || op == PT_SIGMOID || op == PT_SIN || op == PT_COS)) {
     if (op == PT_EXP)
       for (int64_t i = 0; i < n; i++) o[i] = expf(a[i]);
+    else if (op == PT_SIN)
+      for (int64_t i = 0; i < n; i++) o[i] = sinf(a[i]);
+    else if (op == PT_COS)
+      for (int64_t i = 0; i < n; i++) o[i] = cosf(a[i]);
     else if (ft && op == PT_TANH)
       for (int64_t i = 0; i < n; i++) {
         float x = a[i];
