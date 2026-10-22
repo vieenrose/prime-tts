@@ -738,6 +738,10 @@ pt_ctx *pt_v21_open(const char *container) {
   c->V = (pt_tv *) calloc(PT_N_TENSOR, sizeof(pt_tv));
   g_ctx = c;
   g_dump_tensor = getenv("PT_V21_DUMP_T") ? atoi(getenv("PT_V21_DUMP_T")) : -1;
+  /* the consumer tables drive fusion and chaining decisions; contexts open concurrently, so the
+   * one-time build must not run twice at once (a concurrent rebuild zeroes counts mid-use) */
+  static pthread_mutex_t cons_lock = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&cons_lock);
   if (!g_cons_built) {
     for (int i = 0; i < PT_N_TENSOR; i++) {
       g_n_cons[i] = 0;
@@ -751,6 +755,7 @@ pt_ctx *pt_v21_open(const char *container) {
         }
     g_cons_built = 1;
   }
+  pthread_mutex_unlock(&cons_lock);
   c->fuse = getenv("PT_V21_FUSE") ? atoi(getenv("PT_V21_FUSE")) : 1;
   c->skip = (char *) calloc(PT_N_NODE, 1);
   c->prof = getenv("PT_V21_EKIND") ? 1 : 0;

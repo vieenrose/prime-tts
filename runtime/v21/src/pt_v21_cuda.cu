@@ -11,6 +11,7 @@
  * 4-stream batching (M3) change the plumbing, not the kernels.
  */
 #include <cuda_runtime.h>
+#include <pthread.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -61,7 +62,23 @@ static int g_wdev_n, g_wref;
 
 static size_t g_wdev_bytes;
 
+/* Streams open concurrently. The refcount check and the whole upload run under one lock, so a
+ * stream that arrives while another is uploading waits until every record is on the device.
+ * Without it, a non-atomic '++g_wref > 1' let a late stream return immediately and run inference
+ * with cudaMalloc'd pointers whose cudaMemcpy had not happened yet: garbage weights, observed as
+ * one wrong stream of four on a cold run (SNDR -1.98 dB, length off by 256 samples). */
+static pthread_mutex_t g_wlock = PTHREAD_MUTEX_INITIALIZER;
+
+static int weights_upload_locked(pt_ctx *c, int verbose);
+
 static int weights_upload(pt_ctx *c, int verbose) {
+  pthread_mutex_lock(&g_wlock);
+  int r = weights_upload_locked(c, verbose);
+  pthread_mutex_unlock(&g_wlock);
+  return r;
+}
+
+static int weights_upload_locked(pt_ctx *c, int verbose) {
   int n = pt_v21_n_cont(c);
   if (++g_wref > 1)
     return 0;   /* already uploaded: the weights are identical for every stream */
@@ -109,6 +126,7 @@ static void *weight_ctab(int idx) {
 }
 
 static void weights_release(void) {
+  pthread_mutex_lock(&g_wlock);
   if (--g_wref <= 0) {
     for (int i = 0; i < g_wdev_n; i++)
       if (g_wdev[i])
@@ -118,6 +136,7 @@ static void weights_release(void) {
     g_wdev_n = 0;
     g_wref = 0;
   }
+  pthread_mutex_unlock(&g_wlock);
 }
 
 /* bump arena with a mark/release discipline: the graph issues conv kernels one at a time, so each

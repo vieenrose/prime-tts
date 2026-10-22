@@ -1,0 +1,175 @@
+diff --git a/runtime/v21/src/pt_v21.h b/runtime/v21/src/pt_v21.h
+index d4cfeb6..ae045b5 100644
+--- a/runtime/v21/src/pt_v21.h
++++ b/runtime/v21/src/pt_v21.h
+@@ -84,6 +84,8 @@ typedef struct {
+   void *p;              /* host payload (fp32 = float, i64 = int64_t, bool = uint8_t) */
+   int dev;              /* 1 = payload lives on the CUDA device (pt_v21_cuda.cu) */
+   int dev_res;          /* 1 = current values live only in dev_p (device arena, conv chain) */
++  int pre_act;          /* 1 = LeakyReLU(pre_alpha) still to be applied by the consuming conv */
++  float pre_alpha;
+   void *dev_p;
+   int alive;
+ } pt_tv;
+@@ -137,6 +139,8 @@ struct pt_ctx {
+   int64_t conv_pad_in;
+   const float *conv_in_dev;   /* device-resident conv input (chain), or NULL */
+   int conv_keep;              /* 1 = keep this conv's output on the device for the next conv */
++  int conv_in_act;            /* 1 = apply LeakyReLU(conv_in_alpha) to the conv input as loaded */
++  float conv_in_alpha;
+   float *conv_out_dev;        /* set by the wrapper when the output was kept */
+   void *chain_mark;           /* arena mark held while a conv chain is in flight */   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
+ };
+diff --git a/runtime/v21/src/pt_v21_cuda.cu b/runtime/v21/src/pt_v21_cuda.cu
+index f1e3bcd..7e18aa3 100644
+--- a/runtime/v21/src/pt_v21_cuda.cu
++++ b/runtime/v21/src/pt_v21_cuda.cu
+@@ -349,7 +349,7 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig(
+     const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
+     float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
+     const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
+-    float ea1, int64_t pad_in) {
++    float ea1, int64_t pad_in, int in_act, float in_alpha) {
+   __shared__ float4 Ws[IG_RK][16];
+   __shared__ float4 Xs[IG_RK][16];   /* [r][column quad] */
+   const int tid = threadIdx.x;
+@@ -396,6 +396,12 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig(
+         if (tc + 2 < Tout && s2 >= 0 && s2 < ldx) xv.z = row[s2];
+         int64_t s3 = s2 + stride;
+         if (tc + 3 < Tout && s3 >= 0 && s3 < ldx) xv.w = row[s3];
++        if (in_act) {   /* forward-fused LeakyReLU of the producer: same fp32 op, zeros stay 0 */
++          xv.x = xv.x >= 0.f ? xv.x : in_alpha * xv.x;
++          xv.y = xv.y >= 0.f ? xv.y : in_alpha * xv.y;
++          xv.z = xv.z >= 0.f ? xv.z : in_alpha * xv.z;
++          xv.w = xv.w >= 0.f ? xv.w : in_alpha * xv.w;
++        }
+       }
+     }
+     Xs[lr][lq] = xv;
+@@ -442,7 +448,7 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig8(
+     const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
+     float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
+     const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
+-    float ea1, int64_t pad_in) {
++    float ea1, int64_t pad_in, int in_act, float in_alpha) {
+   __shared__ float4 Ws[IG_RK][16];
+   __shared__ float4 Xs[IG_RK][32];   /* [r][column quad], 32 quads = 128 columns */
+   const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+@@ -489,6 +495,12 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig8(
+           if (tc + 2 < Tout && s2 >= 0 && s2 < ldx) xv.z = row[s2];
+           int64_t s3 = s2 + stride;
+           if (tc + 3 < Tout && s3 >= 0 && s3 < ldx) xv.w = row[s3];
++          if (in_act) {   /* forward-fused LeakyReLU of the producer: same fp32 op, zeros stay 0 */
++            xv.x = xv.x >= 0.f ? xv.x : in_alpha * xv.x;
++            xv.y = xv.y >= 0.f ? xv.y : in_alpha * xv.y;
++            xv.z = xv.z >= 0.f ? xv.z : in_alpha * xv.z;
++            xv.w = xv.w >= 0.f ? xv.w : in_alpha * xv.w;
++          }
+         }
+       }
+       Xs[lr][qq] = xv;
+@@ -620,12 +632,12 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
+       dim3 g8((unsigned) ((Tout + 127) / 128), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
+       pt_conv_kernel_ig8<<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
+           dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+-          (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
++          (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, c->conv_in_act, c->conv_in_alpha);
+     } else {
+     dim3 gig((unsigned) ((Tout + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
+     pt_conv_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
+         dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+-        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
++        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, c->conv_in_act, c->conv_in_alpha);
+     }
+   } else if (wsm) {
+     pt_conv_kernel_wsm<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
+diff --git a/runtime/v21/src/pt_v21_host.c b/runtime/v21/src/pt_v21_host.c
+index 7e74566..ecdd1d6 100644
+--- a/runtime/v21/src/pt_v21_host.c
++++ b/runtime/v21/src/pt_v21_host.c
+@@ -77,6 +77,12 @@ static void tv_free(pt_ctx *c, pt_tv *t) {
+   t->n = 0;
+ }
+ 
++static int conv_nopad_on(void) {
++  static int v = -1;
++  if (v < 0) v = getenv("PT_V21_CONV_NOPAD") ? atoi(getenv("PT_V21_CONV_NOPAD")) : 1;
++  return v;
++}
++
+ static int host_rows_on(void) {
+   static int v = -1;
+   if (v < 0) v = getenv("PT_V21_HOSTROWS") ? atoi(getenv("PT_V21_HOSTROWS")) : 1;
+@@ -90,6 +96,7 @@ static int tv_alloc(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim) {
+   t->ndim = ndim;
+   t->n = n;
+   t->dev_res = 0;   /* a fresh tensor never refers to a chained device buffer */
++  t->pre_act = 0;
+   t->dev_p = NULL;
+   for (int i = 0; i < PT_V21_MAX_RANK; i++) t->d[i] = i < ndim ? d[i] : 1;
+   size_t bytes = (size_t) (n * dt_sz(dt));
+@@ -2031,7 +2038,36 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+       case PT_TANH: r = un_op(c, PT_TANH, in[0], 0, out[0], 0); break;
+       case PT_SIGMOID: r = un_op(c, PT_SIGMOID, in[0], 0, out[0], 0); break;
+       case PT_RELU: r = un_op(c, PT_RELU, in[0], 0, out[0], 0); break;
+-      case PT_LEAKYRELU: r = un_op(c, PT_LEAKYRELU, in[0], 0, out[0], nd->f0); break;
++      case PT_LEAKYRELU: {
++        /* Forward fusion: when this LeakyReLU's only consumer is a conv on the unpadded GEMM path,
++         * hand the conv the *input* tensor and let its loader apply the activation (the same fp32
++         * op as un_op, bit-identical). The input must stay alive until the conv reads it: if this
++         * node is its last use, ownership moves to the alias; if it dies between here and the conv,
++         * do not fuse. */
++        static int lfwd = -1;
++        if (lfwd < 0) lfwd = getenv("PT_V21_LRELU_FWD") ? atoi(getenv("PT_V21_LRELU_FWD")) : 1;
++        int xi = nd->in[0], oi = nd->out[0];
++        int cn = (oi >= 0 && g_n_cons[oi] == 1) ? g_cons_node[oi] : -1;
++        int ok = lfwd && c->fuse && c->use_cuda && c->ck_n == 0 && pt_v21_conv_pads_in_kernel(c) &&
++                 conv_nopad_on() && cn > idx && !(c->skip && c->skip[cn]) &&
++                 pt_ndefs[cn].op == PT_CONV && pt_ndefs[cn].in[0] == oi && in[0]->dt == DT_F32 &&
++                 in[0]->alive && !in[0]->pre_act && !in[0]->dev_res &&
++                 (pt_graph_last_use[xi] == idx || pt_graph_last_use[xi] >= cn);
++        if (ok) {
++          int owner = (pt_graph_last_use[xi] == idx);
++          c->V[oi] = c->V[xi];
++          c->V[oi].pre_act = 1;
++          c->V[oi].pre_alpha = nd->f0;
++          if (owner) {
++            c->V[xi].dev = 2;   /* the buffer now belongs to the alias; the free below skips x */
++          } else {
++            c->V[oi].dev = 2;   /* x still owns it and outlives the conv */
++          }
++          break;
++        }
++        r = un_op(c, PT_LEAKYRELU, in[0], 0, out[0], nd->f0);
++        break;
++      }
+       case PT_SOFTPLUS: r = un_op(c, PT_SOFTPLUS, in[0], 0, out[0], 0); break;
+       case PT_ERF: r = un_op(c, PT_ERF, in[0], 0, out[0], 0); break;
+       case PT_ABS: r = un_op(c, PT_ABS, in[0], 0, out[0], 0); break;
+@@ -2197,9 +2233,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+             (size_t) ((((size_t) N * cin * ldxp) * 4 + 63) & ~(size_t) 63);
+         /* The GEMM conv kernel applies the zero padding itself (out-of-row taps read as 0), so on
+          * the CUDA path the unpadded tensor is handed over as is: no padded host copy per conv. */
+-        static int nopad = -1;
+-        if (nopad < 0) nopad = getenv("PT_V21_CONV_NOPAD") ? atoi(getenv("PT_V21_CONV_NOPAD")) : 1;
+-        int unpadded = nopad && c->use_cuda && pt_v21_conv_pads_in_kernel(c);
++        int unpadded = conv_nopad_on() && c->use_cuda && pt_v21_conv_pads_in_kernel(c);
+         float *xp;
+         if (unpadded) {
+           xp = (float *) X->p;
+@@ -2280,12 +2314,15 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+           keep = cn >= 0 && !c->skip[cn] && pt_ndefs[cn].op == PT_CONV && pt_ndefs[cn].in[0] == fin_t;
+         }
+         c->conv_in_dev = (unpadded && X->dev_res) ? (const float *) X->dev_p : NULL;
++        c->conv_in_act = (unpadded && X->pre_act) ? 1 : 0;
++        c->conv_in_alpha = X->pre_alpha;
+         c->conv_keep = keep;
+         pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
+                     c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1, epi[0], epi[1],
+                     epa[0], epa[1]);
+         c->conv_in_dev = NULL;
+         c->conv_keep = 0;
++        c->conv_in_act = 0;
+         if (n_fused) {
+           /* The conv's buffer becomes the last fused node's tensor: the conv's own tensor id stops
+            * owning it (dev 2 is never freed) so the buffer is freed exactly once, at the last use of
