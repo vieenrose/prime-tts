@@ -89,6 +89,8 @@ static int tv_alloc(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim) {
   t->dt = dt;
   t->ndim = ndim;
   t->n = n;
+  t->dev_res = 0;   /* a fresh tensor never refers to a chained device buffer */
+  t->dev_p = NULL;
   for (int i = 0; i < PT_V21_MAX_RANK; i++) t->d[i] = i < ndim ? d[i] : 1;
   size_t bytes = (size_t) (n * dt_sz(dt));
   if (bytes == 0) bytes = dt_sz(dt);
@@ -2264,9 +2266,26 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
             t = cd->out[0];
           }
         }
+        /* Device-resident conv chain: when the (post-epilogue) result's only consumer is another
+         * conv, leave it in the device arena; the next conv reads it there. Needs the unpadded GEMM
+         * path (in-kernel padding) and unpadded channel rows (cout % 4 == 0). */
+        int fin_t = nd->out[0];
+        for (int i = 0; i < n_fused; i++)
+          fin_t = pt_ndefs[fused_nodes[i]].out[0];
+        static int chain_on = -1;
+        if (chain_on < 0) chain_on = getenv("PT_V21_CHAIN") ? atoi(getenv("PT_V21_CHAIN")) : 1;
+        int keep = 0;
+        if (chain_on && unpadded && cout4 == cout && g_n_cons[fin_t] == 1) {
+          int cn = g_cons_node[fin_t];
+          keep = cn >= 0 && !c->skip[cn] && pt_ndefs[cn].op == PT_CONV && pt_ndefs[cn].in[0] == fin_t;
+        }
+        c->conv_in_dev = (unpadded && X->dev_res) ? (const float *) X->dev_p : NULL;
+        c->conv_keep = keep;
         pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
                     c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1, epi[0], epi[1],
                     epa[0], epa[1]);
+        c->conv_in_dev = NULL;
+        c->conv_keep = 0;
         if (n_fused) {
           /* The conv's buffer becomes the last fused node's tensor: the conv's own tensor id stops
            * owning it (dev 2 is never freed) so the buffer is freed exactly once, at the last use of
@@ -2282,6 +2301,16 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
             last_out = ao;
             c->V[nd->out[0]].dev = 2;
           }
+        }
+        c->V[fin_t].dev_res = 0;
+        c->V[fin_t].dev_p = NULL;
+        if (c->conv_out_dev) {
+          /* the host buffer of fin_t is left stale on purpose: its only reader is the next conv,
+           * which takes the device copy */
+          c->V[fin_t].dev_res = 1;
+          c->V[fin_t].dev_p = c->conv_out_dev;
+          if (getenv("PT_V21_CHAINLOG")) fprintf(stderr, "chain: node %d keeps its output\n", ni);
+          c->conv_out_dev = NULL;
         }
         if (cout4 != cout) {
           for (int64_t b = 0; b < N; b++)

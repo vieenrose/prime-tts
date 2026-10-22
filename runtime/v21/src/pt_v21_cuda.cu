@@ -551,7 +551,10 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   size_t wb = (size_t) (cout4 / 4) * K * cin * 4 * 4;
   void *mark = arena_mark(c);
   double tA = gpu_prof() ? gpu_now() : 0.0;
-  dx = (float *) arena_alloc(c, xb);
+  const float *din = c->conv_in_dev;   /* chained input already on the device */
+  int keep = c->conv_keep;
+  c->conv_out_dev = NULL;
+  dx = din ? (float *) din : (float *) arena_alloc(c, xb);
   dy = (float *) arena_alloc(c, yb);
   if (gpu_prof()) c->g_alloc_ms += gpu_now() - tA;
   if (!dx || !dy) {
@@ -576,7 +579,8 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   }
   tA = gpu_prof() ? gpu_now() : 0.0;
   /* async on the stream: the copy queues behind the previous kernel instead of blocking the host */
-  PTCHK(cudaMemcpyAsync(dx, X, xb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
+  if (!din)
+    PTCHK(cudaMemcpyAsync(dx, X, xb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
   if (gpu_prof()) c->g_copy_ms += gpu_now() - tA;
   if (bias) {
     /* the bias is a container record: keep it resident like the weights, so a conv does not pay a
@@ -637,6 +641,14 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   }
   /* a launch that fails (e.g. too many registers for the block size) must not pass silently */
   PTCHK(cudaGetLastError());
+  if (keep && !dy_own && !dx_own && !dw_own && !db_own) {
+    /* chain link: the next conv reads dy straight from the arena. No copy back, no sync; the arena
+     * range stays allocated until the chain's last conv releases it. */
+    if (!c->chain_mark)
+      c->chain_mark = mark;
+    c->conv_out_dev = dy;
+    return 0;
+  }
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   if (gpu_prof()) {
@@ -652,7 +664,12 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     cudaFree(dx);
   if (dy_own)
     cudaFree(dy);
-  arena_release(c, mark);   /* weights are resident: only the activation scratch is released */
+  if (c->chain_mark) {
+    arena_release(c, c->chain_mark);   /* end of a conv chain: release every link */
+    c->chain_mark = NULL;
+  } else {
+    arena_release(c, mark);   /* weights are resident: only the activation scratch is released */
+  }
   if (gpu_prof()) c->g_free_ms += gpu_now() - tA;
   return 0;
 }

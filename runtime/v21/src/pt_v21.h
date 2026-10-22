@@ -83,6 +83,8 @@ typedef struct {
   int64_t n;
   void *p;              /* host payload (fp32 = float, i64 = int64_t, bool = uint8_t) */
   int dev;              /* 1 = payload lives on the CUDA device (pt_v21_cuda.cu) */
+  int dev_res;          /* 1 = current values live only in dev_p (device arena, conv chain) */
+  void *dev_p;
   int alive;
 } pt_tv;
 
@@ -132,7 +134,11 @@ struct pt_ctx {
   void *g_arena;     /* resident device arena base (M3) */
   void *g_stream;    /* per-stream CUDA stream so concurrent requests actually overlap (M3) */
   size_t g_arena_bytes, g_arena_used;
-  int64_t conv_pad_in;   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
+  int64_t conv_pad_in;
+  const float *conv_in_dev;   /* device-resident conv input (chain), or NULL */
+  int conv_keep;              /* 1 = keep this conv's output on the device for the next conv */
+  float *conv_out_dev;        /* set by the wrapper when the output was kept */
+  void *chain_mark;           /* arena mark held while a conv chain is in flight */   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
 };
 
 
