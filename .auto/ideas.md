@@ -58,3 +58,13 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
   unsliced kernel. A 2-lane (float2) slice halves that to 18 KB and fits shared.
 - matmul: 50 calls, ~30-90 ms; same weight-staging idea.
 - Host: SLICE 205 ms in 214 calls (memcpy-bound, scalar), ADD 105, TANH 81 (libm per element), PAD 76.
+
+## Killed by measurement (do not retry without new evidence)
+- **fp16 conv activations**: measured by rounding every conv input to IEEE binary16 in the CPU conv
+  path (env-gated probe): SNDR 43.73 dB, max|d| 5.9e-3 against the 60 dB gate. The decoder is far
+  too sensitive to activation quantization; halving activation traffic this way is off the table.
+- 4 output columns per thread (16 accumulators): occupancy loss on 2 SMs; 39% slower in matched A/B.
+- 2-channel conv blocks (halve the weight slice): 52% slower - halving the channel group doubles the
+  blocks, and every block re-reads the activation rows (activation traffic, not weight traffic, binds).
+- Launch-shape heuristic (block size from output length): +10.5% at N=4; small blocks hurt the long
+  decoder outputs more than they help the short encoder convs.

@@ -59,6 +59,8 @@ static int gpu_prof(void) {
 static void **g_wdev;      /* ctab index -> device pointer, read-only across streams */
 static int g_wdev_n, g_wref;
 
+static size_t g_wdev_bytes;
+
 static int weights_upload(pt_ctx *c, int verbose) {
   int n = pt_v21_n_cont(c);
   if (++g_wref > 1)
@@ -75,6 +77,7 @@ static int weights_upload(pt_ctx *c, int verbose) {
     size_t nb = (size_t) pt_v21_cont_bytes(c, i);
     if (!h || nb == 0)
       continue;
+    g_wdev_bytes += nb;
     if (cudaMalloc(&g_wdev[i], nb) != cudaSuccess ||
         cudaMemcpy(g_wdev[i], h, nb, cudaMemcpyHostToDevice) != cudaSuccess) {
       fprintf(stderr, "pt_v21 cuda: weight upload failed for ctab %d (%zu B)\n", i, nb);
@@ -88,6 +91,8 @@ static int weights_upload(pt_ctx *c, int verbose) {
             (double) total / 1048576.0);
   return 0;
 }
+
+double pt_v21_cuda_weights_mib(pt_ctx *c) { (void) c; return (double) (g_wdev_bytes >> 20); }
 
 static void *weight_ctab(int idx) {
   if (idx < 0 || idx >= g_wdev_n)
@@ -113,6 +118,8 @@ static int arena_init(pt_ctx *c, size_t bytes) {
   if (cudaMalloc(&c->g_arena, bytes) != cudaSuccess)
     return -1;
   c->g_arena_bytes = bytes;
+  c->dev_bytes_arena = bytes;
+  c->dev_bytes_weights = g_wdev_bytes;   /* shared across streams, reported by each */
   c->g_arena_used = 0;
   return 0;
 }
@@ -121,6 +128,9 @@ static void *arena_alloc(pt_ctx *c, size_t bytes) {
   if (off + bytes > c->g_arena_bytes)
     return NULL;
   c->g_arena_used = off + bytes;
+  if ((size_t) off + bytes > c->dev_bytes_arena)
+    c->dev_bytes_arena = (size_t) off + bytes;   /* high-water mark, for the memory report */
+  c->arena_alloc_bytes = (size_t) off + bytes;
   return (char *) c->g_arena + off;
 }
 static void *arena_mark(pt_ctx *c) { return (char *) c->g_arena + c->g_arena_used; }
@@ -168,10 +178,25 @@ void pt_v21_cuda_shutdown(pt_ctx *c) {
  * thread = (row block, output column) -> four channel outputs at one column.
  * x is the zero-padded scratch the host builds: rows of ldx floats, real input starting at
  * column pad, so column (t*stride + k*dil - pad) is a plain offset. */
+/* Epilogue fused into the conv kernels: the same fp32 arithmetic the interpreter's elementwise
+ * nodes do, applied to the accumulated output before it is written. */
+__device__ __forceinline__ float pt_epi_dev(float v, int op, float a) {
+  if (op == 1)
+    return v >= 0.0f ? v : a * v;   /* LeakyReLU */
+  if (op == 2)
+    return v > 0.0f ? v : 0.0f;     /* ReLU */
+  if (op == 3)
+    return v * a;                   /* multiply by scalar */
+  if (op == 4)
+    return v + a;                   /* add scalar */
+  return v;
+}
+
 __global__ void pt_conv_kernel(const float *__restrict__ x, int64_t ldx, int cin, int K, int dil,
                                int stride, int pad, float *__restrict__ y, int64_t ldy,
                                int64_t Tout, int cout, const float *__restrict__ wp,
-                               const float *__restrict__ bias, int64_t bsx, int64_t bsy) {
+                               const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1,
+                                   float ea0, float ea1) {
   int64_t t = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
   int blk = (int) blockIdx.y;
   int64_t b = (int64_t) blockIdx.z;
@@ -196,6 +221,14 @@ __global__ void pt_conv_kernel(const float *__restrict__ x, int64_t ldx, int cin
       acc.y += w.y * xv;
       acc.z += w.z * xv;
       acc.w += w.w * xv;
+    }
+  }
+  if (epi0 || epi1) {
+    for (int lane = 0; lane < 4; lane++) {
+      float v = (&acc.x)[lane];
+      v = pt_epi_dev(v, epi0, ea0);
+      v = pt_epi_dev(v, epi1, ea1);
+      (&acc.x)[lane] = v;
     }
   }
   float *yb = y + b * bsy;
@@ -227,7 +260,8 @@ __global__ void pt_conv_kernel(const float *__restrict__ x, int64_t ldx, int cin
 __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int cin, int K,
                                    int dil, int stride, int pad, float *__restrict__ y, int64_t ldy,
                                    int64_t Tout, int cout, const float *__restrict__ wp,
-                                   const float *__restrict__ bias, int64_t bsx, int64_t bsy) {
+                                   const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1,
+                                   float ea0, float ea1) {
   extern __shared__ float4 wsm[];   /* [k*cin + ci] -> this block's 4 channel lanes */
   const int NT = blockDim.x;
   int64_t t = (int64_t) blockIdx.x * NT + threadIdx.x;
@@ -257,6 +291,14 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
       acc.w += w.w * xv;
     }
   }
+  if (epi0 || epi1) {
+    for (int lane = 0; lane < 4; lane++) {
+      float v = (&acc.x)[lane];
+      v = pt_epi_dev(v, epi0, ea0);
+      v = pt_epi_dev(v, epi1, ea1);
+      (&acc.x)[lane] = v;
+    }
+  }
   float *yb = y + b * bsy;
   if (co0 + 0 < cout)
     yb[(int64_t) (co0 + 0) * ldy + t] = acc.x;
@@ -279,15 +321,16 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
  */
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                const float *bias, int64_t batch, int wtab, int btab) {
+                const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float ea0,
+                float ea1) {
   if (!c->use_cuda || !gpu_on("conv"))
     return pt_v21_conv_cpu(c, X, ldx, cin, Y, ldy, n, cout, K, stride, pad, dil, wp, bias, batch,
-                           wtab, btab);
+                           wtab, btab, epi0, epi1, ea0, ea1);
   c->n_conv++;
   int cout4 = (cout + 3) / 4 * 4;
   int64_t Tout = n;   /* graph-computed output length, same convention as the CPU kernel */
   float *dx = NULL, *dw = NULL, *dy = NULL, *db = NULL;
-  int dw_own = 0, db_own = 0;
+  int dw_own = 0, db_own = 0, dx_own = 0, dy_own = 0;
   size_t xb = (size_t) batch * cin * ldx * 4;
   /* the output buffer is the *padded* row layout [batch][cout4][Tout]: the host trims by copying
    * cout rows at a per-batch stride of cout4*Tout, so the kernel must use that stride too */
@@ -298,10 +341,23 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   dx = (float *) arena_alloc(c, xb);
   dy = (float *) arena_alloc(c, yb);
   if (gpu_prof()) c->g_alloc_ms += gpu_now() - tA;
-  if (!dx || !dy) PTCHK(cudaMalloc(&dx, xb));   /* arena full: fall back, still correct */
+  if (!dx || !dy) {
+    /* same as the conv path: a fallback allocation must be owned and freed, and dy must exist too */
+    if (!dx) {
+      PTCHK(cudaMalloc(&dx, xb));
+      dx_own = 1;
+    }
+    if (!dy) {
+      PTCHK(cudaMalloc(&dy, yb));
+      dy_own = 1;
+    }
+    c->dev_bytes_stray += xb + yb;
+  }   /* arena full: fall back, still correct */
+  c->dev_bytes_stray += xb;
   dw = (float *) weight_ctab(wtab);   /* resident weights, shared across streams */
   if (!dw) {
     PTCHK(cudaMalloc(&dw, wb));
+    c->dev_bytes_stray += wb;
     PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
     dw_own = 1;
   }
@@ -315,6 +371,7 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     db = (float *) weight_ctab(btab);
     if (!db) {
       PTCHK(cudaMalloc(&db, (size_t) cout * 4));
+      c->dev_bytes_stray += (size_t) cout * 4;
       PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
       db_own = 1;
     }
@@ -329,13 +386,14 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   if (wsm) {
     pt_conv_kernel_wsm<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-        (int64_t) cin * ldx, (int64_t) cout4 * Tout);
+        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1);
   } else {
     pt_conv_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, K, dil, stride,
                                                                       pad, dy, /*ldy=*/Tout,
                                                                       /*Tout=*/Tout, cout, dw, db,
                                                                       (int64_t) cin * ldx,
-                                                                      (int64_t) cout4 * Tout);
+                                                                      (int64_t) cout4 * Tout, epi0,
+                                                                      epi1, ea0, ea1);
   }
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
@@ -348,6 +406,10 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     cudaFree(dw);
   if (db_own)
     cudaFree(db);
+  if (dx_own)
+    cudaFree(dx);
+  if (dy_own)
+    cudaFree(dy);
   arena_release(c, mark);   /* weights are resident: only the activation scratch is released */
   if (gpu_prof()) c->g_free_ms += gpu_now() - tA;
   return 0;
@@ -500,17 +562,29 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
   int cout4 = (cout + 3) / 4 * 4;
   int64_t Lout = (tin - 1) * s - 2 * pad + K;
   float *dx = NULL, *dw = NULL, *dy = NULL, *db = NULL;
-  int dw_own = 0, db_own = 0;
+  int dw_own = 0, db_own = 0, dx_own = 0, dy_own = 0;
   size_t xb = (size_t) batch * cin * ldx * 4;
   size_t yb = (size_t) batch * cout4 * Lout * 4;   /* padded rows, matching the host's trim stride */
   size_t wb = (size_t) s * (cout4 / 4) * ntap * cin * 4 * 4;
   void *mark = arena_mark(c);
   dx = (float *) arena_alloc(c, xb);
   dy = (float *) arena_alloc(c, yb);
-  if (!dx || !dy) PTCHK(cudaMalloc(&dx, xb));
+  if (!dx || !dy) {
+    /* same as the conv path: a fallback allocation must be owned and freed, and dy must exist too */
+    if (!dx) {
+      PTCHK(cudaMalloc(&dx, xb));
+      dx_own = 1;
+    }
+    if (!dy) {
+      PTCHK(cudaMalloc(&dy, yb));
+      dy_own = 1;
+    }
+    c->dev_bytes_stray += xb + yb;
+  }
   dw = (float *) weight_ctab(wtab);
   if (!dw) {
     PTCHK(cudaMalloc(&dw, wb));
+    c->dev_bytes_stray += wb;
     PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
     dw_own = 1;
   }
@@ -519,6 +593,7 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
     db = (float *) weight_ctab(btab);
     if (!db) {
       PTCHK(cudaMalloc(&db, (size_t) cout * 4));
+      c->dev_bytes_stray += (size_t) cout * 4;
       PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
       db_own = 1;
     }
@@ -544,6 +619,10 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
     cudaFree(dw);
   if (db_own)
     cudaFree(db);
+  if (dx_own)
+    cudaFree(dx);
+  if (dy_own)
+    cudaFree(dy);
   arena_release(c, mark);
   return 0;
 }
@@ -596,11 +675,16 @@ int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, 
   dA = (float *) arena_alloc(c, ab);
   dB = (float *) arena_alloc(c, bb);
   dC = (float *) arena_alloc(c, cb);
+  int d_own = 0;
   if (!dA || !dB || !dC) {
-    cudaFree(dA); cudaFree(dB); cudaFree(dC);
+    cudaFree(dA);
+    cudaFree(dB);
+    cudaFree(dC);
     PTCHK(cudaMalloc(&dA, ab));
     PTCHK(cudaMalloc(&dB, bb));
     PTCHK(cudaMalloc(&dC, cb));
+    d_own = 1;
+    c->dev_bytes_stray += ab + bb + cb;
   }
   PTCHK(cudaMemcpyAsync(dA, A, ab, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
   PTCHK(cudaMemcpyAsync(dB, B, bb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
@@ -611,6 +695,11 @@ int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, 
                                                                     ldc);
   PTCHK(cudaMemcpyAsync(C, dC, cb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
+  if (d_own) {
+    cudaFree(dA);
+    cudaFree(dB);
+    cudaFree(dC);
+  }
   arena_release(c, mark);
   return 0;
 }

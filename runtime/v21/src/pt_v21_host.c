@@ -32,6 +32,11 @@ typedef struct {
 struct pt_ctx *g_ctx;
 int g_node = -1, g_op = -1;
 int g_trace = -1;
+/* How many nodes read each tensor, and the node index of the sole reader: the fusion decision
+ * needs "this conv's output goes to exactly one elementwise node, and nothing else touches it". */
+static int g_n_cons[PT_N_TENSOR];
+static int g_cons_node[PT_N_TENSOR];
+static int g_cons_built;
 static int g_dump_tensor = -1;
 void pt_v21_trace(int idx) { g_trace = idx; }
 FILE *g_shapes = 0;
@@ -61,8 +66,11 @@ static int64_t tv_n(const pt_tv *t) {
   return n;
 }
 
-static void tv_free(pt_tv *t) {
-  if (t->alive && t->p) free(t->p);
+static void tv_free(pt_ctx *c, pt_tv *t) {
+  if (t->alive && t->p) {
+    free(t->p);
+    c->host_bytes_live -= (long) t->n * dt_sz(t->dt);
+  }
   t->p = 0;
   t->alive = 0;
   t->ndim = 0;
@@ -90,6 +98,10 @@ static int tv_alloc(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim) {
     c->n_alloc_fail++;
     return -1;
   }
+  c->host_bytes_live += (long) bytes;
+  c->host_alloc_count++;
+  if (c->host_bytes_live > c->host_bytes_peak)
+    c->host_bytes_peak = c->host_bytes_live;
   memset(t->p, 0, bytes);
   t->alive = 1;
   t->dev = 0;
@@ -656,6 +668,21 @@ pt_ctx *pt_v21_open(const char *container) {
   c->V = (pt_tv *) calloc(PT_N_TENSOR, sizeof(pt_tv));
   g_ctx = c;
   g_dump_tensor = getenv("PT_V21_DUMP_T") ? atoi(getenv("PT_V21_DUMP_T")) : -1;
+  if (!g_cons_built) {
+    for (int i = 0; i < PT_N_TENSOR; i++) {
+      g_n_cons[i] = 0;
+      g_cons_node[i] = -1;
+    }
+    for (int i = 0; i < PT_N_NODE; i++)
+      for (int j = 0; j < PT_V21_MAX_IN; j++)
+        if (pt_ndefs[i].in[j] >= 0) {
+          g_n_cons[pt_ndefs[i].in[j]]++;
+          g_cons_node[pt_ndefs[i].in[j]] = i;
+        }
+    g_cons_built = 1;
+  }
+  c->fuse = getenv("PT_V21_FUSE") ? atoi(getenv("PT_V21_FUSE")) : 1;
+  c->skip = (char *) calloc(PT_N_NODE, 1);
   c->prof = getenv("PT_V21_EKIND") ? 1 : 0;
   c->prof_node_on = c->prof && getenv("PT_V21_EKIND")[0] == '2';
   return c;
@@ -670,6 +697,18 @@ double pt_v21_stats_ms(pt_ctx *c, int which) {
 }
 
 void pt_v21_close(pt_ctx *c) {
+  if (getenv("PT_V21_MEM")) {
+    long cont = 0;
+    for (int i = 0; i < c->n_cont; i++)
+      if (c->cont_f32[i])
+        cont += (long) c->cont_n[i] * (long) c->cont_isz[i];
+    fprintf(stderr,
+            "MEM host: container_fp32=%ld MiB activation_peak=%ld MiB allocs=%ld  "
+            "dev: weights=%ld MiB arena=%ld MiB stray=%ld MiB\n",
+            cont >> 20, c->host_bytes_peak >> 20, c->host_alloc_count,
+            (long) pt_v21_cuda_weights_mib(c), (long) c->arena_alloc_bytes >> 20,
+            (long) c->dev_bytes_stray >> 20);
+  }
   if (!c) return;
   if (c->map && c->map != MAP_FAILED) munmap(c->map, c->maplen);
   for (int i = 0; i < c->n_cont; i++) host_cont_shared_put(i, c->cont_f32[i], c->cont_shared[i]);
@@ -1486,9 +1525,23 @@ static int op_nonzero(pt_ctx *c, const pt_tv *A, pt_tv *O) {
 }
 
 /* ---------------- weight-bearing ops over the container's packed layouts ---------------- */
+/* The fused epilogue, in fp32 exactly as the interpreter's elementwise ops compute it. */
+static float pt_epi_cpu(float v, int op, float a) {
+  if (op == 1)
+    return v >= 0.0f ? v : a * v;   /* LeakyReLU */
+  if (op == 2)
+    return v > 0.0f ? v : 0.0f;     /* ReLU */
+  if (op == 3)
+    return v * a;                   /* multiply by scalar */
+  if (op == 4)
+    return v + a;                   /* add scalar */
+  return v;
+}
+
 int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                     int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                    const float *bias, int64_t batch, int wtab, int btab) {
+                    const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1,
+                    float a0, float a1) {
   (void) wtab;
   (void) btab;
   c->n_conv++;
@@ -1525,6 +1578,23 @@ int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *
             yr[2 * ldy] += w2 * xv;
             yr[3 * ldy] += w3 * xv;
           }
+        }
+      }
+    }
+  }
+  /* fused epilogue: the same fp32 arithmetic the interpreter's elementwise nodes would have run */
+  if (epi0 || epi1) {
+    for (int64_t b = 0; b < batch; b++) {
+      float *y = Y + b * cout4 * ldy;
+      for (int co = 0; co < cout4; co++) {
+        float *yr = y + (int64_t) co * ldy;
+        for (int64_t t = 0; t < Tout; t++) {
+          float v = yr[t];
+          if (epi0)
+            v = pt_epi_cpu(v, epi0, a0);
+          if (epi1)
+            v = pt_epi_cpu(v, epi1, a1);
+          yr[t] = v;
         }
       }
     }
@@ -1650,9 +1720,10 @@ void pt_v21_cuda_shutdown(pt_ctx *c) { (void) c; }
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                const float *bias, int64_t batch, int wtab, int btab) {
+                const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float a0,
+                float a1) {
   return pt_v21_conv_cpu(c, X, ldx, cin, Y, ldy, n, cout, K, stride, pad, dil, wp, bias, batch,
-                          wtab, btab);
+                         wtab, btab, epi0, epi1, a0, a1);
 }
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
@@ -1722,7 +1793,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
   memset(c->n_ekind, 0, sizeof(c->n_ekind));
   for (int i = 0; i < PT_N_TENSOR; i++) {
     pt_tv *t = &c->V[i];
-    if (t->dev != 2) tv_free(t);
+    if (t->dev != 2) tv_free(c, t);
   }
   /* graph inputs (ids in table order, all origin "IN") alias the caller's feeds */
   int ni = 0;
@@ -1749,6 +1820,19 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
     g_node = idx;
     g_op = nd->op;
     if (g_trace == idx) dump_inputs(idx);
+    if (c->skip && c->skip[idx]) {
+      /* folded into a producer kernel; only its tensor bookkeeping is left to do */
+      for (int i = 0; i < PT_V21_MAX_OUT; i++) {
+        if (nd->out[i] >= 0) ck_save(c, nd->out[i]);
+      }
+      if (c->prof) {
+        c->t_ekind[nd->op] += 0.0;
+        c->n_ekind[nd->op]++;
+      }
+      for (int t = 0; t < PT_N_TENSOR; t++)
+        ;   /* the shared per-node free below is skipped: this node owns nothing it allocated */
+      continue;
+    }
     double tA = c->prof ? pt_v21_now() : 0.0;
     switch (nd->op) {
       case PT_CONST: {
@@ -1788,7 +1872,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         for (int i = 1; i < k; i++) {
           pt_tv tmp;
           bin_op(c, PT_ADD, &acc, in[i], &tmp);
-          if (have_alloc) tv_free(&acc);
+          if (have_alloc) tv_free(c, &acc);
           acc = tmp;
           have_alloc = 1;
         }
@@ -1980,8 +2064,69 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
                           " Tout=%lld ldxp=%lld\n", ni, pt_tdefs[nd->out[0]].origin, (long long) T,
                   (long long) N, cin, cout, K, stride, pad, dil, (long long) Tout,
                   (long long) ldxp);
+        /* Fuse the elementwise nodes that immediately follow this conv into its epilogue.  A node
+         * is fusable when its output feeds nothing else and it is LeakyReLU, ReLU, or a scalar
+         * Mul/Add, and the chain runs in graph order.  The arithmetic is the same fp32 arithmetic
+         * the interpreter would have done, so results are unchanged; what goes away is a host pass
+         * over the activation tensor (LEAKYRELU was 144 ms per stream, MUL 60, ADD 106). */
+        int epi[2] = {0, 0};
+        float epa[2] = {0.0f, 0.0f};
+        int fused_nodes[3] = {0, 0, 0};
+        int n_fused = 0;
+        if (c->fuse && c->skip && cout4 == cout) {
+          int t = nd->out[0];
+          for (int step = 0; step < 2; step++) {
+            if (t < 0 || g_n_cons[t] != 1)
+              break;
+            int cn = g_cons_node[t];
+            if (cn < 0 || c->skip[cn])
+              break;
+            const pt_node_def *cd = &pt_ndefs[cn];
+            int op = 0;
+            float sc = 0.0f;
+            if (cd->op == PT_LEAKYRELU && cd->in[0] == t) {
+              op = 1;
+              sc = cd->f0;   /* the node's own alpha, the same value un_op() receives */
+            }
+            else if (cd->op == PT_RELU && cd->in[0] == t)
+              op = 2;
+            else if (cd->op == PT_MUL || cd->op == PT_ADD) {
+              int other = cd->in[0] == t ? cd->in[1] : (cd->in[1] == t ? cd->in[0] : -1);
+              if (other < 0)
+                break;
+              pt_tv *ov = &c->V[other];
+              if (!ov->alive || ov->n != 1 || ov->dt != DT_F32)
+                break;   /* only scalar constants, whose value is already materialized */
+              op = cd->op == PT_MUL ? 3 : 4;
+              sc = *((const float *) ov->p);
+            } else {
+              break;
+            }
+            epi[step] = op;
+            epa[step] = sc;
+            fused_nodes[n_fused++] = cn;
+            t = cd->out[0];
+          }
+        }
         pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
-                    c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1);
+                    c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1, epi[0], epi[1],
+                    epa[0], epa[1]);
+        if (n_fused) {
+          /* The conv's buffer becomes the last fused node's tensor: the conv's own tensor id stops
+           * owning it (dev 2 is never freed) so the buffer is freed exactly once, at the last use of
+           * the final tensor, which is what the un-fused graph would have done. */
+          int last_out = nd->out[0];
+          for (int i = 0; i < n_fused; i++) {
+            int cn = fused_nodes[i];
+            int ao = pt_ndefs[cn].out[0];
+            c->skip[cn] = 1;
+            c->V[ao] = c->V[last_out];
+            c->V[ao].dev = (i == n_fused - 1) ? 1 : 2;
+            c->V[ao].alive = 1;
+            last_out = ao;
+            c->V[nd->out[0]].dev = 2;
+          }
+        }
         if (cout4 != cout) {
           for (int64_t b = 0; b < N; b++)
             memcpy((float *) out[0]->p + b * cout * Tout, yp + b * cout4 * Tout,
@@ -2127,7 +2272,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
     /* free inputs whose last consumer is this node */
     for (int i = 0; i < PT_V21_MAX_IN; i++) {
       int t = nd->in[i];
-      if (t >= 0 && c->V[t].dev != 2 && pt_graph_last_use[t] == idx) tv_free(&c->V[t]);
+      if (t >= 0 && c->V[t].dev != 2 && pt_graph_last_use[t] == idx) tv_free(c, &c->V[t]);
     }
   }
   pt_tv *w = &c->V[pt_graph_wav_tensor];

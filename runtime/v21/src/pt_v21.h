@@ -119,6 +119,12 @@ struct pt_ctx {
    * the 41 op kinds is actually costing the ~2.7 s of host graph work */
   int prof;
   int prof_node_on;
+  long host_bytes_live, host_bytes_peak;   /* bytes of live activation tensors, and the high-water mark */
+  long host_alloc_count;
+  double dev_bytes_weights, dev_bytes_arena, dev_bytes_stray;
+  size_t arena_alloc_bytes;   /* arena high-water mark */
+  char *skip;           /* PT_N_NODE: nodes folded into a producer kernel, not executed */
+  int fuse;             /* epilogue fusion enabled for this context */
   double *prof_node;   /* per-node ms (prof == 2); allocated lazily */
   double t_ekind[96];
   long n_ekind[96];
@@ -169,16 +175,18 @@ void pt_v21_cuda_shutdown(pt_ctx *c);
  * X already points at the column output column 0's first tap reads (shifted by -pad). */
 int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                     int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                    const float *bias, int64_t batch, int wtab, int btab);
+                    const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float a0, float a1);
 int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                      int64_t ldy, int cout, int s, int pad, int K, const float *wp,
                      const float *bias, int64_t batch, int wtab, int btab);
+/* MiB of resident container weights on the GPU (shared by all streams in the process) */
+double pt_v21_cuda_weights_mib(pt_ctx *c);
 int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda,
                       const float *B, int64_t ldb, int64_t nn, float *C, int64_t ldc);
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-               const float *bias, int64_t batch, int wtab, int btab);
+               const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float a0, float a1);
 /* conv_transpose1d via the packed phase layout, INCLUDING the tail flush. */
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                 int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,

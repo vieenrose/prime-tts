@@ -29,12 +29,33 @@ bld=$(ssh "$NANO" 'cd ~/primetts && make -f runtime/v21/Makefile par nano 2>&1 |
 [ -z "$bld" ] || { echo "$bld"; fail "build failed on the Nano"; }
 ssh "$NANO" 'test -x ~/primetts/build/pt_v21_par' || fail "pt_v21_par missing on the Nano"
 
-# ---- N=4 (primary). Also sample free RAM during the run: memory is the Nano's real constraint.
-run4=$(ssh "$NANO" "cd ~/primetts && (for i in \$(seq 1 40); do free -m | sed -n 2p | tr -s ' ' | cut -d' ' -f4 >> /tmp/ar_mem.txt; sleep 0.3; done > /dev/null 2>&1 &) ; PT_V21_ARENA_MB=$ARENA ./build/pt_v21_par --container build/v21.ptk --case $CASE --cuda --parallel $N4 2>&1; echo \"MINFREE \$(sort -n /tmp/ar_mem.txt | head -1)\"; rm -f /tmp/ar_mem.txt")
+# ---- N=4 (primary). Sample free RAM *and* the driver's peak RSS during the run: on the Nano the
+# GPU's allocations count against system RAM, so the process high-water mark is the number that
+# says whether four streams actually fit on the box.
+run4=$(ssh "$NANO" "NANO_ARENA=$ARENA NANO_CASE=$CASE NANO_N4=$N4 bash -s" <<'REMOTE'
+cd ~/primetts
+rm -f /tmp/ar_mem.txt
+PT_V21_ARENA_MB="$NANO_ARENA" ./build/pt_v21_par --container build/v21.ptk   --case "$NANO_CASE" --cuda --parallel "$NANO_N4" > /tmp/ar_out.txt 2>&1 &
+pid=$!
+hwm=0
+while kill -0 "$pid" 2>/dev/null; do
+  h=$(awk '/VmHWM/{print $2}' /proc/"$pid"/status 2>/dev/null)
+  f=$(free -m | sed -n 2p | tr -s " " | cut -d" " -f4)
+  [ -n "$h" ] && [ "$h" -gt "$hwm" ] && hwm=$h
+  [ -n "$f" ] && echo "$f" >> /tmp/ar_mem.txt
+  sleep 0.25
+done
+wait "$pid"
+cat /tmp/ar_out.txt
+echo "MINFREE $(sort -n /tmp/ar_mem.txt | head -1)"
+echo "PEAKRSS $((hwm / 1024))"
+REMOTE
+)
 echo "$run4" | sed -n '1,4p'
 wall=$(echo "$run4" | sed -n 's/^N=[0-9][0-9]*  wall \([0-9][0-9]*\) ms.*/\1/p' | head -1)
 sndr=$(echo "$run4" | sed -n 's/.*min SNDR \([0-9][0-9.]*\) dB$/\1/p' | head -1)
 minfree=$(echo "$run4" | sed -n 's/^MINFREE \([0-9][0-9]*\)$/\1/p' | head -1)
+peakrss=$(echo "$run4" | sed -n 's/^PEAKRSS \([0-9][0-9]*\)$/\1/p' | head -1)
 [ -n "$wall" ] || fail "no wall time in N=4 output"
 [ -n "$sndr" ] || fail "no SNDR in N=4 output"
 
@@ -50,3 +71,4 @@ echo "METRIC n4_wall_ms=$wall"
 echo "METRIC n1_stream_ms=${s1:-0}"
 echo "METRIC min_sndr_db=$sndr"
 echo "METRIC min_free_mb=${minfree:-$free_mb}"
+echo "METRIC peak_rss_mb=${peakrss:-0}"
