@@ -261,6 +261,55 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
     yb[(int64_t) (co0 + 3) * ldy + t] = acc.w;
 }
 
+
+/* Weight-staged conv with two output channels per block.
+ *
+ * The 4-channel blocks above need K*cin*16 bytes of shared for their weight slice, which is 36 KB
+ * for the flow-encoder convs (cin=768, K=3): too much to leave room for several blocks per SM on the
+ * Nano's 64 KB. Halving the channel group halves the slice (18 KB) at the cost of twice as many
+ * blocks. Each lane reads the matching component pair of the packed float4 weight, so every output
+ * channel's accumulation chain is exactly the reference chain: bit-identical.
+ */
+__global__ void pt_conv_kernel_wsm2(const float *__restrict__ x, int64_t ldx, int cin, int K,
+                                    int dil, int stride, int pad, float *__restrict__ y, int64_t ldy,
+                                    int64_t Tout, int cout, const float *__restrict__ wp,
+                                    const float *__restrict__ bias, int64_t bsx, int64_t bsy) {
+  extern __shared__ float ws2[];   /* [(k*cin + ci) * 2 + lane] for this block's 2 channels */
+  const int NT = blockDim.x;
+  const int kc = K * cin;
+  int64_t t = (int64_t) blockIdx.x * NT + threadIdx.x;
+  int blk = (int) blockIdx.y;
+  int64_t b = (int64_t) blockIdx.z;
+  const float4 *w4 = (const float4 *) wp + (int64_t) (blk >> 1) * kc;
+  const int hi = (blk & 1) ? 2 : 0;   /* which pair of the packed float4 this block owns */
+  for (int idx = threadIdx.x; idx < kc; idx += NT) {
+    float4 w = w4[idx];
+    ws2[idx * 2 + 0] = hi ? w.z : w.x;
+    ws2[idx * 2 + 1] = hi ? w.w : w.y;
+  }
+  __syncthreads();
+  if (t >= Tout)
+    return;
+  int co0 = blk * 2;
+  float a0 = bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f;
+  float a1 = bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f;
+  const float *xb = x + b * bsx;
+  for (int k = 0; k < K; k++) {
+    const float *xs = xb + (int64_t) (k * dil) + t * stride;
+    const float *wk = ws2 + (int64_t) k * cin * 2;
+    for (int ci = 0; ci < cin; ci++) {
+      float xv = xs[(int64_t) ci * ldx];
+      a0 += wk[ci * 2 + 0] * xv;
+      a1 += wk[ci * 2 + 1] * xv;
+    }
+  }
+  float *yb = y + b * bsy;
+  if (co0 + 0 < cout)
+    yb[(int64_t) (co0 + 0) * ldy + t] = a0;
+  if (co0 + 1 < cout)
+    yb[(int64_t) (co0 + 1) * ldy + t] = a1;
+}
+
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
                 const float *bias, int64_t batch, int wtab, int btab) {
