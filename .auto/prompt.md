@@ -93,6 +93,20 @@ never touch `gemini-live-credential.txt`.
 
 ## What's Been Tried
 Baseline (this commit): **N=4 wall 9.9 s**, N=1 4.5 s, SNDR 70.08 dB, min free ~1714 MB.
+- **Phase 1 (runs 1-272): 9.9 s -> ~2.34 s (4.3x)**, quality proved. Full record in `.auto/ideas.md`
+  (convergence ledger + kill sections). Key pieces: resident shared weights, per-stream arena and
+  streams, NEON elementwise ops, fp16 LUT decode, GEMM-tiled conv (ig8), chained conv on device,
+  activation tables, GPU clock warmup kernel (the single biggest win, -148 ms cold).
+- **Phase 2 (runs 273+, baseline re-set to 2314): parallel container record pass KEPT (-22 ms, 35
+  matched pairs, bit-exact on all 5 golden cases, `PT_V21_OPEN_PAR=0` = serialized bisection).**
+  Killed in phase 2: CPU affinity pinning (2 ms tie), arena-size tuning (no wall gain, +4 MB free).
+  pesi is offline for measurement: its disk is 100% full (operator data, nothing deleted).
+- Known bug patterns, do not reintroduce: conv/convT lanes are **Cout channels** (all lanes multiply
+  the same input column); the `cout4 != cout` trim copies per batch at stride `cout4*len`, so kernels
+  write the padded row layout; bias has `cout` entries (per-lane bound); conv reads the zero-padded
+  scratch at `t*stride + k*dil` (no negative indexing); fp16 subnormals decode exactly (141k of them);
+  batch is a real dimension on the dec/iSTFT conv path (four frames at once); **shared-payload work
+  must be checked with peak RSS, not SNDR** (a dropped ctab claim duplicates payloads silently).
 - Resident GPU weights (uploaded once, ctab-indexed, refcounted, shared read-only) + per-stream 32 MB
   bump arena + per-stream non-blocking CUDA streams + async staging copies: alloc 222 -> 0 ms,
   free 65 -> 0 ms, copies 153 -> 40 ms, single-stream T81 5.38 -> 4.44 s. Kept (commit `e072b0b`).

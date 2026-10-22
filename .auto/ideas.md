@@ -184,6 +184,32 @@ reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only 
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
 
+## KEPT in phase 2 (run 278): parallel container record pass
+`PT_V21_OPEN_PAR=1` (now the default, PT_V21_OPEN_PAR=0 = serialized bisection endpoint) splits the
+one-pass container materialization (84 MB memcpy + 27 MB fp16 LUT decode) across the stream threads:
+prepare (record->ctab map, payload arena, cache pre-size, fp16 LUT) single-threaded under open_lock;
+then atomic record claiming, arena bump under a short lock, completion barrier, per-context aliasing.
+Result: **-22 ms on the N=4 wall** (35 order-alternating pairs, means 2322 vs 2344, 24/35 pair wins,
+t ~ -2.2), N=1 neutral (648 vs 652), peak_rss +10 MB, SNDR 70.09 and checks PASS. Bit-exact proof:
+all 5 golden cases at N=4 give identical max|d| (1.072e-04, 3.813e-04, 2.258e-04, 4.887e-04,
+1.726e-04) and identical SNDR (69.70/69.93/70.09/67.90/67.45) on both arms. Realized gain is ~1/3 of
+the 60 ms ceiling: the pass is LPDDR2-bandwidth-bound (4 cores buy ~1.3x, not 4x). N=1 is neutral by
+construction (one thread: nothing to split).
+SILENT-BUG LESSON (the reason RSS is a first-class metric): the first version dropped claims for
+ctab indices beyond the lazily-grown g_hcache_n -- host_cont_shared_claim checks k < g_hcache_n and
+returns void -- so every context fell back to a PRIVATE copy: peak RSS 468 MB (4 payloads), wall
++62 ms, SNDR still 70.09. Fixed by hcache_prealloc(n_cont) in prepare + par_claim() that reports
+failure. SNDR cannot see duplicated payloads; RSS is the sharing proof.
+Startup components now: ~85 ms record pass (parallel), ~85 ms CUDA context, ~26 ms clock warmup,
+~138 ms weight upload. Remaining: project-scale only. Prewarm-overlap stays killed (run 76): with the
+pass using all 4 cores, a 5th CUDA thread contends worse.
+
+## pesi is OFFLINE for measurement (run 278): disk 100% full
+`df` on pesi: 14 GB root, 13 GB used, 0 available; rsync of runtime/ fails with "No space left on
+device". Largest home entries: vc 1.5 GB, b2 587 MB, exp 141 MB, primetts 135 MB, tailscale tarballs
+~107 MB -- all operator/co-tenant data, NOT ours, so nothing was deleted. pesi confirmation of the
+kept change is pending until disk frees; pesi min_free was already at the 60 MB guard (66 MB, run 271).
+
 ## Killed by measurement #10 (run 274, phase 2): CPU affinity pinning
 `PT_V21_PIN=1` pins each stream thread to its own A57 core (1:1, numerics-neutral, driver-only).
 Order-alternating 4 pairs: pinned 2426 vs unpinned 2424 -> a 2 ms tie. Mechanism: the streams are
