@@ -329,6 +329,89 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
  * blocks. Each lane reads the matching component pair of the packed float4 weight, so every output
  * channel's accumulation chain is exactly the reference chain: bit-identical.
  */
+
+/* Implicit-GEMM conv: block tile = 64 output channels x 64 output columns, 256 threads, each thread
+ * owning 4 channels (one packed float4 group) x 4 consecutive columns. The reduction index
+ * r = k*cin + ci is walked in chunks of 16 through two small shared tiles (weights [16][16 groups],
+ * inputs [16][64 cols]); each input element is fetched from global once per block instead of once
+ * per 4-channel block. Every thread accumulates its outputs over r ascending onto the bias - the
+ * same chain as the staged kernel - so results are bit-identical. Zero-filled tails add exact +0. */
+#define IG_RK 16
+__global__ void __launch_bounds__(256) pt_conv_kernel_ig(
+    const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
+    float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
+    float ea1) {
+  __shared__ float4 Ws[IG_RK][16];
+  __shared__ float4 Xs[IG_RK][16];   /* [r][column quad] */
+  const int tid = threadIdx.x;
+  const int tx = tid & 15;   /* column quad */
+  const int ty = tid >> 4;   /* channel group within the tile */
+  const int nblk = (cout + 3) / 4;
+  const int g = blockIdx.y * 16 + ty;   /* global channel group */
+  const int64_t t0 = (int64_t) blockIdx.x * 64;
+  const int64_t b = blockIdx.z;
+  const int kc = K * cin;
+  const float *xb = x + b * bsx;
+  const float4 *w4 = (const float4 *) wp;
+  int co0 = g * 4;
+  float4 bz = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                          bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                          bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                          bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  float4 a0 = bz, a1 = bz, a2 = bz, a3 = bz;   /* columns 4*tx + 0..3 */
+  /* loader roles: weights - thread -> (rr = tid/16, group tx); inputs - thread -> (rr = tid/16,
+   * column quad tx), 4 columns each */
+  const int lr = tid >> 4, lq = tid & 15;
+  for (int r0 = 0; r0 < kc; r0 += IG_RK) {
+    int r = r0 + lr;
+    int lg = blockIdx.y * 16 + lq;
+    Ws[lr][lq] = (r < kc && lg < nblk) ? w4[(int64_t) lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    float4 xv = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (r < kc) {
+      int k = r / cin, ci = r - k * cin;
+      const float *row = xb + (int64_t) ci * ldx + (int64_t) k * dil;
+      int64_t tc = t0 + lq * 4;
+      if (tc + 0 < Tout) xv.x = row[(tc + 0) * stride];
+      if (tc + 1 < Tout) xv.y = row[(tc + 1) * stride];
+      if (tc + 2 < Tout) xv.z = row[(tc + 2) * stride];
+      if (tc + 3 < Tout) xv.w = row[(tc + 3) * stride];
+    }
+    Xs[lr][lq] = xv;
+    __syncthreads();
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][ty];
+      float4 v = Xs[rr][tx];
+      a0.x += w.x * v.x; a0.y += w.y * v.x; a0.z += w.z * v.x; a0.w += w.w * v.x;
+      a1.x += w.x * v.y; a1.y += w.y * v.y; a1.z += w.z * v.y; a1.w += w.w * v.y;
+      a2.x += w.x * v.z; a2.y += w.y * v.z; a2.z += w.z * v.z; a2.w += w.w * v.z;
+      a3.x += w.x * v.w; a3.y += w.y * v.w; a3.z += w.z * v.w; a3.w += w.w * v.w;
+    }
+    __syncthreads();
+  }
+  if (g >= nblk)
+    return;
+  float4 *acc[4] = {&a0, &a1, &a2, &a3};
+  float *yb = y + b * bsy;
+  for (int j = 0; j < 4; j++) {
+    int64_t t = t0 + tx * 4 + j;
+    if (t >= Tout)
+      continue;
+    float4 a = *acc[j];
+    if (epi0 || epi1) {
+      a.x = pt_epi_dev(pt_epi_dev(a.x, epi0, ea0), epi1, ea1);
+      a.y = pt_epi_dev(pt_epi_dev(a.y, epi0, ea0), epi1, ea1);
+      a.z = pt_epi_dev(pt_epi_dev(a.z, epi0, ea0), epi1, ea1);
+      a.w = pt_epi_dev(pt_epi_dev(a.w, epi0, ea0), epi1, ea1);
+    }
+    if (co0 + 0 < cout) yb[(int64_t) (co0 + 0) * ldy + t] = a.x;
+    if (co0 + 1 < cout) yb[(int64_t) (co0 + 1) * ldy + t] = a.y;
+    if (co0 + 2 < cout) yb[(int64_t) (co0 + 2) * ldy + t] = a.z;
+    if (co0 + 3 < cout) yb[(int64_t) (co0 + 3) * ldy + t] = a.w;
+  }
+}
+
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
                 const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float ea0,
@@ -404,7 +487,14 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     threads = big_threads;
   dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   tA = gpu_prof() ? gpu_now() : 0.0;
-  if (wsm) {
+  static long ig_min = -2;
+  if (ig_min == -2) ig_min = getenv("PT_V21_IG_MINT") ? atol(getenv("PT_V21_IG_MINT")) : 0;
+  if (ig_min >= 0 && Tout >= ig_min) {
+    dim3 gig((unsigned) ((Tout + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
+    pt_conv_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
+        dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1);
+  } else if (wsm) {
     pt_conv_kernel_wsm<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
         (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1);
