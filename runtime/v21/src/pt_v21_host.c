@@ -313,6 +313,20 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
   const float *g = G && G->p ? (const float *) G->p : 0;
   float *o = (float *) O->p;
   int64_t gn = G ? G->n : 1;
+  /* Bulk fp32 transcendentals through glibc's single-precision expf/tanhf (<1 ulp) instead of the
+   * double-precision switch. Small tensors keep the double path: they feed Floor/Cast shape
+   * arithmetic, where a last-ulp difference could flip an integer length. */
+  static int ff = -1;
+  if (ff < 0) ff = getenv("PT_V21_F32MATH") ? atoi(getenv("PT_V21_F32MATH")) : 1;
+  if (!g && ff && n >= 4096 && (op == PT_EXP || op == PT_TANH || op == PT_SIGMOID)) {
+    if (op == PT_EXP)
+      for (int64_t i = 0; i < n; i++) o[i] = expf(a[i]);
+    else if (op == PT_TANH)
+      for (int64_t i = 0; i < n; i++) o[i] = tanhf(a[i]);
+    else
+      for (int64_t i = 0; i < n; i++) o[i] = 1.0f / (1.0f + expf(-a[i]));
+    return 0;
+  }
   if (!g && (op == PT_LEAKYRELU || op == PT_RELU || op == PT_NEG || op == PT_ABS)) {
     /* Pure arithmetic elementwise: the double-precision switch below compiles to a scalar
      * round-trip per element, and LEAKYRELU alone was 215 ms of a 3.3 s stream in 35 calls. A
