@@ -390,7 +390,10 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   /* stage the weight slice in shared memory when it is small enough to leave room for a few blocks
    * per SM (the Nano has 64 KB of shared per SM and 2 SMs) */
   size_t wsm_bytes = (size_t) K * cin * sizeof(float4);
-  int wsm = wsm_bytes > 0 && wsm_bytes <= 16384;
+  /* shared-memory gate for the staged weight slice: sm_53 allows 48 KB per block */
+  static long wsm_gate = -1;
+  if (wsm_gate < 0) wsm_gate = getenv("PT_V21_WSM_KB") ? atol(getenv("PT_V21_WSM_KB")) * 1024 : 49152;   /* 48 KB: measured -12% at N=4 vs the old 16 KB gate */
+  int wsm = wsm_bytes > 0 && (long) wsm_bytes <= wsm_gate;
   dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   tA = gpu_prof() ? gpu_now() : 0.0;
   if (wsm) {
