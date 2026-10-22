@@ -112,7 +112,16 @@ static int host_rows_on(void) {
   return v;
 }
 
+/* tv_alloc_zero: 1 = zero-fill a fresh buffer (shape ops rely on it), 0 = the caller writes every
+ * element, so the memset is skipped. Called with 0 by the conv/convT nodes, whose kernels fill the
+ * whole padded output buffer (the D2H copy or the cout trim covers every element). */
+static int tv_alloc_nz(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim, int zero);
+
 static int tv_alloc(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim) {
+  return tv_alloc_nz(c, t, dt, d, ndim, 1);
+}
+
+static int tv_alloc_nz(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim, int zero) {
   int64_t n = 1;
   for (int i = 0; i < ndim; i++) n *= d[i];
   t->dt = dt;
@@ -139,7 +148,8 @@ static int tv_alloc(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim) {
   c->host_alloc_count++;
   if (c->host_bytes_live > c->host_bytes_peak)
     c->host_bytes_peak = c->host_bytes_live;
-  memset(t->p, 0, bytes);
+  if (zero)
+    memset(t->p, 0, bytes);
   t->alive = 1;
   t->dev = 0;
   return 0;
@@ -2284,7 +2294,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         int64_t N = X->ndim >= 3 ? X->d[0] : 1;   /* the iSTFT dec convs run batch 4 */
         int64_t Tout = (T + 2 * pad - (int64_t) (K - 1) * dil - 1) / stride + 1;
         int64_t d[3] = {N, cout, Tout};     /* the graph sees Cout rows; the packed kernel fills 4 */
-        tv_alloc(c, out[0], DT_F32, d, 3);
+        if (tv_alloc_nz(c, out[0], DT_F32, d, 3, 0) < 0) return -1;
         double t0 = pt_v21_now();
         /* The conv reads each input row from -pad to T+pad-1, so it consumes a *padded* row: the
          * rows are copied into a [Cin][T+2*pad] scratch, zero-filled in the pad margins.  The CUDA
@@ -2432,7 +2442,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         int64_t N = X->ndim >= 3 ? X->d[0] : 1;
         int64_t Lout = (Tin - 1) * s - 2 * pad + K;
         int64_t d[3] = {N, cout, Lout};
-        tv_alloc(c, out[0], DT_F32, d, 3);
+        if (tv_alloc_nz(c, out[0], DT_F32, d, 3, 0) < 0) return -1;
         double t0 = pt_v21_now();
         if (cout4 == cout) {
           pt_v21_convT(c, (const float *) X->p, Tin, cin, Tin, (float *) out[0]->p, Lout, cout, s,
