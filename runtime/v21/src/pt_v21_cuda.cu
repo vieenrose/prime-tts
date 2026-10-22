@@ -18,6 +18,7 @@
 #include <stdlib.h>
 
 #include "pt_v21.h"
+#include <stdlib.h>
 
 #define PTCHK(x)                                                                                 \
   do {                                                                                           \
@@ -391,6 +392,87 @@ __global__ void pt_convT_kernel(const float *__restrict__ x, int64_t ldx, int ci
     yb[(int64_t) (co + 3) * ldy + oi] = acc.w;
 }
 
+
+/* Weight-staged conv_transpose1d.
+ *
+ * Each thread of the reference kernel walks every (phase, tap, channel) term for its 4 output
+ * channels and re-reads that phase's slice of the weights (ntap*cin float4) from L2 per thread. Here
+ * the phase slices are staged cooperatively into shared memory with double buffering, so a block
+ * touches each slice in memory once.
+ *
+ * The staging loop is written so that every thread of the block reaches both __syncthreads()
+ * unconditionally: a barrier inside divergent control flow is undefined behaviour, and the first
+ * version of this kernel used `continue` to skip the per-phase work, which corrupted a few percent
+ * of the outputs deterministically (bit-exact on the fallback and cin=1 nodes, SNDR 6.47 dB on T20).
+ *
+ * Accumulation order (phase, tap, channel, all ascending) and every fp32 product are unchanged, and
+ * the accumulator is seeded with the bias exactly as the reference does, so a correct run is
+ * bit-identical.
+ */
+__global__ void pt_convT_kernel_wsm(const float *__restrict__ x, int64_t ldx, int cin, int64_t tin,
+                                    float *__restrict__ y, int64_t ldy, int64_t Lout, int cout, int s,
+                                    int pad, int ntap, const float *__restrict__ wp,
+                                    const float *__restrict__ bias, int64_t bsx, int64_t bsy) {
+  extern __shared__ float4 wbuf[];   /* two phase slices: [phase & 1][t*cin + ci] */
+  const int NT = blockDim.x;
+  const int kc = ntap * cin;
+  const int nblk = ((cout + 3) / 4 * 4) / 4;
+  int64_t oi = (int64_t) blockIdx.x * NT + threadIdx.x;
+  int blk = (int) blockIdx.y;
+  int64_t b = (int64_t) blockIdx.z;
+  int co0 = blk * 4;
+  float4 acc = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                           bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                           bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                           bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  const float *xb = x + b * bsx;
+  const float4 *wbase = (const float4 *) wp + (int64_t) blk * kc;
+  int live = oi < Lout;
+  for (int idx = threadIdx.x; idx < kc; idx += NT)
+    wbuf[idx] = wbase[idx];   /* prime phase 0 */
+  for (int r = 0; r < s; r++) {
+    int cur = r & 1;
+    if (r + 1 < s) {
+      const float4 *nx = wbase + (int64_t) (r + 1) * nblk * kc;
+      for (int idx = threadIdx.x; idx < kc; idx += NT)
+        wbuf[(cur ^ 1) * kc + idx] = nx[idx];
+    }
+    __syncthreads();
+    int64_t num = oi + pad - r;
+    if (live && num >= 0 && num % s == 0) {
+      int64_t q = num / s;
+      const float4 *ws = wbuf + cur * kc;
+      for (int t = 0; t < ntap; t++) {
+        int64_t tq = q - t;
+        if (tq < 0 || tq >= tin)
+          continue;
+        const float4 *wt = ws + (int64_t) t * cin;
+        const float *xs = xb + tq;
+        for (int ci = 0; ci < cin; ci++) {
+          float4 w = wt[ci];
+          float xv = xs[(int64_t) ci * ldx];
+          acc.x += w.x * xv;
+          acc.y += w.y * xv;
+          acc.z += w.z * xv;
+          acc.w += w.w * xv;
+        }
+      }
+    }
+    __syncthreads();
+  }
+  if (!live)
+    return;
+  float *yb = y + b * bsy;
+  if (co0 + 0 < cout)
+    yb[(int64_t) (co0 + 0) * ldy + oi] = acc.x;
+  if (co0 + 1 < cout)
+    yb[(int64_t) (co0 + 1) * ldy + oi] = acc.y;
+  if (co0 + 2 < cout)
+    yb[(int64_t) (co0 + 2) * ldy + oi] = acc.z;
+  if (co0 + 3 < cout)
+    yb[(int64_t) (co0 + 3) * ldy + oi] = acc.w;
+}
+
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
                  int64_t batch, int wtab, int btab) {
@@ -426,12 +508,20 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
     }
   }
   int threads = 256;
+  size_t wbuf_bytes = (size_t) 2 * ntap * cin * sizeof(float4);
+  int wsm = wbuf_bytes > 0 && wbuf_bytes <= 32768 && getenv("PT_V21_CONVT_WSM") == NULL;
   dim3 grid((unsigned) ((Lout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
-  pt_convT_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, tin, dy,
-                                                                     /*ldy=*/Lout, /*Lout=*/Lout,
-                                                                     cout, s, pad, ntap, dw, db,
-                                                                     (int64_t) cin * ldx,
-                                                                     (int64_t) cout4 * Lout);
+  if (wsm) {
+    pt_convT_kernel_wsm<<<grid, threads, wbuf_bytes, (cudaStream_t) c->g_stream>>>(
+        dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
+        (int64_t) cin * ldx, (int64_t) cout4 * Lout);
+  } else {
+    pt_convT_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, tin, dy,
+                                                                       /*ldy=*/Lout, /*Lout=*/Lout,
+                                                                       cout, s, pad, ntap, dw, db,
+                                                                       (int64_t) cin * ldx,
+                                                                       (int64_t) cout4 * Lout);
+  }
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   if (dw_own)
