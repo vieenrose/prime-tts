@@ -1,6 +1,12 @@
 # Ideas backlog (v2.1 Nano latency)
 
-## SESSION STATUS (run 272): converged -- see 'Convergence ledger' at the end for the full record
+## SESSION STATUS (run 274, PHASE 2 relaunched): converged -- see 'Convergence ledger' at the end
+- Phase 2 (run 273+): baseline re-set to the converged cluster (2314 official draw, cluster mean
+  ~2335). Phase-2 rule: deltas now compare to ~2335, so the confirmability bar is the same ~90 ms
+  single-draw / ~30 ms matched-pair. Phase-2 so far: affinity pinning killed (#274), arena tuning
+  killed (#272), pesi headroom alarm recorded (#271). Remaining untried single-experiment levers:
+  none with positive risk-adjusted EV. Spend loop on anti-overfitting robustness draws (N=8,
+  T20/T40/T120/sid1 at N=4, pesi, CPU path) + keep the 5-item approval list current.
 - Best: **n4_wall 2288 ms** (cluster 2288-2375 over 30+ official draws, mean ~2335, stdev ~1.7%,
   zero drift, draws independent). Baseline was 9900 ms: **4.3x faster**.
 - Runs 118-125 (no code changes except run 120's 1-word CONVLOG label fix): box-parity
@@ -177,6 +183,13 @@ hidden STRUCTURALLY, not just empirically (this upgrades run 70's observation to
 reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only synchronized phases
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
+
+## Killed by measurement #10 (run 274, phase 2): CPU affinity pinning
+`PT_V21_PIN=1` pins each stream thread to its own A57 core (1:1, numerics-neutral, driver-only).
+Order-alternating 4 pairs: pinned 2426 vs unpinned 2424 -> a 2 ms tie. Mechanism: the streams are
+GPU-bound and desynchronized (run 94), so the 4 host halves are rarely core-hungry at the same time
+and Linux already gives them near-exclusive cores; pinning also removes the scheduler's freedom to
+dodge the co-tenant, so it never wins under load. Host/OS scheduling is CLOSED (with run 76 prewarm).
 
 ## Killed by measurement #9 (run 272): arena-size tuning + the real memory map
 Per-stream memory, measured with PT_V21_MEM on all 5 golden cases (N=1 and N=4, picard):
