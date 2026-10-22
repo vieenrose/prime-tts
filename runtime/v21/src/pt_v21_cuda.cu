@@ -238,11 +238,18 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     dw_own = 1;
   }
   tA = gpu_prof() ? gpu_now() : 0.0;
-  PTCHK(cudaMemcpy(dx, X, xb, cudaMemcpyHostToDevice));
+  /* async on the stream: the copy queues behind the previous kernel instead of blocking the host */
+  PTCHK(cudaMemcpyAsync(dx, X, xb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
   if (gpu_prof()) c->g_copy_ms += gpu_now() - tA;
   if (bias) {
-    PTCHK(cudaMalloc(&db, (size_t) cout * 4));
-    PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
+    /* the bias is a container record: keep it resident like the weights, so a conv does not pay a
+     * cudaMalloc + a synchronous copy for it on every call (124 convs per stream) */
+    db = (float *) weight_ctab(btab);
+    if (!db) {
+      PTCHK(cudaMalloc(&db, (size_t) cout * 4));
+      PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
+      db_own = 1;
+    }
   }
   int threads = 256;
   dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);

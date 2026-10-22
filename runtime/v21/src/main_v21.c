@@ -129,7 +129,21 @@ int main(int argc, char **argv) {
   double sndr = se > 0 ? 10.0 * log10(sp / se) : 1e9;
   printf("case %s: L=%lld golden=%lld  max|d|=%.3e  SNDR=%.2f dB\n", dir, (long long) wn,
          (long long) gn, mx, sndr);
-  printf("  conv=%ld convT=%ld matmul=%ld  conv %.1f ms  convT %.1f ms  matmul %.1f ms  total %.1f ms\n",
+    if (c->prof_node_on && c->prof_node) {
+    for (int rep = 0; rep < 20; rep++) {
+      int best = -1;
+      double bv = 0.0;
+      for (int n2 = 0; n2 < PT_N_NODE; n2++)
+        if (c->prof_node[n2] > bv) {
+          bv = c->prof_node[n2];
+          best = n2;
+        }
+      if (best < 0) break;
+      c->prof_node[best] = -1.0;
+      printf("  node %d %s: %.1f ms\n", best, pt_graph_tnames[pt_ndefs[best].out[0]], 1000.0 * bv);
+    }
+  }
+printf("  conv=%ld convT=%ld matmul=%ld  conv %.1f ms  convT %.1f ms  matmul %.1f ms  total %.1f ms\n",
          pt_v21_stats_conv(c), pt_v21_stats_convT(c), pt_v21_stats_matmul(c),
          pt_v21_stats_ms(c, 0), pt_v21_stats_ms(c, 1), pt_v21_stats_ms(c, 2), pt_v21_stats_ms(c, 3));
   if (getenv("PT_V21_EKIND")) {

@@ -655,6 +655,7 @@ pt_ctx *pt_v21_open(const char *container) {
   c->V = (pt_tv *) calloc(PT_N_TENSOR, sizeof(pt_tv));
   g_ctx = c;
   c->prof = getenv("PT_V21_EKIND") ? 1 : 0;
+  c->prof_node_on = c->prof && getenv("PT_V21_EKIND")[0] == '2';
   return c;
 }
 
@@ -2088,6 +2089,10 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
     if (c->prof) {
       c->t_ekind[nd->op] += pt_v21_now() - tA;
       c->n_ekind[nd->op]++;
+      if (c->prof_node_on) {
+        if (!c->prof_node) c->prof_node = (double *) calloc(PT_N_NODE, sizeof(double));
+        if (c->prof_node) c->prof_node[idx] += pt_v21_now() - tA;
+      }
     }
     if (r) {
       fprintf(stderr, "pt_v21: node %d op %d failed (%s)\n", idx, nd->op,

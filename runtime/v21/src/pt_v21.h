@@ -118,6 +118,8 @@ struct pt_ctx {
   /* per-op-kind host time, filled when prof is set: this is what tells a fresh iteration which of
    * the 41 op kinds is actually costing the ~2.7 s of host graph work */
   int prof;
+  int prof_node_on;
+  double *prof_node;   /* per-node ms (prof == 2); allocated lazily */
   double t_ekind[96];
   long n_ekind[96];
   void *g_weights;   /* ctab index -> device pointer, resident weights (M3) */
