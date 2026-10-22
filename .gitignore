@@ -1,0 +1,9 @@
+model/
+.venv/
+.venv-fe/
+gemini-live-credential.txt
+*.npy
+*.wav
+*.ptk
+build/
+__pycache__/
