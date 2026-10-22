@@ -88,9 +88,15 @@ which raises the headroom to ~1.5x).
    are sentence boundaries (no cross-chunk state in the encoder) and the duration allocator works
    per chunk. Acoustic cross-chunk state is limited to the iSTFT overlap window (keep 2 frames of
    history per stream) and the stream's speaker embedding.
-6. **Memory budget** (Nano has ~165 MB free, no sudo): 86 MB weights (59 MB fp32 encoder + 27 MB
-   fp16 decoder) mmap'd + per-stream activations. Target: **RSS < 130 MB at 4 streams**; the all-fp32
-   container (117 MB) leaves too little for graphs + activations + page cache to be safe.
+6. **Memory budget - re-measured 2026-10-22 after freeing the GPU (the Nano's GPU memory lives in
+   NvMap, which shows as system memory, not RSS, so `ps` RSS sums to 167 MB while MemUsed was 3950 MB
+   with `lfb 5x2MB` and `NvMapMemFree: 2432 kB`; the holders were exactly the two `fwd35_serve`
+   processes holding `/dev/nvmap` + `/dev/nvhost` - killed, per operator).** After freeing:
+   MemFree 2312 MB, MemAvailable 2877 MB, `NvMapMemFree 505 MB`, `lfb 30x4MB`, GR3D 0%, swap 1145 MB.
+   Consequence: the all-fp32 v2.1 container (116.3 MB, parent-verified param count) **fits**, so the
+   no-quantization configuration (measured fp32 GEMM 62 GF/s vs 47.6 GF/s needed for 4 streams,
+   1.3x headroom) is now open, and fp16 becomes a speed option rather than a memory necessity.
+   Keep RSS <= ~300 MB at 4 streams and check `free -m` + `lfb` before every sweep.
 
 ## Milestones (each gated by measurement)
 
