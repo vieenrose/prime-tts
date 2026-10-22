@@ -1,9 +1,24 @@
 # v2.1 on Jetson Nano — measured feasibility + runtime plan
 
-Target (user directive): PrimeTTS **v2.1** (`model/v21_mbistft_16k/primetts_v21_3voice.onnx`,
+Target (user directive, updated): PrimeTTS **v2.1** (`model/v21_mbistft_16k/primetts_v21_3voice.onnx`,
 16 kHz, 4066 nodes, 29.08M initializer params + 1924 Constant nodes), **dependency-free C + asm +
-CUDA C runtime** (no onnxruntime, no ggml, no cuBLAS/cuDNN), **8 parallel real-time requests**,
-lowest latency, streaming input and output.
+CUDA C runtime** (no onnxruntime, no ggml, no cuBLAS/cuDNN), **4 parallel real-time requests**
+(was 8), lowest latency, streaming input and output.
+
+4 streams need 11.9 x 4 = **47.6 GFLOP/s sustained** — that is below the measured *fp32* GEMM rate
+(62 GF/s), so the fidelity-first configuration is now affordable. Measured options, all in seconds
+per audio-second (11.9 GFLOP/audio-s, ~50/50 enc/dec weight split, rates from bench/gpu/RESULTS.md):
+
+| configuration | s per audio-second | 4-stream aggregate RTF | headroom | measured quality |
+|---|---|---|---|---|
+| **all fp32** (fp32 weights, fp32 accumulate) | 11.9/62 = 0.192 | **0.77** | 1.3x | reference (no quantization) |
+| **enc fp32 + dec half2** (recommended) | 0.5x/62 + 0.5x/151 = 0.136 | **0.54** | 1.85x | encoder exact; decoder 67.4 dB measured |
+| enc HiLo half2 + dec half2 | 0.5x/80 + 0.5x/160 = 0.112 | 0.45 | 2.2x | ~fp32 (HiLo recovers weight precision) |
+
+Recommended: **encoder fp32 + decoder half2 with fp16 activations** — 1.85x headroom, 67.4 dB
+decoder (measured), 86 MB of weights (fp32 encoder 59 MB + fp16 decoder 27 MB) which fits Nano free
+RAM with room for 4 streams' activations, CUDA graphs and the mmap page cache. HiLo stays the
+upgrade path if we later want 8 streams (0.90 aggregate RTF) or more headroom for the CPU's share.
 
 ## Measured constraints (all on this Nano, `bench/gpu/RESULTS.md`, `bench/gpu/hgemm.cu`)
 
@@ -44,7 +59,8 @@ the model — keeping the encoder in fp32 is not affordable:
     enc fp32 + dec half2:  11.9*(0.5/62 + 0.5/168) = 0.132 s per audio-second -> 8 streams = 1.06 (misses real time)
     enc HiLo half2 + dec half2: 11.9*(0.5/80 + 0.5/160) = 0.112 -> 8 streams = 0.90 (fits, ~11% headroom)
 
-**Decision: split-fp16 (HiLo) for the encoder, plain half2 for the decoder.** W = W_hi + W_lo with
+**Decision (4-stream target): encoder fp32, decoder fp16 weights, fp16 activations; split-fp16
+(HiLo) is kept as the export option for the 8-stream tier, not required now.** W = W_hi + W_lo with
 both halves in fp16 (Markidis-style 2-term split): two half2 GEMMs recover ~fp32 weight precision,
 which is what the 34 dB -> ~fp32 measurement predicts. fp16 activations throughout (87.9 dB).
 Chunked-K promotion (accumulate 16–32 taps in half2, then into an fp32 accumulator) keeps the
@@ -60,8 +76,9 @@ which raises the headroom to ~1.5x).
 2. **CUDA Graphs per bucket** (26 µs launch overhead x ~200 ops = 5.2 ms per inference is
    acceptable, but graphs remove it entirely; capture at startup, replay per bucket — cooperative
    launch is unavailable so graph capture is how the whole network stays one submission).
-3. **fp16 weights, fp32 for embeddings/LayerNorm/softmax/flow scales/iSTFT magnitude head**
-   (the 22 dB vs 32 dB gap says these must stay fp32; they are <1% of MACs so cost is time, not FLOPs).
+3. **fp32 encoder weights + fp16 decoder weights; fp32 for embeddings/LayerNorm/softmax/flow
+   scales/iSTFT magnitude head** (the 22 dB vs 32 dB vs 67 dB spread says exactly where fp16 is
+   safe; the non-conv pieces are <1% of MACs so keeping them fp32 costs time, not FLOPs).
 4. **Streaming output**: the model is sentence-based, so synthesize per *sentence/chunk* and emit
    40 ms PCM frames as soon as the iSTFT head produces them (protocol in `docs/proto.md` is
    unchanged; the client already starts playback on the first frame). First-audio latency target
@@ -71,9 +88,9 @@ which raises the headroom to ~1.5x).
    are sentence boundaries (no cross-chunk state in the encoder) and the duration allocator works
    per chunk. Acoustic cross-chunk state is limited to the iSTFT overlap window (keep 2 frames of
    history per stream) and the stream's speaker embedding.
-6. **Memory budget** (Nano has ~165 MB free, no sudo): 75.8 MB fp16 weights mmap'd + HiLo encoder
-   half (fp16, +14.8 MB) + per-stream activations. Target: RSS < 130 MB at 8 streams; the fp32
-   container (117 MB) will not fit with 8 streams.
+6. **Memory budget** (Nano has ~165 MB free, no sudo): 86 MB weights (59 MB fp32 encoder + 27 MB
+   fp16 decoder) mmap'd + per-stream activations. Target: **RSS < 130 MB at 4 streams**; the all-fp32
+   container (117 MB) leaves too little for graphs + activations + page cache to be safe.
 
 ## Milestones (each gated by measurement)
 
@@ -81,16 +98,17 @@ which raises the headroom to ~1.5x).
 |---|---|---|
 | M1 | `tools/export_v21.py` -> `.ptk` (fp16 + HiLo + fp32 groups) + goldens + layer spec | unpack/round-trip check == ONNX weights within 1e-6; layer-by-layer intermediates vs onnxruntime |
 | M2 | CUDA C single-stream runtime | audio parity vs golden: SNDR >= 60 dB (measured fp16 ceiling for dec-fp16 is 67 dB) |
-| M3 | 8-stream batching + CUDA graphs | aggregate RTF <= 0.9, RSS <= 130 MB, first-audio < 200 ms |
+| M3 | 4-stream batching (1/2/4 sweep) + CUDA graphs | aggregate RTF <= 0.6, RSS <= 130 MB, first-audio < 200 ms |
 | M4 | streaming sentence/chunk pipeline | first-audio latency and per-chunk continuity (no clicks at chunk joins) |
 | M5 | admission/latency policy | worst lateness over a full run with Poisson-arriving requests; buffer size recommendation |
 
 ## Known risks
 
-- The encoder is the accuracy-critical half *and* the expensive half; if HiLo proves insufficient
-  (measured by re-running `fp16_probe.py --variant g:enc` style checks against the runtime), the
-  fallback is 6 streams (measured: 11.9 GFLOP/audio-s x 6 / 132 GF/s = 0.54 aggregate RTF) or
-  encoder-side structure work (attention sparsity, T-bucket padding).
+- At 4 streams the fp32 encoder is affordable, so accuracy risk is bounded by the decoder's
+  measured 67.4 dB. The residual risk is time: 47.6 GFLOP/s of GEMM is the *measured* 62 GF/s
+  fp32 ceiling minus fusion/elementwise losses, so the all-fp32 variant has only ~1.3x headroom.
+- Sustained clock under load is unmeasured; 4 streams is 47.6 GF/s, well inside a thermally
+  sustainable envelope, which is another reason 4 is the sane target.
 - `noise_scale>0` makes output stochastic: parity tests must use `noise_scale=0`.
 - v2.1 has 1924 `Constant` nodes: constants must be exported into the container too, not just
   initializers (the v1 exporter only walks initializers).

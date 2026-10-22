@@ -1,0 +1,25 @@
+# bench_cpu: PrimeTTS v1 (16000 Hz, hop 256) on 4 cores, model load 164.9 ms, 6 requests
+
+## kernels: conv path GFLOP/s (fp32, epilogue included); vocoder rows are this model's geometry
+
+| layer shape | n cols | 4x16, 1 thr | 8x12, 1 thr, no packing | 8x12 + packing K=1 only, 1 thr | 8x12 + packing incl. K>1 (default), 4 thr | **8x12 + packing incl. K>1 (default), 1 thr** |
+|---|---|---|---|---|---|---|
+| voc conv_pre 160x80 K7 +snake | 1000 | 6.45 | 6.45 | 6.41 | 20.53 | **7.50** |
+| voc ups0 ConvT (8 phases x 2 taps) 640x160 K16 | 1000 | 4.96 | 4.81 | 4.81 | 24.38 | **8.19** |
+| voc stage0 resblock conv 80x80 K11 d5 +snake | 8000 | 6.37 | 6.30 | 6.33 | 19.19 | **7.21** |
+| voc ups1 ConvT (8 phases x 2 taps) 320x80 K16 | 8000 | 6.08 | 6.06 | 6.08 | 29.19 | **8.26** |
+| voc stage1 resblock conv 40x40 K11 d5 +snake | 64000 | 7.35 | 7.04 | 7.03 | 24.04 | **6.96** |
+| voc ups2 ConvT (2 phases x 2 taps) 40x40 K4 | 64000 | 6.13 | 5.49 | 5.47 | 23.57 | **6.75** |
+| voc stage2 resblock conv 20x20 K11 d5 +snake | 128000 | 7.37 | 7.01 | 7.00 | 23.06 | **6.53** |
+| voc ups3 ConvT (2 phases x 2 taps) 24x20 K4 | 128000 | 5.86 | 4.65 | 4.65 | 19.15 | **5.77** |
+| voc stage3 resblock conv 12x12 K11 d5 +snake | 256000 | 6.70 | 6.25 | 6.20 | 22.49 | **6.22** |
+| dec ff0 504x168 (linear) +silu | 500 | 4.44 | 4.51 | 6.31 | 19.52 | **6.27** |
+| dec ff3 168x504 (linear) | 500 | 4.79 | 4.50 | 7.23 | 17.27 | **7.30** |
+| dec gru input proj 504x168 | 500 | 5.41 | 5.49 | 8.29 | 25.24 | **8.30** |
+| dec postnet 168x168 K5 +tanh | 500 | 5.27 | 5.57 | 5.58 | 16.33 | **6.88** |
+| enc ff0 672x168 (linear, T=40) | 40 | 4.45 | 4.43 | 5.61 | 15.49 | **5.61** |
+
+micro-kernel, operands L1-resident (nk=256): k4x16 9.76 GFLOP/s, k8x12 9.31 GFLOP/s (A57 peak 8 flop/cycle = 11.8 GFLOP/s at 1.479 GHz)
+activations (16K elements, in L1): snake 214 Melem/s  silu 86 Melem/s  tanh 58 Melem/s  
+
+peak RSS (VmHWM): 58.2 MB

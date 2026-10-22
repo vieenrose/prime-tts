@@ -1,0 +1,263 @@
+== kernels (aarch64)
+numpy reference vectors (tests/kern):
+  npy conv_dec_point                 n=  16296 maxabs=2.384e-06 rel=5.801e-07 ok
+  npy conv_dec_ff0                   n=  82152 maxabs=2.146e-06 rel=4.537e-07 ok
+  npy conv_dec_ff3_res               n=  27384 maxabs=3.338e-06 rel=6.003e-07 ok
+  npy conv_refiner0                  n=  13536 maxabs=4.053e-06 rel=9.930e-07 ok
+  npy conv_postnet0                  n=  16296 maxabs=1.371e-06 rel=1.372e-06 ok
+  npy conv_voc_s0_k11d5              n=  24816 maxabs=6.676e-06 rel=1.203e-06 ok
+  npy conv_voc_s0_k7d1_res           n=  14400 maxabs=2.861e-06 rel=4.883e-07 ok
+  npy conv_voc_s1_k7d3               n=  26400 maxabs=2.861e-06 rel=4.163e-07 ok
+  npy conv_voc_s2_k11d1              n=  24600 maxabs=2.861e-06 rel=5.219e-07 ok
+  npy conv_voc_s3_k3d5_res           n=  24594 maxabs=7.153e-07 rel=9.195e-08 ok
+  npy conv_post                      n=   4096 maxabs=2.980e-07 rel=3.017e-07 ok
+  npy snake_row                      n=   4096 maxabs=1.907e-06 rel=9.391e-08 ok
+  npy silu_row                       n=   4096 maxabs=9.537e-07 rel=4.819e-08 ok
+  npy tanh_row                       n=   4096 maxabs=5.960e-08 rel=5.961e-08 ok
+  npy sigmul_row (GLU)               n=   4096 maxabs=1.907e-06 rel=9.306e-08 ok
+  npy dw_row K7                      n=   4096 maxabs=1.907e-06 rel=1.705e-07 ok
+  npy ln_res (x += r)                n=  26880 maxabs=0.000e+00 rel=0.000e+00 ok
+  npy ln_res (y)                     n=  26880 maxabs=2.384e-06 rel=2.493e-07 ok
+micro-kernels vs reference:
+  k4x16                              n=    448 maxabs=0.000e+00 rel=0.000e+00 ok
+  k8x12                              n=    896 maxabs=0.000e+00 rel=0.000e+00 ok
+  snake_row |x|<30                   n=   4096 maxabs=1.907e-06 rel=6.359e-08 ok
+  snake_row a=37                     n=   4096 maxabs=1.907e-06 rel=6.362e-08 ok
+  silu_row                           n=   4096 maxabs=2.384e-07 rel=7.953e-09 ok
+  tanh_row                           n=   4096 maxabs=1.192e-07 rel=1.192e-07 ok
+  sigmul_row                         n=   4096 maxabs=4.768e-07 rel=7.969e-08 ok
+  dw_row K7                          n=   4080 maxabs=9.537e-07 rel=6.974e-08 ok
+  ln_res (x += r)                    n=  24192 maxabs=0.000e+00 rel=0.000e+00 ok
+  ln_res (y)                         n=  24192 maxabs=2.384e-07 rel=7.628e-08 ok
+  ln (no residual)                   n=  24192 maxabs=2.384e-07 rel=7.628e-08 ok
+conv driver vs direct loop:
+  conv 168x168xK1 d1 n81 a0 r0 t1    n=  13608 maxabs=2.265e-06 rel=3.905e-07 ok
+      -> 8.17 GFLOP/s
+  conv 672x168xK1 d1 n81 a1 r0 t1    n=  54432 maxabs=3.099e-06 rel=5.457e-07 ok
+      -> 8.27 GFLOP/s
+  conv 168x672xK1 d1 n530 a0 r1 t1   n=  89040 maxabs=1.335e-05 rel=1.150e-06 ok
+      -> 6.89 GFLOP/s
+  conv 96x178xK5 d1 n300 a1 r0 t1    n=  28800 maxabs=1.431e-05 rel=1.190e-06 ok
+      -> 7.59 GFLOP/s
+  conv 80x168xK5 d1 n300 a2 r0 t1    n=  24000 maxabs=4.828e-06 rel=4.828e-06 ok
+      -> 7.62 GFLOP/s
+  conv 48x48xK11 d5 n2000 a3 r0 t1   n=  96000 maxabs=1.287e-05 rel=9.722e-07 ok
+      -> 7.34 GFLOP/s
+  conv 48x48xK11 d1 n2000 a0 r1 t1   n=  96000 maxabs=8.106e-06 rel=7.761e-07 ok
+      -> 7.29 GFLOP/s
+  conv 24x24xK7 d3 n4000 a3 r0 t1    n=  96000 maxabs=4.768e-06 rel=5.368e-07 ok
+      -> 7.40 GFLOP/s
+  conv 12x12xK11 d5 n8000 a0 r1 t1   n=  96000 maxabs=2.146e-06 rel=3.800e-07 ok
+      -> 8.62 GFLOP/s
+  conv 6x6xK3 d1 n8000 a3 r0 t1      n=  48000 maxabs=7.153e-07 rel=2.364e-07 ok
+      -> 5.35 GFLOP/s
+  conv 384x96xK2 d1 n300 a0 r0 t1    n= 115200 maxabs=3.815e-06 rel=6.381e-07 ok
+      -> 8.50 GFLOP/s
+  conv 1x6xK7 d1 n4000 a2 r0 t1      n=   4000 maxabs=2.384e-07 rel=2.425e-07 ok
+      -> 2.02 GFLOP/s
+  conv 48x48xK11 d5 n2000 a3 r0 t4   n=  96000 maxabs=1.240e-05 rel=1.050e-06 ok
+      -> 21.58 GFLOP/s
+  conv 504x168xK1 d1 n530 a0 r0 t4   n= 267120 maxabs=3.338e-06 rel=5.282e-07 ok
+      -> 25.83 GFLOP/s
+  conv 168x672xK1 d1 n530 a0 r1 t1   n=  89040 maxabs=1.049e-05 rel=7.902e-07 ok
+      -> 3.94 GFLOP/s
+  conv 672x168xK1 d1 n81 a1 r0 t1    n=  54432 maxabs=2.384e-06 rel=4.138e-07 ok
+      -> 5.62 GFLOP/s
+  conv 84x168xK1 d1 n77 a1 r0 t1     n=   6468 maxabs=2.384e-06 rel=4.995e-07 ok
+      -> 7.33 GFLOP/s
+KERNELS: PASS
+== end-to-end vs onnxruntime golden
+case                  F   samp     maxabs    meanabs    rel_max     rel_l2 status
+[zh_greeting] layer taps (single chunk):
+  enc_emb          C=168 n=    21  max|ref|=   5.6020  maxabs=7.153e-07  meanabs=7.182e-08  rel=1.277e-07
+  enc_blk0         C=168 n=    21  max|ref|=   6.0517  maxabs=1.669e-06  meanabs=1.872e-07  rel=2.758e-07
+  enc_blk1         C=168 n=    21  max|ref|=   6.4131  maxabs=1.907e-06  meanabs=3.144e-07  rel=2.974e-07
+  enc_blk2         C=168 n=    21  max|ref|=   6.7350  maxabs=2.146e-06  meanabs=4.137e-07  rel=3.186e-07
+  enc_blk3         C=168 n=    21  max|ref|=   7.2881  maxabs=3.934e-06  meanabs=4.623e-07  rel=5.398e-07
+  enc_blk4         C=168 n=    21  max|ref|=   7.3284  maxabs=3.874e-06  meanabs=4.657e-07  rel=5.287e-07
+  logdur           C=  1 n=    21  max|ref|=   3.3393  maxabs=1.192e-06  meanabs=4.286e-07  rel=3.570e-07
+  conditioned      C=168 n=    21  max|ref|=  10.3641  maxabs=4.292e-06  meanabs=6.069e-07  rel=4.141e-07
+  pitch            C=  2 n=    21  max|ref|=   1.1544  maxabs=5.960e-07  meanabs=1.579e-07  rel=5.163e-07
+  reg_frame_meta   C=  8 n=   163  max|ref|=   1.0000  maxabs=5.960e-08  meanabs=1.211e-09  rel=5.960e-08
+  dec_in           C=168 n=   163  max|ref|=  16.2725  maxabs=1.240e-05  meanabs=1.636e-06  rel=7.619e-07
+  dec_blk0         C=168 n=   163  max|ref|=  15.3768  maxabs=1.597e-05  meanabs=1.819e-06  rel=1.039e-06
+  dec_blk1         C=168 n=   163  max|ref|=  15.4511  maxabs=1.526e-05  meanabs=1.883e-06  rel=9.876e-07
+  dec_blk2         C=168 n=   163  max|ref|=  14.6393  maxabs=1.979e-05  meanabs=1.989e-06  rel=1.352e-06
+  dec_blk3         C=168 n=   163  max|ref|=  14.8656  maxabs=1.812e-05  meanabs=2.113e-06  rel=1.219e-06
+  dec_blk4         C=168 n=   163  max|ref|=  15.7048  maxabs=2.289e-05  meanabs=2.291e-06  rel=1.457e-06
+  dec_blk5         C=168 n=   163  max|ref|=  17.7661  maxabs=1.991e-05  meanabs=2.380e-06  rel=1.121e-06
+  dec_gru          C=168 n=   163  max|ref|=   1.0000  maxabs=5.510e-05  meanabs=6.715e-07  rel=5.510e-05
+  mel_pre          C= 80 n=   163  max|ref|=   9.3141  maxabs=1.669e-05  meanabs=1.346e-06  rel=1.792e-06
+  mel              C= 80 n=   163  max|ref|=  11.9744  maxabs=1.907e-05  meanabs=2.468e-06  rel=1.593e-06
+  voc_ups0         C= 48 n=  1304  max|ref|=   4.2721  maxabs=6.914e-06  meanabs=7.649e-07  rel=1.618e-06
+  voc_stage0       C= 48 n=  1304  max|ref|=   3.8787  maxabs=4.777e-05  meanabs=1.745e-06  rel=1.232e-05
+  voc_ups1         C= 24 n=  5216  max|ref|=   1.1925  maxabs=1.340e-05  meanabs=6.151e-07  rel=1.123e-05
+  voc_stage1       C= 24 n=  5216  max|ref|=   2.2533  maxabs=7.153e-05  meanabs=1.426e-06  rel=3.174e-05
+  voc_ups2         C= 12 n= 10432  max|ref|=   1.3114  maxabs=3.880e-05  meanabs=6.167e-07  rel=2.959e-05
+  voc_stage2       C= 12 n= 10432  max|ref|=   1.5337  maxabs=5.040e-05  meanabs=1.053e-06  rel=3.286e-05
+  voc_ups3         C=  6 n= 20864  max|ref|=   0.6563  maxabs=2.405e-05  meanabs=4.551e-07  rel=3.665e-05
+  voc_stage3       C=  6 n= 20864  max|ref|=   0.8574  maxabs=2.551e-05  meanabs=5.967e-07  rel=2.975e-05
+zh_greeting         163  20864  8.270e-06  3.738e-07  2.073e-05  1.778e-05 PASS (single chunk)
+zh_greeting         163  20864  8.270e-06  3.738e-07  2.073e-05  1.778e-05 PASS (streamed 3->32 frame chunks)
+zh_greeting      streamed vs single-chunk: max |diff| = 0.000e+00 over 20864 samples (bit-identical)
+[en_thanks] layer taps (single chunk):
+  enc_emb          C=168 n=    19  max|ref|=   6.1856  maxabs=9.537e-07  meanabs=7.205e-08  rel=1.542e-07
+  enc_blk0         C=168 n=    19  max|ref|=   5.8589  maxabs=1.431e-06  meanabs=2.020e-07  rel=2.442e-07
+  enc_blk1         C=168 n=    19  max|ref|=   5.9522  maxabs=1.907e-06  meanabs=3.318e-07  rel=3.204e-07
+  enc_blk2         C=168 n=    19  max|ref|=   6.0774  maxabs=2.146e-06  meanabs=4.311e-07  rel=3.531e-07
+  enc_blk3         C=168 n=    19  max|ref|=   6.2039  maxabs=2.980e-06  meanabs=4.801e-07  rel=4.804e-07
+  enc_blk4         C=168 n=    19  max|ref|=   6.7636  maxabs=2.980e-06  meanabs=4.719e-07  rel=4.406e-07
+  logdur           C=  1 n=    19  max|ref|=   2.3685  maxabs=8.345e-07  meanabs=3.796e-07  rel=3.523e-07
+  conditioned      C=168 n=    19  max|ref|=  10.9893  maxabs=3.815e-06  meanabs=5.404e-07  rel=3.471e-07
+  pitch            C=  2 n=    19  max|ref|=   1.3570  maxabs=9.537e-07  meanabs=1.897e-07  rel=7.028e-07
+  reg_frame_meta   C=  8 n=    97  max|ref|=   1.0000  maxabs=5.960e-08  meanabs=6.145e-10  rel=5.960e-08
+  dec_in           C=168 n=    97  max|ref|=  16.9112  maxabs=6.914e-06  meanabs=1.282e-06  rel=4.088e-07
+  dec_blk0         C=168 n=    97  max|ref|=  17.1044  maxabs=9.060e-06  meanabs=1.355e-06  rel=5.297e-07
+  dec_blk1         C=168 n=    97  max|ref|=  17.1932  maxabs=1.037e-05  meanabs=1.452e-06  rel=6.032e-07
+  dec_blk2         C=168 n=    97  max|ref|=  16.2636  maxabs=1.311e-05  meanabs=1.539e-06  rel=8.063e-07
+  dec_blk3         C=168 n=    97  max|ref|=  16.1193  maxabs=1.001e-05  meanabs=1.609e-06  rel=6.212e-07
+  dec_blk4         C=168 n=    97  max|ref|=  16.6992  maxabs=1.383e-05  meanabs=1.768e-06  rel=8.281e-07
+  dec_blk5         C=168 n=    97  max|ref|=  16.2751  maxabs=1.597e-05  meanabs=1.871e-06  rel=9.815e-07
+  dec_gru          C=168 n=    97  max|ref|=   1.0000  maxabs=1.270e-05  meanabs=4.224e-07  rel=1.270e-05
+  mel_pre          C= 80 n=    97  max|ref|=   9.2087  maxabs=6.199e-06  meanabs=9.886e-07  rel=6.732e-07
+  mel              C= 80 n=    97  max|ref|=  11.8067  maxabs=1.478e-05  meanabs=2.296e-06  rel=1.252e-06
+  voc_ups0         C= 48 n=   776  max|ref|=   3.5312  maxabs=6.557e-06  meanabs=6.428e-07  rel=1.857e-06
+  voc_stage0       C= 48 n=   776  max|ref|=   3.8320  maxabs=1.605e-05  meanabs=9.635e-07  rel=4.188e-06
+  voc_ups1         C= 24 n=  3104  max|ref|=   1.1571  maxabs=4.530e-06  meanabs=3.684e-07  rel=3.915e-06
+  voc_stage1       C= 24 n=  3104  max|ref|=   1.8698  maxabs=1.872e-05  meanabs=8.949e-07  rel=1.001e-05
+  voc_ups2         C= 12 n=  6208  max|ref|=   1.1854  maxabs=1.776e-05  meanabs=4.820e-07  rel=1.498e-05
+  voc_stage2       C= 12 n=  6208  max|ref|=   1.1926  maxabs=2.146e-05  meanabs=9.299e-07  rel=1.799e-05
+  voc_ups3         C=  6 n= 12416  max|ref|=   0.6057  maxabs=1.039e-05  meanabs=4.255e-07  rel=1.715e-05
+  voc_stage3       C=  6 n= 12416  max|ref|=   0.7346  maxabs=1.644e-05  meanabs=5.281e-07  rel=2.237e-05
+en_thanks            97  12416  1.155e-05  6.191e-07  2.934e-05  2.186e-05 PASS (single chunk)
+en_thanks            97  12416  1.155e-05  6.191e-07  2.934e-05  2.186e-05 PASS (streamed 3->32 frame chunks)
+en_thanks        streamed vs single-chunk: max |diff| = 0.000e+00 over 12416 samples (bit-identical)
+[mix_booking] layer taps (single chunk):
+  enc_emb          C=168 n=    24  max|ref|=   5.2765  maxabs=7.153e-07  meanabs=7.212e-08  rel=1.356e-07
+  enc_blk0         C=168 n=    24  max|ref|=   6.0778  maxabs=1.431e-06  meanabs=1.820e-07  rel=2.354e-07
+  enc_blk1         C=168 n=    24  max|ref|=   6.0568  maxabs=2.623e-06  meanabs=3.221e-07  rel=4.330e-07
+  enc_blk2         C=168 n=    24  max|ref|=   6.7633  maxabs=2.861e-06  meanabs=4.390e-07  rel=4.230e-07
+  enc_blk3         C=168 n=    24  max|ref|=   7.2492  maxabs=3.338e-06  meanabs=4.879e-07  rel=4.604e-07
+  enc_blk4         C=168 n=    24  max|ref|=   7.7919  maxabs=2.861e-06  meanabs=4.781e-07  rel=3.672e-07
+  logdur           C=  1 n=    24  max|ref|=   2.8202  maxabs=7.153e-07  meanabs=2.459e-07  rel=2.536e-07
+  conditioned      C=168 n=    24  max|ref|=  10.0404  maxabs=3.815e-06  meanabs=6.228e-07  rel=3.799e-07
+  pitch            C=  2 n=    24  max|ref|=   1.5000  maxabs=6.706e-07  meanabs=1.765e-07  rel=4.470e-07
+  reg_frame_meta   C=  8 n=   149  max|ref|=   1.0000  maxabs=5.960e-08  meanabs=1.200e-09  rel=5.960e-08
+  dec_in           C=168 n=   149  max|ref|=  20.4955  maxabs=1.335e-05  meanabs=1.805e-06  rel=6.514e-07
+  dec_blk0         C=168 n=   149  max|ref|=  20.1155  maxabs=1.526e-05  meanabs=1.985e-06  rel=7.586e-07
+  dec_blk1         C=168 n=   149  max|ref|=  19.0865  maxabs=1.574e-05  meanabs=2.076e-06  rel=8.244e-07
+  dec_blk2         C=168 n=   149  max|ref|=  18.8129  maxabs=1.550e-05  meanabs=2.168e-06  rel=8.238e-07
+  dec_blk3         C=168 n=   149  max|ref|=  17.9912  maxabs=1.776e-05  meanabs=2.271e-06  rel=9.873e-07
+  dec_blk4         C=168 n=   149  max|ref|=  17.0273  maxabs=2.193e-05  meanabs=2.439e-06  rel=1.288e-06
+  dec_blk5         C=168 n=   149  max|ref|=  15.4782  maxabs=2.345e-05  meanabs=2.629e-06  rel=1.515e-06
+  dec_gru          C=168 n=   149  max|ref|=   1.0000  maxabs=2.384e-05  meanabs=7.293e-07  rel=2.384e-05
+  mel_pre          C= 80 n=   149  max|ref|=   9.1042  maxabs=1.907e-05  meanabs=1.373e-06  rel=2.095e-06
+  mel              C= 80 n=   149  max|ref|=  11.7573  maxabs=2.527e-05  meanabs=2.685e-06  rel=2.149e-06
+  voc_ups0         C= 48 n=  1192  max|ref|=   3.4001  maxabs=1.276e-05  meanabs=7.567e-07  rel=3.751e-06
+  voc_stage0       C= 48 n=  1192  max|ref|=   3.8076  maxabs=2.575e-05  meanabs=1.165e-06  rel=6.763e-06
+  voc_ups1         C= 24 n=  4768  max|ref|=   1.0881  maxabs=7.927e-06  meanabs=4.410e-07  rel=7.285e-06
+  voc_stage1       C= 24 n=  4768  max|ref|=   1.8499  maxabs=3.929e-05  meanabs=1.129e-06  rel=2.124e-05
+  voc_ups2         C= 12 n=  9536  max|ref|=   1.4465  maxabs=3.210e-05  meanabs=5.794e-07  rel=2.219e-05
+  voc_stage2       C= 12 n=  9536  max|ref|=   1.4543  maxabs=4.315e-05  meanabs=1.154e-06  rel=2.967e-05
+  voc_ups3         C=  6 n= 19072  max|ref|=   0.6715  maxabs=1.619e-05  meanabs=4.989e-07  rel=2.411e-05
+  voc_stage3       C=  6 n= 19072  max|ref|=   0.8449  maxabs=2.071e-05  meanabs=6.123e-07  rel=2.452e-05
+mix_booking         149  19072  1.211e-05  5.665e-07  2.358e-05  1.726e-05 PASS (single chunk)
+mix_booking         149  19072  1.211e-05  5.665e-07  2.358e-05  1.726e-05 PASS (streamed 3->32 frame chunks)
+mix_booking      streamed vs single-chunk: max |diff| = 0.000e+00 over 19072 samples (bit-identical)
+[zh_phone_sid1] layer taps (single chunk):
+  enc_emb          C=168 n=    29  max|ref|=   6.3386  maxabs=4.768e-07  meanabs=6.269e-08  rel=7.523e-08
+  enc_blk0         C=168 n=    29  max|ref|=   6.8125  maxabs=2.146e-06  meanabs=2.850e-07  rel=3.150e-07
+  enc_blk1         C=168 n=    29  max|ref|=   7.1520  maxabs=4.053e-06  meanabs=5.924e-07  rel=5.667e-07
+  enc_blk2         C=168 n=    29  max|ref|=   6.3979  maxabs=5.722e-06  meanabs=7.705e-07  rel=8.944e-07
+  enc_blk3         C=168 n=    29  max|ref|=   6.2783  maxabs=4.768e-06  meanabs=8.097e-07  rel=7.595e-07
+  enc_blk4         C=168 n=    29  max|ref|=   6.7652  maxabs=4.053e-06  meanabs=7.860e-07  rel=5.991e-07
+  logdur           C=  1 n=    29  max|ref|=   2.0969  maxabs=9.537e-07  meanabs=2.960e-07  rel=4.548e-07
+  conditioned      C=168 n=    29  max|ref|=  10.7908  maxabs=5.245e-06  meanabs=8.677e-07  rel=4.861e-07
+  pitch            C=  2 n=    29  max|ref|=   1.0584  maxabs=6.557e-07  meanabs=2.181e-07  rel=6.195e-07
+  reg_frame_meta   C=  8 n=   138  max|ref|=   1.0000  maxabs=5.960e-08  meanabs=9.718e-10  rel=5.960e-08
+  dec_in           C=168 n=   138  max|ref|=   9.8197  maxabs=1.049e-05  meanabs=1.683e-06  rel=1.068e-06
+  dec_blk0         C=168 n=   138  max|ref|=   9.9453  maxabs=1.287e-05  meanabs=1.752e-06  rel=1.295e-06
+  dec_blk1         C=168 n=   138  max|ref|=  10.4945  maxabs=1.217e-05  meanabs=1.868e-06  rel=1.159e-06
+  dec_blk2         C=168 n=   138  max|ref|=  10.7381  maxabs=1.323e-05  meanabs=2.044e-06  rel=1.232e-06
+  dec_blk3         C=168 n=   138  max|ref|=  11.6305  maxabs=1.717e-05  meanabs=2.275e-06  rel=1.476e-06
+  dec_blk4         C=168 n=   138  max|ref|=   9.8417  maxabs=3.195e-05  meanabs=2.703e-06  rel=3.246e-06
+  dec_blk5         C=168 n=   138  max|ref|=  10.1018  maxabs=3.886e-05  meanabs=2.905e-06  rel=3.847e-06
+  dec_gru          C=168 n=   138  max|ref|=   1.0000  maxabs=3.690e-05  meanabs=8.998e-07  rel=3.690e-05
+  mel_pre          C= 80 n=   138  max|ref|=   6.6305  maxabs=2.447e-05  meanabs=1.853e-06  rel=3.690e-06
+  mel              C= 80 n=   138  max|ref|=  10.5678  maxabs=3.004e-05  meanabs=2.950e-06  rel=2.843e-06
+  voc_ups0         C= 48 n=  1104  max|ref|=   2.7776  maxabs=1.061e-05  meanabs=7.872e-07  rel=3.820e-06
+  voc_stage0       C= 48 n=  1104  max|ref|=   2.5030  maxabs=2.712e-05  meanabs=1.199e-06  rel=1.084e-05
+  voc_ups1         C= 24 n=  4416  max|ref|=   1.1209  maxabs=6.996e-06  meanabs=4.676e-07  rel=6.242e-06
+  voc_stage1       C= 24 n=  4416  max|ref|=   1.5199  maxabs=4.134e-05  meanabs=1.361e-06  rel=2.720e-05
+  voc_ups2         C= 12 n=  8832  max|ref|=   1.1285  maxabs=3.886e-05  meanabs=7.017e-07  rel=3.444e-05
+  voc_stage2       C= 12 n=  8832  max|ref|=   1.1268  maxabs=4.148e-05  meanabs=1.263e-06  rel=3.682e-05
+  voc_ups3         C=  6 n= 17664  max|ref|=   0.4405  maxabs=1.750e-05  meanabs=5.257e-07  rel=3.973e-05
+  voc_stage3       C=  6 n= 17664  max|ref|=   0.6474  maxabs=1.664e-05  meanabs=6.636e-07  rel=2.571e-05
+zh_phone_sid1       138  17664  1.273e-05  6.401e-07  4.845e-05  2.467e-05 PASS (single chunk)
+zh_phone_sid1       138  17664  1.273e-05  6.401e-07  4.845e-05  2.467e-05 PASS (streamed 3->32 frame chunks)
+zh_phone_sid1    streamed vs single-chunk: max |diff| = 0.000e+00 over 17664 samples (bit-identical)
+[random_T90] layer taps (single chunk):
+  enc_emb          C=168 n=    90  max|ref|=   6.4925  maxabs=9.537e-07  meanabs=7.113e-08  rel=1.469e-07
+  enc_blk0         C=168 n=    90  max|ref|=   6.3487  maxabs=2.146e-06  meanabs=2.102e-07  rel=3.380e-07
+  enc_blk1         C=168 n=    90  max|ref|=   8.1471  maxabs=2.623e-06  meanabs=3.633e-07  rel=3.219e-07
+  enc_blk2         C=168 n=    90  max|ref|=   7.3922  maxabs=2.861e-06  meanabs=4.769e-07  rel=3.870e-07
+  enc_blk3         C=168 n=    90  max|ref|=   7.0549  maxabs=2.861e-06  meanabs=5.283e-07  rel=4.055e-07
+  enc_blk4         C=168 n=    90  max|ref|=   6.8429  maxabs=2.623e-06  meanabs=5.206e-07  rel=3.833e-07
+  logdur           C=  1 n=    90  max|ref|=   3.0878  maxabs=1.907e-06  meanabs=3.318e-07  rel=6.177e-07
+  conditioned      C=168 n=    90  max|ref|=   9.4108  maxabs=3.815e-06  meanabs=6.381e-07  rel=4.054e-07
+  pitch            C=  2 n=    90  max|ref|=   1.2052  maxabs=8.345e-07  meanabs=2.369e-07  rel=6.924e-07
+  reg_frame_meta   C=  8 n=   530  max|ref|=   1.0000  maxabs=5.960e-08  meanabs=6.888e-10  rel=5.960e-08
+  dec_in           C=168 n=   530  max|ref|=  13.8568  maxabs=1.526e-05  meanabs=1.478e-06  rel=1.101e-06
+  dec_blk0         C=168 n=   530  max|ref|=  13.1746  maxabs=1.979e-05  meanabs=1.638e-06  rel=1.502e-06
+  dec_blk1         C=168 n=   530  max|ref|=  13.2304  maxabs=2.003e-05  meanabs=1.764e-06  rel=1.514e-06
+  dec_blk2         C=168 n=   530  max|ref|=  13.7522  maxabs=2.718e-05  meanabs=1.937e-06  rel=1.976e-06
+  dec_blk3         C=168 n=   530  max|ref|=  14.1943  maxabs=2.909e-05  meanabs=2.224e-06  rel=2.049e-06
+  dec_blk4         C=168 n=   530  max|ref|=  14.0446  maxabs=3.505e-05  meanabs=2.678e-06  rel=2.495e-06
+  dec_blk5         C=168 n=   530  max|ref|=  13.8536  maxabs=4.268e-05  meanabs=3.009e-06  rel=3.081e-06
+  dec_gru          C=168 n=   530  max|ref|=   1.0000  maxabs=6.928e-05  meanabs=1.134e-06  rel=6.928e-05
+  mel_pre          C= 80 n=   530  max|ref|=   8.6538  maxabs=3.684e-05  meanabs=2.079e-06  rel=4.257e-06
+  mel              C= 80 n=   530  max|ref|=  11.4760  maxabs=8.202e-05  meanabs=3.431e-06  rel=7.147e-06
+  voc_ups0         C= 48 n=  4240  max|ref|=   3.2408  maxabs=4.140e-05  meanabs=9.782e-07  rel=1.277e-05
+  voc_stage0       C= 48 n=  4240  max|ref|=   2.7609  maxabs=5.847e-05  meanabs=1.628e-06  rel=2.118e-05
+  voc_ups1         C= 24 n= 16960  max|ref|=   1.0415  maxabs=2.605e-05  meanabs=6.580e-07  rel=2.501e-05
+  voc_stage1       C= 24 n= 16960  max|ref|=   1.5544  maxabs=1.700e-04  meanabs=1.981e-06  rel=1.094e-04
+  voc_ups2         C= 12 n= 33920  max|ref|=   1.3483  maxabs=1.778e-04  meanabs=1.089e-06  rel=1.318e-04
+  voc_stage2       C= 12 n= 33920  max|ref|=   1.2583  maxabs=2.061e-04  meanabs=1.949e-06  rel=1.638e-04
+  voc_ups3         C=  6 n= 67840  max|ref|=   0.5626  maxabs=8.333e-05  meanabs=8.231e-07  rel=1.481e-04
+  voc_stage3       C=  6 n= 67840  max|ref|=   0.7480  maxabs=1.021e-04  meanabs=9.889e-07  rel=1.365e-04
+random_T90          530  67840  6.962e-05  1.116e-06  2.003e-04  6.853e-05 PASS (single chunk)
+random_T90          530  67840  6.962e-05  1.116e-06  2.003e-04  6.853e-05 PASS (streamed 3->32 frame chunks)
+random_T90       streamed vs single-chunk: max |diff| = 0.000e+00 over 67840 samples (bit-identical)
+[random_T23] layer taps (single chunk):
+  enc_emb          C=168 n=    23  max|ref|=   5.5906  maxabs=9.537e-07  meanabs=7.059e-08  rel=1.706e-07
+  enc_blk0         C=168 n=    23  max|ref|=   5.7045  maxabs=1.311e-06  meanabs=1.909e-07  rel=2.299e-07
+  enc_blk1         C=168 n=    23  max|ref|=   6.1330  maxabs=2.146e-06  meanabs=3.110e-07  rel=3.499e-07
+  enc_blk2         C=168 n=    23  max|ref|=   6.7511  maxabs=2.503e-06  meanabs=4.079e-07  rel=3.708e-07
+  enc_blk3         C=168 n=    23  max|ref|=   6.9974  maxabs=2.146e-06  meanabs=4.653e-07  rel=3.067e-07
+  enc_blk4         C=168 n=    23  max|ref|=   7.4918  maxabs=2.384e-06  meanabs=4.596e-07  rel=3.182e-07
+  logdur           C=  1 n=    23  max|ref|=   2.5378  maxabs=7.153e-07  meanabs=2.332e-07  rel=2.818e-07
+  conditioned      C=168 n=    23  max|ref|=   8.3245  maxabs=2.861e-06  meanabs=5.895e-07  rel=3.437e-07
+  pitch            C=  2 n=    23  max|ref|=   1.1180  maxabs=6.557e-07  meanabs=1.743e-07  rel=5.865e-07
+  reg_frame_meta   C=  8 n=   141  max|ref|=   1.0000  maxabs=5.960e-08  meanabs=7.926e-10  rel=5.960e-08
+  dec_in           C=168 n=   141  max|ref|=  12.6485  maxabs=9.894e-06  meanabs=1.432e-06  rel=7.823e-07
+  dec_blk0         C=168 n=   141  max|ref|=  13.8773  maxabs=1.079e-05  meanabs=1.517e-06  rel=7.774e-07
+  dec_blk1         C=168 n=   141  max|ref|=  14.1883  maxabs=1.198e-05  meanabs=1.627e-06  rel=8.444e-07
+  dec_blk2         C=168 n=   141  max|ref|=  14.5963  maxabs=1.216e-05  meanabs=1.744e-06  rel=8.330e-07
+  dec_blk3         C=168 n=   141  max|ref|=  14.7580  maxabs=1.383e-05  meanabs=1.925e-06  rel=9.370e-07
+  dec_blk4         C=168 n=   141  max|ref|=  14.8066  maxabs=1.907e-05  meanabs=2.136e-06  rel=1.288e-06
+  dec_blk5         C=168 n=   141  max|ref|=  14.3434  maxabs=1.657e-05  meanabs=2.200e-06  rel=1.155e-06
+  dec_gru          C=168 n=   141  max|ref|=   1.0000  maxabs=1.222e-05  meanabs=6.109e-07  rel=1.222e-05
+  mel_pre          C= 80 n=   141  max|ref|=   9.2576  maxabs=1.103e-05  meanabs=1.217e-06  rel=1.191e-06
+  mel              C= 80 n=   141  max|ref|=  11.6706  maxabs=1.526e-05  meanabs=2.343e-06  rel=1.307e-06
+  voc_ups0         C= 48 n=  1128  max|ref|=   3.6280  maxabs=6.080e-06  meanabs=6.411e-07  rel=1.676e-06
+  voc_stage0       C= 48 n=  1128  max|ref|=   2.9913  maxabs=1.611e-05  meanabs=9.618e-07  rel=5.387e-06
+  voc_ups1         C= 24 n=  4512  max|ref|=   1.0241  maxabs=4.850e-06  meanabs=3.761e-07  rel=4.736e-06
+  voc_stage1       C= 24 n=  4512  max|ref|=   1.8390  maxabs=3.904e-05  meanabs=1.093e-06  rel=2.123e-05
+  voc_ups2         C= 12 n=  9024  max|ref|=   1.2792  maxabs=4.119e-05  meanabs=5.895e-07  rel=3.220e-05
+  voc_stage2       C= 12 n=  9024  max|ref|=   1.2414  maxabs=6.198e-05  meanabs=1.089e-06  rel=4.993e-05
+  voc_ups3         C=  6 n= 18048  max|ref|=   0.5238  maxabs=3.271e-05  meanabs=4.534e-07  rel=6.244e-05
+  voc_stage3       C=  6 n= 18048  max|ref|=   0.6996  maxabs=4.099e-05  meanabs=5.492e-07  rel=5.859e-05
+random_T23          141  18048  1.771e-05  5.083e-07  5.491e-05  2.335e-05 PASS (single chunk)
+random_T23          141  18048  1.771e-05  5.083e-07  5.491e-05  2.335e-05 PASS (streamed 3->32 frame chunks)
+random_T23       streamed vs single-chunk: max |diff| = 0.000e+00 over 18048 samples (bit-identical)
+E2E: PASS

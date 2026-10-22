@@ -1,0 +1,17 @@
+# bench_cpu: PrimeTTS v1 (16000 Hz, hop 256) on 4 cores, model load 6.5 ms, 6 requests
+
+## single stream, 1 thread (chunks: 3 frames first, doubling to 32 frames)
+
+| request | phones | audio s | synth s (best of 3) | RTF | mel ready ms | first chunk ms | non-streamed synth s | streaming overhead |
+|---|---|---|---|---|---|---|---|---|
+| zh_greeting | 21 | 2.69 | 1.698 | 0.632 | 118.7 | 176.2 | 1.776 | -4.4% |
+| en_thanks | 19 | 1.54 | 0.987 | 0.643 | 72.7 | 130.7 | 1.023 | -3.5% |
+| mix_booking | 24 | 2.34 | 1.490 | 0.638 | 109.9 | 167.6 | 1.552 | -4.0% |
+| zh_phone_sid1 | 29 | 2.00 | 1.283 | 0.642 | 100.3 | 158.4 | 1.334 | -3.8% |
+| random_T90 | 90 | 8.70 | 5.461 | 0.627 | 395.7 | 453.5 | 5.730 | -4.7% |
+| random_T23 | 23 | 2.46 | 1.564 | 0.635 | 111.4 | 169.2 | 1.631 | -4.1% |
+| **all** | | 19.73 | 12.483 | **0.633** | | | | |
+
+stream arena: 14.2 MB (limits 400 phones / 1000 frames = 16 s)
+
+peak RSS (VmHWM): 143.7 MB

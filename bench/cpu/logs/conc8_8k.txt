@@ -1,0 +1,9 @@
+# bench_cpu: PrimeTTS v1 (8000 Hz, hop 128) on 4 cores, model load 6.1 ms, 6 requests
+
+## concurrent streams (N in flight, pinned round-robin on 4 cores, 3 requests per slot, all arrive at t=0, no admission throttle)
+
+| N | requests | audio s | wall s | audio-s per wall-s | mean RTF/request | max RTF | mean first-chunk ms | max first-chunk ms | worst lateness ms | max queue wait ms | ok |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 8 | 24 | 77.7 | 5.39 | **14.41** | 0.454 | 0.712 | 442 | 1190 | +0 | 3240 | 24/24 |
+
+peak RSS (VmHWM): 79.4 MB

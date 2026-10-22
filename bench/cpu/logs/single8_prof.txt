@@ -1,0 +1,31 @@
+phase profile (PT_PROF=1):
+  encoder                         723.1 ms    2.8%
+  regulator                        15.0 ms    0.1%
+  dec pre (proj/lc/refiner)       560.4 ms    2.2%
+  dec 6 blocks                   3393.4 ms   13.2%
+  dec GRU                         908.9 ms    3.5%
+  mel head + postnet              833.1 ms    3.2%
+  voc conv_pre                    163.3 ms    0.6%
+  voc ConvT+interleave            581.9 ms    2.3%
+  voc snake1 copies              1353.6 ms    5.3%
+  voc conv1 (+snake2)            8790.8 ms   34.2%
+  voc conv2 (+residual)          8008.7 ms   31.2%
+  voc stage sum/snake             277.5 ms    1.1%
+  voc conv_post                    68.8 ms    0.3%
+# bench_cpu: PrimeTTS v1 (8000 Hz, hop 128) on 4 cores, model load 212.5 ms, 6 requests
+
+## single stream, 1 thread (chunks: 3 frames first, doubling to 32 frames)
+
+| request | phones | audio s | synth s (best of 3) | RTF | mel ready ms | first chunk ms | non-streamed synth s | streaming overhead |
+|---|---|---|---|---|---|---|---|---|
+| zh_greeting | 21 | 2.61 | 0.483 | 0.185 | 118.9 | 139.6 | 0.492 | -1.8% |
+| en_thanks | 19 | 1.55 | 0.302 | 0.195 | 79.3 | 100.0 | 0.301 | +0.3% |
+| mix_booking | 24 | 2.38 | 0.446 | 0.187 | 111.5 | 132.1 | 0.451 | -1.1% |
+| zh_phone_sid1 | 29 | 2.21 | 0.419 | 0.190 | 108.9 | 129.6 | 0.424 | -1.1% |
+| random_T90 | 90 | 8.48 | 1.544 | 0.182 | 390.9 | 411.8 | 1.639 | -5.8% |
+| random_T23 | 23 | 2.26 | 0.420 | 0.186 | 103.5 | 124.3 | 0.424 | -1.0% |
+| **all** | | 19.49 | 3.615 | **0.186** | | | | |
+
+stream arena: 11.9 MB (limits 400 phones / 1000 frames = 16 s)
+
+peak RSS (VmHWM): 73.6 MB
