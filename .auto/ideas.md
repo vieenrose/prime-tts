@@ -38,6 +38,35 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
   that is why the official measure.sh N=4 run and warm paired runs disagree.
 - Diagnostics: `PT_V21_EKIND=2` prints per-node times; `PT_V21_DUMP_T=<node>` dumps raw fp32.
 
+## Killed by analysis #5 (run 78): ig8 tail waste is real but unrecoverable
+MAC-weighted tail waste across the 124 convs is 8.5% of conv GPU (~36 ms/stream, ~140 ms wall at
+x4): Tout=904 (43% of all MACs) wastes 11.7% (8 blocks, tail covers 8 cols), Tout=226 wastes 11.7%,
+Tout=81 wastes 36.7%. BUT a skinny tail block runs the same kc reduction loop and takes the same
+time whether 256 or 32 threads wide -- the waste only converts to wall savings through SM packing
+with other streams' blocks, and at N=4 the scheduler already backfills tails with other streams'
+full waves, so most of it is hidden in practice. The alternatives are worse: `ig` (64-col) has less
+tail waste but a much slower per-element rate (0.66 vs 0.88 effective -- ig8 still wins); padding
+Tout to 128 and trimming needs padded intermediates that break the conv->conv chain. Do not pursue
+without evidence from a packing-aware measurement, not a single-stream model.
+
+## Killed by measurement #4 (run 77)
+- **Async and pinned-staging variants of the 111 MB weight upload.** With the clock ramped (run 75),
+  N=1 upload probes: sync 140.9/138.2 ms vs async+one-sync 139.4/136.0 ms (identical -- per-call
+  overhead is NOT the bottleneck) vs pinned double-buffered staging 152.7/153.5 ms (WORSE: the extra
+  111 MB host memcpy outweighs any DMA gain). The engine does ~0.8 GB/s H2D from pageable memory no
+  matter the call pattern. Correction: the "H2D runs at ~3 GB/s" claim in the transfer-budget note
+  below was a misread -- the copy split measures async ISSUE time; completion hides in kernel+sync.
+  The upload path is bandwidth-bound and exhausted (only fewer bytes, e.g. fp16 upload + on-GPU
+  convert, would help: ~60 ms for real complexity and risk -- below the bar). Do not touch it again.
+
+## Killed by measurement #3 (run 76)
+- **Overlapping CUDA context creation + clock warmup with the container record pass** on a dedicated
+  prewarm thread (`pt_v21_prewarm` + `prewarm_run`, `PT_V21_PREWARM`). 6 matched cold pairs with
+  order reversal: 2/6 wins, mean +34 ms. The record pass is serialized and CPU-bound, so the 5th
+  thread contends on 4x A57 cores (open phase +12 ms) while stream 0 blocks on the prewarm condvar
+  anyway. The prior 3/3 wins were spread luck. Correct primitive (condvar-guarded once-per-process
+  prewarm), wrong bottleneck -- do not retry without a core to spare.
+
 ## Killed by measurement #2 (run 74)
 - **Folding a single-consumer activation into its producer when the producer is a Slice.** The
   activation windows (32 Tanh/Sigmoid pairs) are fed by a Slice whose output tensor is still
@@ -58,6 +87,19 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
 - Small 32x32 tiles for short outputs: arithmetic intensity matters more than block count.
 - Padé-approximant / coarse-table tanh+sigmoid: SNDR 67.4 / 64.3 dB. The 65536-point interpolated
   table keeps 70.09 dB and is kept (TANH 62 -> 19 ms).
+
+## Run 75: the GPU clock, without root -- INVALIDATES two earlier rollback reasons
+`nvhost_podgov` idles the GPU at 76.8 MHz and ramps only on sustained SM load. A fixed 64k-iteration
+ALU kernel launched right after `cudaFree(0)` (25.9 ms, once per process, `PT_V21_WARM=0` to disable)
+reaches the same place `jetson_clocks` would:
+- weight upload 226 -> 138 ms (0.46 GB/s at the idle clock was never a copy-path limit);
+- matched cold A/B on picard: 2454/2511/2481 -> 2329/2316/2358 (mean -148 ms, -6%);
+- second box pesi: 2516/2496 -> 2337/2378 (mean -148 ms).
+**Rollback reasons now obsolete:** #50 "stop pursuing startup, it is off-objective" and #57
+"warm-instrumented startup costs do not transfer to the cold measurement". The startup WAS on the
+primary metric and its root cause was the clock. Anything that touches the cold first ~600 ms
+should be re-examined now that the clock ramps first (the pooled cudaMallocs of #57 may now show up,
+for instance).
 
 ## Measurement noise floor (run 73, important)
 The SAME binary draws 2428 / 2436 / 2449 / 2479 / 2502 / 2521 ms on n4_wall -- a ~4% spread on this
@@ -96,6 +138,12 @@ calls inside pt_v21_open, next to where run #55's race lived -- not worth the co
 Conv activations move 67.5 MB out + 63.2 MB in per stream, but at the ramped clock H2D runs at
 ~3 GB/s (the 63.2 MB shows up as the 21 ms `copy` split), so all PCIe traffic is only ~43 ms of the
 ~380 ms GPU block. Transfers are NOT a lever; the GPU compute (34.9 GFLOP at ~44% of fp32 peak) is.
+
+## Ledger (run 78): session best confirmed
+picard official draws on identical code: 2328 (run 75), 2333 (run 77), 2315, 2330 (run 78) --
+mean ~2326, tight cluster, no drift. All 5 golden cases bit-identical GPU vs CPU (worst SNDR 67.45
+dB sid1_T29). pesi health check: 2427 (+2.9% over its earlier mean, within noise; identical parity,
+min_free 250 MB, no crash). Standing: 9.9 s -> ~2.33 s (4.25x) with quality preserved.
 
 ## Run 70 findings (measurement budget: what is left)
 MAC-weighted conv wave efficiency is already 0.921, so batching the four streams for wave
