@@ -156,23 +156,30 @@ class GateFailure(Exception):
 
 
 def conv1d_ref(X: np.ndarray, W: np.ndarray, B: np.ndarray, stride: int, pad: int, dilation: int) -> np.ndarray:
-    """ONNX conv1d reference: X [Cin,T] -> [Cout,Tout].  Used only by the packing checks."""
+    """ONNX conv1d reference: X [Cin,T] -> [Cout,Tout].  Used only by the packing checks.
+
+    patches[c,t,k] = xp[c, t*stride + k*dilation]: the flattened index is t-major, so the reshape
+    is (Cin, Tout, K) and the contraction emits the Cout axis ("ock,ctk->ot").
+    """
     Cout, Cin, K = W.shape
     T = X.shape[1]
     xp = np.zeros((Cin, T + 2 * pad), np.float32)
     xp[:, pad:pad + T] = X
     Tout = (T + 2 * pad - dilation * (K - 1) - 1) // stride + 1
     idx = (np.arange(Tout)[:, None] * stride + np.arange(K)[None, :] * dilation).reshape(-1)
-    patches = xp[:, idx].reshape(Cin, K, Tout)
-    return np.einsum("ock,ckt->ct", W, patches) + np.asarray(B, np.float32)[:Cout, None]
+    patches = xp[:, idx].reshape(Cin, Tout, K)
+    return np.einsum("ock,ctk->ot", W, patches) + np.asarray(B, np.float32)[:Cout, None]
 
 
 def conv_transpose1d_ref(X: np.ndarray, W: np.ndarray, B: np.ndarray, stride: int, pad: int) -> np.ndarray:
-    """ONNX conv_transpose1d reference: X [Cin,Tin] -> [Cout,Tout], Tout=(Tin-1)*s-2*pad+K."""
+    """ONNX conv_transpose1d reference: X [Cin,Tin] -> [Cout,Tout], Tout=(Tin-1)*s-2*pad+K.
+
+    Bias is one value per output channel, broadcast over the Tout columns (bias[:, None]).
+    """
     Cin, Cout, K = W.shape
     Tin = X.shape[1]
     Tout = (Tin - 1) * stride - 2 * pad + K
-    out = np.tile(np.asarray(B, np.float32)[:Cout][None, :], (1, 1)).repeat(Tout, 1)
+    out = np.tile(np.asarray(B, np.float32)[:Cout][:, None], (1, Tout))
     for k in range(K):
         t = np.arange(Tin) * stride + k - pad
         ok = (t >= 0) & (t < Tout)
@@ -189,23 +196,30 @@ def conv_transpose1d_packed(X: np.ndarray, Wp: np.ndarray, B: np.ndarray, s: int
 
     Phase r / tap j is ONNX kernel tap k = r + j*s, and for output index t = q*s + r - pad that
     tap reads input q - j (because t = (q-j)*s + k - pad), so tap j is a j-step delay of x.
+    With K > s (nt > 1) the last nt-1 steps consume zero input and produce the tail outputs, so
+    the delay line runs Tin + nt - 1 steps (the runtime flushes them at stream end).
     """
     Cin, Tin = X.shape
     nt = convT_ntap(K, s)
     Wph = unpack_conv(Wp)  # [s*C4][Cin][nt]
     C4 = r4(Cout)
-    P = np.zeros((s, C4, Tin), np.float32)
+    # taps j>0 read x[q-j], so the last nt-1 phase steps consume zero input and produce the
+    # tail outputs (t up to (Tin-1)*s + K - 1 - pad): the delay line runs Tin + nt - 1 steps.
+    Q = Tin + nt - 1
+    xp = np.zeros((Cin, Q), np.float32)
+    xp[:, :Tin] = X
+    P = np.zeros((s, C4, Q), np.float32)
     for r in range(s):
         for j in range(nt):
             wr = Wph[r * C4:(r + 1) * C4, :, j]  # [C4,Cin]
             if j == 0:
-                P[r] += wr @ X
-            elif j < Tin:
-                P[r, :, j:] += wr @ X[:, :-j]
-        P[r] += B[:C4][None, :]
+                P[r] += wr @ xp
+            else:
+                P[r, :, j:] += wr @ xp[:, :-j]
+        P[r] += B[:C4][:, None]
     Tout = (Tin - 1) * s - 2 * pad + K
     out = np.zeros((Cout, Tout), np.float32)
-    for q in range(Tin):
+    for q in range(Q):
         for r in range(s):
             t = q * s + r - pad
             if 0 <= t < Tout:
@@ -635,6 +649,8 @@ class Exporter:
                 self.embedding_entry(idx, n, grp, mod, a, entry)
             elif n.op_type == "Pad" and len(n.input) > 1 and n.input[1] in self.init:
                 self.pad_table_entry(idx, n, grp, mod, a, entry)
+            elif n.op_type == "Pad" and n.input[0] in self.init:
+                self.pad_weight_entry(idx, n, grp, mod, a, entry)
             elif n.op_type == "Pad":
                 self.pad_const_entry(idx, n, grp, mod, a, entry)
             self.layers.append(entry)
@@ -797,6 +813,30 @@ class Exporter:
                      shape=str(list(E.shape)))
         self.covered.add(n.input[1])
 
+    def pad_weight_entry(self, idx, n, grp, mod, a, entry) -> None:
+        """Weight Pad: the DATA input is an initializer and the pads are graph-computed (every one
+        of v2.1's 51 Pad nodes has dynamic pads).  The table goes in the container; the runtime
+        pads it to the query length with the pads the graph computes from the sequence length.
+
+        Measured (probe): attn emb_rel_k/v (1,9,96) + pads [0,76,0,0,76,0] -> (1,161,96);
+        the 76 = (len-1) - (rel-1)/2 grows with the utterance, so the pads are runtime data.
+        """
+        T = np.ascontiguousarray(self.init[n.input[0]], np.float32)
+        tail = (n.name or n.output[0]).split("/")[-1].lower()  # 'pad' vs 'pad_5' (k vs v table)
+        name = self.add(f"{grp}.{mod}.{tail}.relpos", T, grp, FP32)
+        pads = self.const_pads(n)
+        entry.update(op="pad_relative_position", onnx=[n.input[0]], packed=[name], dtype="fp32",
+                     params=dict(table=list(T.shape), rows=int(T.shape[1]), cols=int(T.shape[2]),
+                                 pads=None if pads is None else [int(v) for v in pads],
+                                 pads_source=(n.input[1] if len(n.input) > 1 else None),
+                                 mode=str(a.get("mode", "constant"))),
+                     impl="constant Pad of the learned relative-position table to the attention "
+                          "width; pads are computed by the graph from the sequence length "
+                          "(pads_source), the container holds the unpadded table",
+                     shape=f"{list(T.shape)} -> padded on axis {1} at runtime",
+                     epilogue=self.epilogue(n))
+        self.covered.add(n.input[0])
+
     def pad_const_entry(self, idx, n, grp, mod, a, entry) -> None:
         pads = self.const_pads(n)
         entry.update(op="pad", params=dict(pads=[int(v) for v in pads] if pads is not None else None,
@@ -916,13 +956,98 @@ def rebuild(l: dict, back: dict) -> np.ndarray:
     return back[l["packed"][0]][0]
 
 
+def conv1d_brute(X: np.ndarray, W: np.ndarray, B: np.ndarray, stride: int, pad: int, dilation: int) -> np.ndarray:
+    """ONNX conv1d, independent of the packed layout and of conv1d_ref's patch-indexing.
+
+    One matmul per kernel tap with its own explicit output-index math: tap k of a stride-s,
+    dilation-d conv reads xp[:, t*s + k*d] (xp is the zero-padded input).  The gate compares the
+    packed evaluation against THIS, so a stride/pad/dilation mapping error cannot cancel out.
+    """
+    Cout, Cin, K = W.shape
+    T = X.shape[1]
+    xp = np.zeros((Cin, T + 2 * pad), np.float32)
+    xp[:, pad:pad + T] = X
+    Tout = (T + 2 * pad - dilation * (K - 1) - 1) // stride + 1
+    out = np.zeros((Cout, Tout), np.float32)
+    for k in range(K):
+        cols = np.arange(Tout) * stride + k * dilation
+        out += W[:, :, k] @ xp[:, cols]
+    return out + np.asarray(B, np.float32)[:Cout][:, None]
+
+
+def conv_transpose1d_brute(X: np.ndarray, W: np.ndarray, B: np.ndarray, stride: int, pad: int) -> np.ndarray:
+    """ONNX ConvTranspose, independent of the phase packing: scatter each (input q, tap k) product
+    to output index t = q*stride + k - pad.  Bias is per output channel, broadcast over time."""
+    Cin, Cout, K = W.shape
+    Tin = X.shape[1]
+    Tout = (Tin - 1) * stride - 2 * pad + K
+    out = np.zeros((Cout, Tout), np.float32)
+    for q in range(Tin):
+        for k in range(K):
+            t = q * stride + k - pad
+            if 0 <= t < Tout:
+                out[:, t] += W[:, :, k].T @ X[:, q]
+    return out + np.asarray(B, np.float32)[:Cout][:, None]
+
+
+def _gate_layout(kind: str, name: str, onnx: str, W: np.ndarray, Cin: int, Cout: int,
+                 K: int, packed: np.ndarray, s: int = 1, nt: int | None = None) -> None:
+    """Hard layout assertion for one gate entry.  Never skips: on a mismatch it names the entry,
+    the ex.conv/ex.convT list it came from, its ONNX input tensor and every shape involved, so a
+    convT-layout tensor reaching the conv loop is visible in the message, not silently passed."""
+    lst = f"ex.{kind}"
+    if W.ndim != 3:
+        raise GateFailure(f"gate(a) {kind} layout: entry {name} (from {lst}, ONNX input {onnx}) has "
+                          f"W.ndim={W.ndim} W.shape={tuple(W.shape)}; the packing gate needs the raw "
+                          f"3-D ONNX weight (a packed 4-D [Cout4/4][K][Cin][4] tensor belongs in the "
+                          f"container, not in {lst})")
+    rows, cols, kk = W.shape
+    if kind == "conv":
+        want = (Cout, Cin, K)
+        hint = ""
+        if rows == Cin and cols == Cout and Cout != Cin:
+            hint = (" -> looks like a ConvTranspose-layout tensor [Cin,Cout,K]: it was appended by "
+                    "convT_entry (self.convT.append), not by conv_entry (self.conv.append)")
+    else:
+        want = (Cin, Cout, K)
+        hint = (" -> looks like a Conv-layout tensor [Cout,Cin,K]: it was appended by conv_entry "
+                "(self.conv.append), not by convT_entry (self.convT.append)"
+                ) if rows == Cout and cols == Cin and Cin != Cout else ""
+    if tuple(W.shape) != want:
+        raise GateFailure(f"gate(a) {kind} layout: entry {name} (from {lst}, ONNX input {onnx}) has "
+                          f"W.shape={tuple(W.shape)}, expected {want} (Cout={Cout} Cin={Cin} K={K}) "
+                          f"for this {kind} entry{hint}")
+    if kk != K:
+        raise GateFailure(f"gate(a) {kind} layout: entry {name} (from {lst}, ONNX input {onnx}) has "
+                          f"kernel axis {kk}, entry says K={K} (W.shape={tuple(W.shape)})")
+    ph, Kp, Cinp, four = packed.shape
+    taps = nt if nt is not None else K
+    exp = (r4(Cout) // 4 * max(s, 1), taps, Cin, 4)
+    if tuple(packed.shape) != exp:
+        raise GateFailure(f"gate(a) {kind} packed shape: entry {name} (from {lst}, ONNX input "
+                          f"{onnx}) packed {tuple(packed.shape)}, expected {exp} "
+                          f"[r4(Cout)/4 * phases {s}][taps {taps}][Cin {Cin}][4]")
+    if four != 4:
+        raise GateFailure(f"gate(a) {kind} packed shape: entry {name} last axis {four} != 4")
+
+
 def gate_packing(ex: "Exporter", tol: float = 1e-5) -> list[str]:
     """Prove the packed layouts reproduce the ONNX conv / conv-transpose OUTPUTS (not just the
-    weights) - this is what makes the runtime's phase interleave trustworthy."""
+    weights) - this is what makes the runtime's phase interleave trustworthy.
+
+    Strict: every entry is layout-checked first (_gate_layout), and a packed output that disagrees
+    with the ONNX reference by more than tol raises GateFailure (main exits non-zero).
+    """
     out = []
     rng = np.random.default_rng(7)
     for c in ex.conv:
-        T = 8
+        W = np.asarray(c["W"], np.float32)
+        _gate_layout("conv", c["name"], c["onnx"], W, c["Cin"], c["Cout"], int(W.shape[2]) if W.ndim == 3 else -1,
+                     np.asarray(pack_conv(W) if W.ndim == 3 else W, np.float32))
+        K = int(W.shape[2])
+        Wp = np.asarray(pack_conv(W), np.float32)
+        # T chosen so Tout >= 8 for any pad/dilation, and > the convT tap delay (gate sees a real signal)
+        T = c["dilation"] * (K - 1) + 2 * c["pad"] + 8
         # A Conv whose ONNX bias input is a longer tensor than its Cout is a FUSED ADD bias (v2.1 has
         # 32 such convs); the export path for those is the Add epilogue, not the conv bias, so the
         # packing gate compares against a zero bias and reports the shape mismatch in the line.
@@ -930,41 +1055,42 @@ def gate_packing(ex: "Exporter", tol: float = 1e-5) -> list[str]:
         bias = c["B"] if nb == c["Cout"] else np.zeros(c["Cout"], np.float32)
         note = "" if nb == c["Cout"] else f" [bias input is {nb} long -> fused-Add, gate uses 0 bias]"
         X = rng.standard_normal((c["Cin"], T)).astype(np.float32)
-        Wp = np.asarray(pack_conv(c["W"]), np.float32)
-        want = conv1d_ref(X, c["W"], bias, c["stride"], c["pad"], c["dilation"])
+        want = conv1d_brute(X, W, bias, c["stride"], c["pad"], c["dilation"])
         got = conv1d_ref(X, unpack_conv(Wp)[: c["Cout"]], pad_vec(bias, r4(c["Cout"]))[: c["Cout"]],
                          c["stride"], c["pad"], c["dilation"])
         d = float(np.max(np.abs(want - got)))
-        if d > tol:
-            raise GateFailure(f"gate(a) conv packing: {c['name']} max|out-out_ref|={d:.3e}")
-        self_note = note
+        scale = max(1.0, float(np.max(np.abs(want))))
+        rel = d / scale
+        if d > tol * scale:                     # fp32 summation-order noise is scale-relative
+            raise GateFailure(f"gate(a) conv packing: {c['name']} (from ex.conv, ONNX input "
+                              f"{c['onnx']}, W={tuple(W.shape)} Cin={c['Cin']} Cout={c['Cout']} "
+                              f"K={K} s={c['stride']} pad={c['pad']} dil={c['dilation']} "
+                              f"packed={tuple(Wp.shape)}) max|packed-ONNX_brute|={d:.3e} rel={rel:.1e} "
+                              f"(tol {tol:g} x out-scale {scale:.3g})")
+        out.append(f"  conv  {c['name']:44s} Cin={c['Cin']:4d} Cout={c['Cout']:4d} K={K:2d} "
+                   f"s={c['stride']} pad={c['pad']:2d} dil={c['dilation']} T={T:3d} "
+                   f"out={want.shape[1]:4d} max|packed-ONNX_brute|={d:.2e}{note}  OK")
     for e in ex.convT:
-        T = 9
-        X = rng.standard_normal((e["Cin"], T)).astype(np.float32)
-        Wp = pack_convtranspose(e["W"], e["s"], e["pad"])
+        K, s, pad = int(e["K"]), int(e["s"]), int(e["pad"])
+        nt = convT_ntap(K, s)
+        X = rng.standard_normal((e["Cin"], K + 2 * pad + 4)).astype(np.float32)
+        Wp = np.asarray(pack_convtranspose(e["W"], s, pad), np.float32)
+        _gate_layout("convT", e["name"], e.get("onnx", ""), e["W"], e["Cin"], e["Cout"], K, Wp,
+                     s=s, nt=nt)
         Bp = pad_vec(e["B"], r4(e["Cout"]))
-        want = conv_transpose1d_ref(X, e["W"], e["B"], e["s"], e["pad"])
-        got = conv_transpose1d_packed(X, Wp, Bp, e["s"], e["pad"], e["Cout"], e["K"])
-        d = float(np.max(np.abs(want - got)))
-        if d > tol:
-            raise GateFailure(f"gate(a) convT packing: {e['name']} max|out-out_ref|={d:.3e} "
-                              f"(s={e['s']} K={e['K']} pad={e['pad']})")
-        out.append(f"  conv packing {c['name']:30s} Cin={c['Cin']:4d} Cout={c['Cout']:4d} "
-                   f"s={c['stride']} K={c['K']} pad={c['pad']} max|out-out_ref|={d:.2e}{self_note}  OK")
-    for e in ex.convT:
-        T = 9
-        X = rng.standard_normal((e["Cin"], T)).astype(np.float32)
-        Wp = pack_convtranspose(e["W"], e["s"], e["pad"])
-        Bp = pad_vec(e["B"], r4(e["Cout"]))
-        want = conv_transpose1d_ref(X, e["W"], e["B"], e["s"], e["pad"])
-        got = conv_transpose1d_packed(X, Wp, Bp, e["s"], e["pad"], e["Cout"], e["K"])
-        d = float(np.max(np.abs(want - got)))
-        if d > tol:
-            raise GateFailure(f"gate(a) convT packing: {e['name']} max|out-out_ref|={d:.3e} "
-                              f"(s={e['s']} K={e['K']} pad={e['pad']})")
-        out.append(f"  convT packing {e['name']:28s} Cin={e['Cin']:4d} Cout={e['Cout']:4d} "
-                   f"s={e['s']} K={e['K']} pad={e['pad']} out={got.shape[2]:4d} "
-                   f"max|out-out_ref|={d:.2e}  OK")
+        want = conv_transpose1d_brute(X, e["W"], e["B"], s, pad)
+        got = conv_transpose1d_packed(X, Wp, Bp, s, pad, e["Cout"], K)
+        d = float(np.max(np.abs(want - got))) if want.shape == got.shape else float("inf")
+        scale = max(1.0, float(np.max(np.abs(want))))
+        if d > tol * scale:
+            raise GateFailure(f"gate(a) convT packing: {e['name']} (from ex.convT, "
+                              f"W={tuple(e['W'].shape)} Cin={e['Cin']} Cout={e['Cout']} K={K} s={s} "
+                              f"pad={pad} taps={nt} packed={tuple(Wp.shape)}) "
+                              f"want={want.shape} packed={got.shape} max|packed-ONNX_brute|={d:.3e} "
+                              f"rel={d/scale:.1e} (tol {tol:g} x out-scale {scale:.3g})")
+        out.append(f"  convT {e['name']:44s} Cin={e['Cin']:4d} Cout={e['Cout']:4d} K={K:2d} s={s:2d} "
+                   f"pad={pad:2d} phases={s:2d} taps/phase={nt} T={X.shape[1]:3d} "
+                   f"out={got.shape[1]:4d} max|packed-ONNX_brute|={d:.2e}  OK")
     return out
 
 
