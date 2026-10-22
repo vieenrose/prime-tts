@@ -1313,7 +1313,7 @@ int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *
     const float *x = X + b * cin * ldx;
     float *y = Y + b * cout4 * ldy;
     for (int co = 0; co < cout4; co++) {
-      float bv = bias ? bias[co] : 0.0f;
+      float bv = (bias && co < cout) ? bias[co] : 0.0f;   /* bias has cout entries; padded lanes 0 */
       for (int64_t t = 0; t < Tout; t++)
         y[(int64_t) co * ldy + t] = bv;
     }
@@ -1359,7 +1359,8 @@ int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_
   const float *xb = X + b * cin * ldx;
   float *yb = Y + b * cout4 * ldy;
   for (int co = 0; co < cout4; co++)
-    for (int64_t t = 0; t < Lout; t++) yb[(int64_t) co * ldy + t] = bias ? bias[co] : 0.0f;
+    for (int64_t t = 0; t < Lout; t++)
+      yb[(int64_t) co * ldy + t] = (bias && co < cout) ? bias[co] : 0.0f;
   for (int64_t q = 0; q < Q; q++) {
     for (int r = 0; r < s; r++) {
       const float *wr = wp + ((int64_t) r * cout4 / 4) * ntap * cin * 4;

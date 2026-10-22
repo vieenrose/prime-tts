@@ -38,25 +38,35 @@ def main() -> int:
     ap.add_argument("--rel-fp16", type=float, default=2e-3)
     ap.add_argument("--sndr-min", type=float, default=60.0)
     ap.add_argument("--keep", default="", help="directory to keep the runtime's dumps in")
+    ap.add_argument("--from-dumps", default="", help="compare an existing dump dir (e.g. rsynced from "
+                                                     "the Nano) instead of running --binary here")
     args = ap.parse_args()
 
     case_dir = os.path.join(ROOT, args.golden, args.case)
     g = onnx.load(os.path.join(ROOT, "model/v21_mbistft_16k/primetts_v21_3voice.onnx")).graph
     order = [o for n in g.node for o in n.output if o]
-    tmp = args.keep or tempfile.mkdtemp(prefix="v21par_")
+    tmp = args.keep or args.from_dumps or tempfile.mkdtemp(prefix="v21par_")
     os.makedirs(tmp, exist_ok=True)
-    namefile = os.path.join(tmp, "_names.txt")
-    with open(namefile, "w") as f:
-        f.write("\n".join(nm for nm in order if nm) + "\n")
-    cmd = [os.path.join(ROOT, args.binary), "--container", os.path.join(ROOT, args.container),
-           "--case", case_dir, "--checkpoints", namefile, "--ckdir", tmp, "--out",
-           os.path.join(tmp, "wav.npy")]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    sys.stdout.write(r.stdout)
-    sys.stderr.write(r.stderr)
-    if r.returncode not in (0, 1):
-        print(f"runtime exited {r.returncode}")
-        return 2
+    if args.from_dumps:
+        # dumps came from elsewhere (the Nano): the parity line is read from a sidecar file if present
+        lines = []
+        lp = os.path.join(tmp, "_parity.txt")
+        if os.path.exists(lp):
+            lines = open(lp).read().strip().splitlines()
+        r = type("R", (), {"returncode": 0, "stdout": "\n".join(lines), "stderr": ""})()
+    else:
+        namefile = os.path.join(tmp, "_names.txt")
+        with open(namefile, "w") as f:
+            f.write("\n".join(nm for nm in order if nm) + "\n")
+        cmd = [os.path.join(ROOT, args.binary), "--container", os.path.join(ROOT, args.container),
+               "--case", case_dir, "--checkpoints", namefile, "--ckdir", tmp, "--out",
+               os.path.join(tmp, "wav.npy")]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        sys.stdout.write(r.stdout)
+        sys.stderr.write(r.stderr)
+        if r.returncode not in (0, 1):
+            print(f"runtime exited {r.returncode}")
+            return 2
     out = r.stdout.strip().splitlines()
     line = [l for l in out if l.startswith("case ")]
     if not line:

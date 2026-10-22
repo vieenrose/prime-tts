@@ -60,17 +60,24 @@ __global__ void pt_conv_kernel(const float *__restrict__ x, int64_t ldx, int cin
   if (t >= Tout)
     return;
   const float4 *w4 = (const float4 *) wp + (int64_t) blk * K * cin;
-  float4 acc = bias ? ((const float4 *) bias)[blk] : make_float4(0.f, 0.f, 0.f, 0.f);
+  int co0 = blk * 4;
+  /* the bias has exactly cout entries, so each lane takes its own and the padded lanes get 0 */
+  float4 acc = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                           bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                           bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                           bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
   const float *xb = x + b * bsx;
   for (int k = 0; k < K; k++) {
     const float *xs = xb + (int64_t) (k * dil) + t * stride;   /* padded rows: column j is input j-pad */
     for (int ci = 0; ci < cin; ci++) {
       float4 w = w4[(int64_t) k * cin + ci];
-      const float *r = xs + (int64_t) ci * ldx;
-      acc.x += w.x * r[0];
-      acc.y += w.y * r[1];
-      acc.z += w.z * r[2];
-      acc.w += w.w * r[3];
+      /* one input value, four channel outputs: the lanes are the four Cout channels of this row
+       * block, NOT four input columns, so every lane multiplies the same x column */
+      float xv = xs[(int64_t) ci * ldx];
+      acc.x += w.x * xv;
+      acc.y += w.y * xv;
+      acc.z += w.z * xv;
+      acc.w += w.w * xv;
     }
   }
   float *yb = y + b * bsy;
@@ -95,7 +102,9 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   int64_t Tout = n;   /* graph-computed output length, same convention as the CPU kernel */
   float *dx, *dw, *dy, *db = NULL;
   size_t xb = (size_t) batch * cin * ldx * 4;
-  size_t yb = (size_t) batch * cout * Tout * 4;
+  /* the output buffer is the *padded* row layout [batch][cout4][Tout]: the host trims by copying
+   * cout rows at a per-batch stride of cout4*Tout, so the kernel must use that stride too */
+  size_t yb = (size_t) batch * cout4 * Tout * 4;
   size_t wb = (size_t) (cout4 / 4) * K * cin * 4 * 4;
   PTCHK(cudaMalloc(&dx, xb));
   PTCHK(cudaMalloc(&dw, wb));
@@ -103,14 +112,14 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   PTCHK(cudaMemcpy(dx, X, xb, cudaMemcpyHostToDevice));
   PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
   if (bias) {
-    PTCHK(cudaMalloc(&db, 16));
-    PTCHK(cudaMemcpy(db, bias, 16, cudaMemcpyHostToDevice));
+    PTCHK(cudaMalloc(&db, (size_t) cout * 4));
+    PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
   }
   int threads = 256;
   dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   pt_conv_kernel<<<grid, threads>>>(dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout,
                                     /*Tout=*/Tout, cout, dw, db, (int64_t) cin * ldx,
-                                    (int64_t) cout * Tout);
+                                    (int64_t) cout4 * Tout);
   PTCHK(cudaMemcpy(Y, dy, yb, cudaMemcpyDeviceToHost));
   cudaFree(dx);
   cudaFree(dw);
@@ -134,7 +143,11 @@ __global__ void pt_convT_kernel(const float *__restrict__ x, int64_t ldx, int ci
   if (oi >= Lout)
     return;
   int cout4 = (cout + 3) / 4 * 4;
-  float4 acc = bias ? ((const float4 *) bias)[blk] : make_float4(0.f, 0.f, 0.f, 0.f);
+  int co0 = blk * 4;
+  float4 acc = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                           bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                           bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                           bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
   const float *xb = x + b * bsx;
   for (int r = 0; r < s; r++) {
     int64_t num = oi + pad - r;
@@ -150,11 +163,12 @@ __global__ void pt_convT_kernel(const float *__restrict__ x, int64_t ldx, int ci
       const float *xs = xb + tq;
       for (int ci = 0; ci < cin; ci++) {
         float4 w = wt[ci];
-        const float *r0 = xs + (int64_t) ci * ldx;
-        acc.x += w.x * r0[0];
-        acc.y += w.y * r0[1];
-        acc.z += w.z * r0[2];
-        acc.w += w.w * r0[3];
+        /* same lane rule as conv: one input column, four channel outputs */
+        float xv = xs[(int64_t) ci * ldx];
+        acc.x += w.x * xv;
+        acc.y += w.y * xv;
+        acc.z += w.z * xv;
+        acc.w += w.w * xv;
       }
     }
   }
@@ -181,7 +195,7 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
   int64_t Lout = (tin - 1) * s - 2 * pad + K;
   float *dx, *dw, *dy, *db = NULL;
   size_t xb = (size_t) batch * cin * ldx * 4;
-  size_t yb = (size_t) batch * cout * Lout * 4;
+  size_t yb = (size_t) batch * cout4 * Lout * 4;   /* padded rows, matching the host's trim stride */
   size_t wb = (size_t) s * (cout4 / 4) * ntap * cin * 4 * 4;
   PTCHK(cudaMalloc(&dx, xb));
   PTCHK(cudaMalloc(&dw, wb));
@@ -189,14 +203,14 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
   PTCHK(cudaMemcpy(dx, X, xb, cudaMemcpyHostToDevice));
   PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
   if (bias) {
-    PTCHK(cudaMalloc(&db, 16));
-    PTCHK(cudaMemcpy(db, bias, 16, cudaMemcpyHostToDevice));
+    PTCHK(cudaMalloc(&db, (size_t) cout * 4));
+    PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
   }
   int threads = 256;
   dim3 grid((unsigned) ((Lout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   pt_convT_kernel<<<grid, threads>>>(dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s,
                                      pad, ntap, dw, db, (int64_t) cin * ldx,
-                                     (int64_t) cout * Lout);
+                                     (int64_t) cout4 * Lout);
   PTCHK(cudaMemcpy(Y, dy, yb, cudaMemcpyDeviceToHost));
   cudaFree(dx);
   cudaFree(dw);

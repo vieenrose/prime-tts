@@ -115,17 +115,27 @@ tables from `tools/gen_v21_graph.py`) **passes the M2 gate**: host SNDR 69.63 / 
 nodes compared, 0 over gate, worst rel enc 2.9e-6, flow 3.7e-6, dp 3.2e-6, dec 1.9e-3 (its weights
 are fp16). On the Nano the same binary gives 70.08 dB on T81 in 29.8 s (conv 23.7 s, convT 4.5 s,
 matmul 0.08 s); T20 in 7.3 s.
-`runtime/v21/src/pt_v21_cuda.cu` (sm_53) builds and runs: same binary, `--cuda`, T81 5.26 s (6x the
-CPU path), T20 2.18 s. Its **matmul is verified** (69.67 dB with only matmul on the GPU); conv and
-conv-transpose are not yet numerically matching (`PT_V21_GPU=conv,convT,matmul` bisects them per op;
-with conv on GPU the first diverging node is `/enc_p/encoder/attn_layers.0/conv_q/Conv_output_0`,
-max|d| 8.0, shapes correct). M2 is not closed until the CUDA path passes `tests/v21_parity_c.py`.
+`runtime/v21/src/pt_v21_cuda.cu` (sm_53) **passes the same gate**: `--cuda` gives SNDR 69.67 / 69.94 /
+70.08 / 67.92 / 67.47 dB for the five cases and `tests/v21_parity_c.py --from-dumps` (dumps rsynced
+from the Nano) reports 4010 nodes, 0 over gate, worst rel enc 2.3e-6 / flow 4.7e-6 / dp 3.5e-6 /
+dec 1.9e-3. GPU wall time on the Nano, with per-call `cudaMalloc` and no CUDA Graphs: T20 2.28 s,
+T40 2.24 s, T81 4.21 s (conv 2.16 s, convT 0.37 s, matmul 0.09 s), T120 5.93 s, sid1_T29 1.89 s --
+7.0x the CPU path (T81 29.5 s). T81 is 7.23 s of audio, so one stream is already RTF 0.58.
+Kernels are verified in isolation against independent C references (`/tmp/ktest.cu`, `/tmp/ktest2.cu`
+on the Nano): conv exact, convT exact on all five v2.1 shapes including batch 4 and `cout=1`,
+matmul exact. `PT_V21_GPU=conv,convT,matmul` bisects the three per op.
 
 Two bugs worth remembering, both found by per-node bisection against the dump:
 * batch is a real dimension on the conv path (the iSTFT runs 4 frames at once). Assuming 1 computed
   a quarter of the decoder: 18 dB vs 70 dB SNDR on identical weights.
 * fp16 subnormals: 141k of the container's 13.6M fp16 values have exponent 0; flushing them to
   zero silently changed the decoder.
+* CUDA lane rule: the four lanes of a `float4` weight are the four **Cout** channels of a row block
+  and every lane multiplies the *same* input column. Reading lanes 0..3 as four input columns gave
+  max|d| 8.0 on the first encoder conv, with shapes and lengths all correct.
+* The `cout4 != cout` trim copies per batch at stride `cout4*len`, so the kernel must write the
+  padded row layout. Writing packed `cout` rows left batches 1..3 of the iSTFT conv-transpose
+  untouched: batch 0 exactly right, the rest zeros.
 ## Facts to keep using (all measured; canonical lists live elsewhere — do not re-derive)
 
 Hardware + GEMM/issue rates: `bench/gpu/RESULTS.md`, `bench/cpu/RESULTS_ISSUE.md`. CPU concurrency
