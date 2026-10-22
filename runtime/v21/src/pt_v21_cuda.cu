@@ -433,6 +433,105 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig(
   }
 }
 
+
+/* GEMM conv with a 4-channel x 8-column register tile per thread: block = 64 channels x 128
+ * columns, 256 threads. 32 FMAs per (one weight + two input) 128-bit shared loads, versus 16 per
+ * two in pt_conv_kernel_ig. Same per-output chain (r = k*cin + ci ascending onto the bias), same
+ * in-kernel padding: bit-identical. */
+__global__ void __launch_bounds__(256) pt_conv_kernel_ig8(
+    const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
+    float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
+    float ea1, int64_t pad_in) {
+  __shared__ float4 Ws[IG_RK][16];
+  __shared__ float4 Xs[IG_RK][32];   /* [r][column quad], 32 quads = 128 columns */
+  const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+  const int nblk = (cout + 3) / 4;
+  const int g = blockIdx.y * 16 + ty;
+  const int64_t t0 = (int64_t) blockIdx.x * 128;
+  const int64_t b = blockIdx.z;
+  const int kc = K * cin;
+  const float *xb = x + b * bsx;
+  const float4 *w4 = (const float4 *) wp;
+  int co0 = g * 4;
+  float4 bz = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                          bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                          bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                          bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  float4 a[8];
+#pragma unroll
+  for (int j = 0; j < 8; j++) a[j] = bz;
+  const int lr = tid >> 4, lq = tid & 15;
+  for (int r0 = 0; r0 < kc; r0 += IG_RK) {
+    int r = r0 + lr;
+    int lg = blockIdx.y * 16 + lq;
+    Ws[lr][lq] = (r < kc && lg < nblk) ? w4[(int64_t) lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      int qq = lq + 16 * h;   /* column quad 0..31 */
+      float4 xv = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (r < kc) {
+        int k = r / cin, ci = r - k * cin;
+        int64_t tc = t0 + qq * 4;
+        if (pad_in < 0) {
+          const float *row = xb + (int64_t) ci * ldx + (int64_t) k * dil;
+          if (tc + 0 < Tout) xv.x = row[(tc + 0) * stride];
+          if (tc + 1 < Tout) xv.y = row[(tc + 1) * stride];
+          if (tc + 2 < Tout) xv.z = row[(tc + 2) * stride];
+          if (tc + 3 < Tout) xv.w = row[(tc + 3) * stride];
+        } else {
+          const float *row = xb + (int64_t) ci * ldx;
+          int64_t s0 = tc * stride + (int64_t) k * dil - pad_in;
+          if (tc + 0 < Tout && s0 >= 0 && s0 < ldx) xv.x = row[s0];
+          int64_t s1 = s0 + stride;
+          if (tc + 1 < Tout && s1 >= 0 && s1 < ldx) xv.y = row[s1];
+          int64_t s2 = s1 + stride;
+          if (tc + 2 < Tout && s2 >= 0 && s2 < ldx) xv.z = row[s2];
+          int64_t s3 = s2 + stride;
+          if (tc + 3 < Tout && s3 >= 0 && s3 < ldx) xv.w = row[s3];
+        }
+      }
+      Xs[lr][qq] = xv;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][ty];
+      float4 v0 = Xs[rr][tx];        /* columns 4*tx .. 4*tx+3 */
+      float4 v1 = Xs[rr][tx + 16];   /* columns 64+4*tx .. */
+      a[0].x += w.x * v0.x; a[0].y += w.y * v0.x; a[0].z += w.z * v0.x; a[0].w += w.w * v0.x;
+      a[1].x += w.x * v0.y; a[1].y += w.y * v0.y; a[1].z += w.z * v0.y; a[1].w += w.w * v0.y;
+      a[2].x += w.x * v0.z; a[2].y += w.y * v0.z; a[2].z += w.z * v0.z; a[2].w += w.w * v0.z;
+      a[3].x += w.x * v0.w; a[3].y += w.y * v0.w; a[3].z += w.z * v0.w; a[3].w += w.w * v0.w;
+      a[4].x += w.x * v1.x; a[4].y += w.y * v1.x; a[4].z += w.z * v1.x; a[4].w += w.w * v1.x;
+      a[5].x += w.x * v1.y; a[5].y += w.y * v1.y; a[5].z += w.z * v1.y; a[5].w += w.w * v1.y;
+      a[6].x += w.x * v1.z; a[6].y += w.y * v1.z; a[6].z += w.z * v1.z; a[6].w += w.w * v1.z;
+      a[7].x += w.x * v1.w; a[7].y += w.y * v1.w; a[7].z += w.z * v1.w; a[7].w += w.w * v1.w;
+    }
+    __syncthreads();
+  }
+  if (g >= nblk)
+    return;
+  float *yb = y + b * bsy;
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    int64_t t = t0 + (j < 4 ? tx * 4 + j : 64 + tx * 4 + (j - 4));
+    if (t >= Tout)
+      continue;
+    float4 v = a[j];
+    if (epi0 || epi1) {
+      v.x = pt_epi_dev(pt_epi_dev(v.x, epi0, ea0), epi1, ea1);
+      v.y = pt_epi_dev(pt_epi_dev(v.y, epi0, ea0), epi1, ea1);
+      v.z = pt_epi_dev(pt_epi_dev(v.z, epi0, ea0), epi1, ea1);
+      v.w = pt_epi_dev(pt_epi_dev(v.w, epi0, ea0), epi1, ea1);
+    }
+    if (co0 + 0 < cout) yb[(int64_t) (co0 + 0) * ldy + t] = v.x;
+    if (co0 + 1 < cout) yb[(int64_t) (co0 + 1) * ldy + t] = v.y;
+    if (co0 + 2 < cout) yb[(int64_t) (co0 + 2) * ldy + t] = v.z;
+    if (co0 + 3 < cout) yb[(int64_t) (co0 + 3) * ldy + t] = v.w;
+  }
+}
+
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
                 const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float ea0,
@@ -511,10 +610,19 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   static long ig_min = -2;
   if (ig_min == -2) ig_min = getenv("PT_V21_IG_MINT") ? atol(getenv("PT_V21_IG_MINT")) : 0;
   if (ig_min >= 0 && Tout >= ig_min) {
+    static long ig8_min = -2;
+    if (ig8_min == -2) ig8_min = getenv("PT_V21_IG8_MINT") ? atol(getenv("PT_V21_IG8_MINT")) : 0;
+    if (ig8_min >= 0 && Tout >= ig8_min) {
+      dim3 g8((unsigned) ((Tout + 127) / 128), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
+      pt_conv_kernel_ig8<<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
+          dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+          (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
+    } else {
     dim3 gig((unsigned) ((Tout + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
     pt_conv_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
         (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
+    }
   } else if (wsm) {
     pt_conv_kernel_wsm<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
