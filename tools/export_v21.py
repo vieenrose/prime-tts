@@ -422,11 +422,13 @@ class Exporter:
         self.model_meta(graph_outputs)
 
     # ---- per-op exporters --------------------------------------------------------------
-    def export_constant(self, idx: int, n) -> None:
+    def export_constant(self, idx: int, n, entry: dict | None = None) -> None:
         """Constant node -> container (float) or JSON literal (int/bool), per the docstring."""
         a = numpy_helper.to_array(n.attribute[0].t)
         out = n.output[0]
         grp = group_of(out)
+        if entry is not None:
+            entry["src"] = out
         self.covered_const.add(out)
         rec: dict = dict(idx=idx, output=out, group=grp, dtype=str(a.dtype), shape=list(a.shape),
                          container=None, values=None)
@@ -622,3 +624,135 @@ class Exporter:
         self.meta["samples_per_frame"] = (self.meta["gen_istft_hop_size"] *
                                           np.prod([g[2] for g in geom], dtype=np.float64) *
                                           self.meta["gen_istft_hop_size"])
+
+
+# --------------------------------------------------------------------------- gates
+
+def gate_round_trip(ex: "Exporter", path: str, tol: float = 1e-6) -> list[dict]:
+    """(a) Rebuild every weight from the packed container tensors and compare with ONNX.
+
+    fp16 tensors are compared against the fp16-rounded ONNX tensor: that is the closest value
+    fp16 storage can represent, so a clean export must match it EXACTLY (measured diff 0).
+    """
+    back = read_ptk(path)
+    rows = []
+    for l in ex.layers:
+        if not l["packed"]:
+            continue
+        refname, ref = ex.weight_source(l)
+        if ref is None:
+            continue
+        rebuilt = rebuild(l, back)
+        isz = 2 if l["packed"][0].endswith(H16) else FP16 if False else 4
+        # fp16 storage can only represent fp16-rounded values, so the round-trip target is
+        # round_fp16(ONNX tensor); fp32 targets the ONNX tensor itself.
+        want = as_fp16_values(ref) if isz == 2 else ref
+        dW = float(np.max(np.abs(rebuilt - want)))
+        dB = 0.0
+        if l["op"] in ("conv1d", "conv_transpose1d", "layernorm", "matmul") and len(l["packed"]) > 1:
+            want_B = as_fp16_values(ex.bias_source(l)) if isz == 2 else ex.bias_source(l)
+            dB = float(np.max(np.abs(back[l["packed"][1]][0][: rebuilt.shape[-1] if l["op"] == "matmul" else
+                                                          l["params"].get("cout", rebuilt.shape[-1])) -
+                                want_B[: l["params"].get("cout", rebuilt.shape[-1])])))
+        if dW > tol or dB > tol:
+            raise GateFailure(f"gate(a) round-trip: {refname} via {l['packed'][0]} "
+                              f"max|W-rebuilt|={dW:.3e} max|bias-b|={dB:.3e} (tol {tol:g}) "
+                              f"[op={l['op']} dtype={l['dtype']} shape={list(rebuilt.shape)}]")
+        rows.append(dict(op=l["op"], src=refname, packed=l["packed"][0], itemsize=isz,
+                         elems=int(rebuilt.size), max_dW=dW, max_dB=dB))
+    return rows
+
+
+def rebuild(l: dict, back: dict) -> np.ndarray:
+    """Rebuild the ONNX-shaped weight from packed container tensors."""
+    p = l["params"]
+    if l["op"] == "conv1d":
+        return unpack_conv(back[l["packed"][0]][0])[: p["cout"]]
+    if l["op"] == "conv_transpose1d":
+        return unpack_convtranspose(back[l["packed"][0]][0], p["stride"], p["cout"], p["cin"], p["kernel"])
+    if l["op"] == "matmul":
+        return unpack_conv(back[l["packed"][0]][0])[:, :, 0]
+    return back[l["packed"][0]][0]
+
+
+def gate_packing(ex: "Exporter", tol: float = 1e-5) -> list[str]:
+    """Prove the packed layouts reproduce the ONNX conv / conv-transpose OUTPUTS (not just the
+    weights) - this is what makes the runtime's phase interleave trustworthy."""
+    out = []
+    rng = np.random.default_rng(7)
+    for c in ex.conv:
+        T = 8
+        X = rng.standard_normal((c["Cin"], T)).astype(np.float32)
+        Wp = np.asarray(pack_conv(c["W"]), np.float32)
+        want = conv1d_ref(X, c["W"], c["B"], c["stride"], c["pad"], c["dilation"])
+        got = conv1d_ref(X, unpack_conv(Wp)[: c["Cout"]], pad_vec(c["B"], r4(c["Cout"]))[: c["Cout"]],
+                         c["stride"], c["pad"], c["dilation"])
+        d = float(np.max(np.abs(want - got)))
+        if d > tol:
+            raise GateFailure(f"gate(a) conv packing: {c['name']} max|out-out_ref|={d:.3e}")
+    for e in ex.convT:
+        T = 8
+        X = rng.standard_normal((e["Cin"], T)).astype(np.float32)
+        Wp = pack_convtranspose(e["W"], e["s"], e["pad"])
+        Bp = pad_vec(e["B"], r4(e["Cout"]))
+        want = conv_transpose1d_ref(X, e["W"], e["B"], e["s"], e["pad"])
+        got = conv_transpose1d_packed(X, Wp, Bp, e["s"], e["pad"], e["Cout"], e["K"])
+        d = float(np.max(np.abs(want - got)))
+        if d > tol:
+            raise GateFailure(f"gate(a) convT packing: {e['name']} max|out-out_ref|={d:.3e} "
+                              f"(s={e['s']} K={e['K']} pad={e['pad']})")
+        out.append(f"  convT packing {e['name']:28s} Cin={e['Cin']:4d} Cout={e['Cout']:4d} "
+                   f"s={e['s']} K={e['K']} pad={e['pad']} out={got.shape[2]:4d} "
+                   f"max|out-out_ref|={d:.2e}  OK")
+    return out
+
+
+def gate_coverage(ex: "Exporter") -> dict:
+    """(b) every weight tensor (initializer or Constant feeding a compute node) has an entry."""
+    missing_init = sorted(set(ex.init) - ex.covered)
+    if missing_init:
+        raise GateFailure(f"gate(b) coverage: {len(missing_init)} initializers with no packed entry, "
+                          f"first: {missing_init[0]}")
+    compute_ops = ("Conv", "ConvTranspose", "MatMul", "Gemm", "LayerNormalization", "Gather")
+    miss_const = [n.name for n in ex.g.node
+                  if n.op_type in compute_ops and any(i in ex.const for i in n.input)
+                  and not all(i in ex.covered_const for i in n.input if i in ex.const)]
+    if miss_const:
+        raise GateFailure(f"gate(b) coverage: Constant-fed compute node with no exported weight: "
+                          f"{miss_const[0]}")
+    static_consumers = sum(1 for n in ex.g.node if n.op_type != "Constant"
+                           and any(i in ex.init or i in ex.const for i in n.input))
+    return dict(initializers=len(ex.init), covered=len(ex.covered),
+                constant_tensors=len(ex.const), constant_exported=len(ex.covered_const),
+                static_tensor_total=len(ex.init) + len(ex.const),
+                nodes_consuming_static_tensors=static_consumers,
+                weight_entries=sum(1 for l in ex.layers if l["packed"]))
+
+
+def predict_budget(ex: "Exporter") -> dict:
+    """Predicted container bytes from the dtype policy + shapes, computed independently of the
+    writer (so gate (c) compares container vs policy, not writer vs writer)."""
+    pred = collections.Counter()
+    for l in ex.layers:
+        p, op = l.get("params", {}), l["op"]
+        if op == "conv1d":
+            isz = 2 if l["dtype"] == "fp16" else 4
+            pred[l["graph"]] += align64(p["cout4"] * p["cin"] * p["kernel"] * isz)
+            pred[l["graph"]] += align64(p["cout4"] * 4)
+        elif op == "conv_transpose1d":
+            isz = 2 if l["dtype"] == "fp16" else 4
+            pred[l["graph"]] += align64(p["phases"] * p["cout4"] * p["cin"] * p["taps_per_phase"] * isz)
+            pred[l["graph"]] += align64(p["cout4"] * 4)
+        elif op == "matmul":
+            if l["packed"]:
+                pred[l["graph"]] += align64(p["cout4"] * p["cin"] * 4) + align64(p["cout4"] * 4)
+        elif op == "layernorm":
+            pred[l["graph"]] += align64(p["C"] * 4) * 2
+        elif op == "embedding":
+            pred[l["graph"]] += align64(p["rows"] * p["cols"] * 4)
+        elif op == "pad_relative_position":
+            pred[l["graph"]] += align64(int(ex.init[l["onnx"][0]].size) * 4)
+        elif op == "constant":
+            a = ex.const[l["src"]]
+            pred[l["graph"]] += align64(a.size * 4)
+    return dict(pred)
