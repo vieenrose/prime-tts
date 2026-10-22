@@ -67,6 +67,30 @@ without evidence from a packing-aware measurement, not a single-stream model.
   is the slowest stream, which waited for all weights) and needs per-layer upload ordering + events
   in the same race zone. Secondary-only gain for correctness risk: rejected.
 
+## Killed by analysis #8 (run 91): staggered stream starts + bar-semantics correction
+- **Staggered starts are pointless here, not just neutral.** Stream inference phases are ~1900 ms;
+  natural offsets from serialized open are already ~25-100 ms. An artificial stagger D adds ~3D to
+  the wall via the last stream while shifting phase alignment by D/1900 (2.6% for D=50 ms costing
+  150 ms). Desyncing 1900 ms phases needs ~500 ms+ offsets (+1500 ms wall). The run-54 dips come
+  from within-phase structure common to all streams, not cross-stream sync. Decisive, no silicon.
+- **Bar-semantics correction to run 89.** "Below the bar" was overstated for one case: with n=8-10
+  matched pairs (SE = sigma_pair/sqrt(n), sigma_pair ~25 ms after common-mode rejection) a 30-60 ms
+  effect IS confirmable (~3-6 sigma). The bar governs single draws, not matched designs. This does
+  NOT revive the residual bundle: it is 3-4 interlocking changes (device Add + chain liveness +
+  convT-output residency + release discipline) in the exact #55-race / 0-dB-incident zone, i.e. it
+  fails one-change-per-experiment and risk-adjusted EV independent of size. Rejected finally, for
+  the right reasons this time: multi-part + race risk, not size.
+
+## Killed by measurement #7 (run 90): shortening the GPU warmup 64k -> 16k
+N=1 warmup+upload totals, 3 alternating pairs: 64k 279.0/288.6/259.4 (mean 275.7) vs 16k
+235.0/246.5/308.9 (mean 263.5). Tied on means, but pair 3 inverted (+49) on a 230 ms upload blowup
+under a degraded box state (warmups at 3-5x normal, one thermal zone pinned at 100 C): 16k iters do
+not ramp the clock when the box is already slow, and that is exactly when the ramp matters most.
+The 64k size is robustness margin for worst-case thermal state, not average-case optimal. (Separately,
+the best-case saving ~19 ms is below the confirmability bar anyway.) Do not shorten without a
+load-aware ramp (e.g. loop until cur_freq reads max, which needs no new privileges but adds
+unpredictable startup time).
+
 ## Killed by measurement #6 (run 82): pre-faulting the container mmap
 `MAP_POPULATE` (+`WILLNEED`, env-gated `PT_V21_POPULATE`, page cache hot post-rsync) on the 111 MB
 container mapping. Record-pass+map, alternating 3 pairs: 99.0/98.7/99.2 vs 101.9/102.1/101.0 --
