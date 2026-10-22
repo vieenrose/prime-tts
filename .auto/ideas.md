@@ -1,5 +1,16 @@
 # Ideas backlog (v2.1 Nano latency)
 
+## SESSION STATUS (run 117): converged -- see 'Convergence ledger' at the end for the full record
+- Best: **n4_wall 2288 ms** (cluster 2288-2362 over 20+ official draws, mean ~2335, stdev ~1.7%,
+  zero drift, draws independent). Baseline was 9900 ms: **4.3x faster**.
+- Quality: per-node gate 0 over gate (unoptimized build) + SNDR 70.09 dB on all 5 cases, both
+  boxes, both paths. Worst case sid1_T29/T120 at 67-68 dB (>= 60 gate).
+- What remains, all needing operator approval: (1) batch-4 lockstep driver; (2) full device
+  residency + CUDA graphs (~190 ms ceiling at ~1.4 ms/MB, run 88); (3) server-mode weights.
+- Everything else: banked, falsified with data/bounds, or explicitly out of bounds (see kill
+  sections below). Next single-experiment step, if any: none with positive risk-adjusted EV.
+  Recommended: autoresearch-finalize.
+
 Ordered by expected payoff per unit of risk. Measure the phase split before and after each.
 
 - **CUDA Graphs per stream.** ~180 launches (124 conv + 5 convT + 50 matmul) each with per-call
@@ -293,11 +304,13 @@ the operator's 4-stream target. Integrity note: moving close()/SNDR out of the t
 pre-warming the GPU from a side process, would be timer-scope gaming -- explicitly rejected, the
 timer stays as the driver defines it.
 
-## Ledger (run 78): session best confirmed
-picard official draws on identical code: 2328 (run 75), 2333 (run 77), 2315, 2330 (run 78) --
-mean ~2326, tight cluster, no drift. All 5 golden cases bit-identical GPU vs CPU (worst SNDR 67.45
-dB sid1_T29). pesi health check: 2427 (+2.9% over its earlier mean, within noise; identical parity,
-min_free 250 MB, no crash). Standing: 9.9 s -> ~2.33 s (4.25x) with quality preserved.
+## Convergence ledger (runs 78-117, kept current): session best confirmed
+picard official draws, identical code: cluster 2288-2362 over 20+ draws, mean ~2335, stdev ~1.7%,
+zero drift, draws independent (lag-1 -0.11). Best 2288 (run 87). All 5 golden cases bit-identical
+GPU vs CPU on both boxes (worst SNDR 67.45 dB sid1_T29); full per-node gate 0 over gate on
+unoptimized build (run 95); pesi 2398-2427 stable with headroom. Standing: 9.9 s -> ~2.33 s
+(4.3x) with quality preserved and proved. Session converged; only project-scale items remain
+(see SESSION STATUS at top).
 
 ## Startup endgame: exact ceilings (run 108) -- all remaining startup ideas closed
 - fp16 upload of the 39 fp16 records + same-table GPU convert (bit-exact by construction):
