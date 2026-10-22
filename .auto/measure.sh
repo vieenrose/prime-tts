@@ -10,7 +10,7 @@ set -uo pipefail
 
 NANO="${NANO:-picard@100.84.151.116}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-ARENA="${ARENA_MB:-32}"
+ARENA="${ARENA_MB:-8}"
 N4="${N4:-4}"
 CASE="${CASE:-tests/golden_v21/T81}"
 

@@ -184,7 +184,7 @@ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
     fprintf(stderr, "pt_v21 cuda: stream create failed\n");
     return -1;
   }
-  size_t aw = getenv("PT_V21_ARENA_MB") ? (size_t) atoi(getenv("PT_V21_ARENA_MB")) : 64u;
+  size_t aw = getenv("PT_V21_ARENA_MB") ? (size_t) atoi(getenv("PT_V21_ARENA_MB")) : 8u;
   if (arena_init(c, aw * 1048576u)) {
     fprintf(stderr, "pt_v21 cuda: arena of %zu MiB failed\n", aw);
     return -1;
