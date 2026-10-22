@@ -32,6 +32,7 @@ typedef struct {
 struct pt_ctx *g_ctx;
 int g_node = -1, g_op = -1;
 int g_trace = -1;
+static int g_dump_tensor = -1;
 void pt_v21_trace(int idx) { g_trace = idx; }
 FILE *g_shapes = 0;
 void pt_v21_shape_log(FILE *f) { g_shapes = f; }
@@ -654,6 +655,7 @@ pt_ctx *pt_v21_open(const char *container) {
   free(itemsize_tab);
   c->V = (pt_tv *) calloc(PT_N_TENSOR, sizeof(pt_tv));
   g_ctx = c;
+  g_dump_tensor = getenv("PT_V21_DUMP_T") ? atoi(getenv("PT_V21_DUMP_T")) : -1;
   c->prof = getenv("PT_V21_EKIND") ? 1 : 0;
   c->prof_node_on = c->prof && getenv("PT_V21_EKIND")[0] == '2';
   return c;
@@ -2101,6 +2103,17 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
     }
     for (int i = 0; i < PT_V21_MAX_OUT; i++) {
       if (nd->out[i] >= 0) ck_save(c, nd->out[i]);
+    }
+    if (g_dump_tensor >= 0 && idx == g_dump_tensor) {
+      /* raw fp32 dump of one node's output, for A/B-ing kernel variants against the reference path */
+      pt_tv *t = &c->V[nd->out[0]];
+      char path[128];
+      snprintf(path, sizeof(path), "/tmp/pt_dump_%d.bin", idx);
+      FILE *fp = fopen(path, "wb");
+      if (fp) {
+        fwrite(t->p, 4, (size_t) t->n, fp);
+        fclose(fp);
+      }
     }
     if (g_shapes) {
       for (int i = 0; i < PT_V21_MAX_OUT; i++) {
