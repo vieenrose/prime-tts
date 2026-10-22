@@ -368,7 +368,9 @@ class Exporter:
     def add(self, name: str, arr: np.ndarray, group: str, itemsize: int = FP32, src: str = "") -> str:
         assert name not in self.names, f"duplicate tensor name {name}"
         assert len(name) < 64, f"tensor name too long ({len(name)}): {name}"
-        a = np.ascontiguousarray(np.asarray(arr, np.float32))
+        a = np.asarray(arr, np.float32)
+        a = np.asarray(a, order="C")   # C-contiguous, rank-preserving (ascontiguousarray turns a
+        # 0-d scalar payload into shape (1,), which would mis-shape the 33 scalar constants)
         self.tensors.append((name, a, itemsize))
         self.names.add(name)
         self.bytes_by_group[group] += align64(a.size * itemsize)
@@ -637,6 +639,12 @@ class Exporter:
             if n.op_type == "Constant":
                 entry["kind"] = "constant"
                 self.export_constant(idx, n, entry)
+            elif n.op_type == "ConstantOfShape":
+                # the fill value is an attribute tensor: record it numerically (the JSON writer
+                # stringifies a TensorProto, which the numpy oracle and the C runtime cannot use)
+                v = numpy_helper.to_array(a["value"])
+                entry["fill"] = dict(value=v.reshape(-1).tolist(), dtype=str(v.dtype),
+                                     shape=list(v.shape))
             elif n.op_type == "Conv":
                 self.conv_entry(idx, n, grp, mod, a, entry)
             elif n.op_type == "ConvTranspose":
@@ -1250,6 +1258,14 @@ def main() -> int:
                     "the runtime lane must honour the per-record width (dtype.table) for v2.1",
         },
         "meta": ex.meta,
+        "graph_inputs": [dict(name=i.name, elem_type=i.type.tensor_type.elem_type,
+                              shape=[d.dim_value if d.HasField("dim_value") else d.dim_param
+                                     for d in i.type.tensor_type.shape.dim])
+                         for i in ex.g.input],
+        "graph_outputs": [dict(name=o.name, elem_type=o.type.tensor_type.elem_type,
+                               shape=[d.dim_value if d.HasField("dim_value") else d.dim_param
+                                      for d in o.type.tensor_type.shape.dim])
+                          for o in ex.g.output],
         "counts": dict(nodes=len(ex.g.node), initializers=len(ex.init),
                        initializer_params=int(sum(int(a.size) for a in ex.init.values())),
                        constant_nodes=len(ex.const), constant_params=int(sum(a.size for a in ex.const.values())),
