@@ -71,6 +71,18 @@ the CPU path. A run that fails checks cannot be kept.
 - `runtime/v21/gen/pt_graph.c` is generated; regenerate it with `make -f runtime/v21/Makefile gen`
   rather than hand-editing.
 
+## Two Nanos are available
+- `picard@100.84.151.116` (host `nano`, gcc 8.4, ~1700 MB free) - the **primary** measurement box,
+  the one the session baseline was established on. Keep the primary metric here so deltas compare.
+- `pesi@100.70.245.36` (host `iPhO`, gcc 7.5, CUDA 10.2, ~767 MB free) - a second Nano, measurably
+  faster and quieter: current code runs single-stream T81 in 3.43 s vs 4.44 s on picard, identical
+  parity (70.08 dB, max|d| 2.247e-04). Use it as the **A/B confirmation box** when a delta is inside
+  picard's ~4% noise: `NANO=pesi@100.70.245.36 ./.auto/measure.sh`. It is a real deployment target,
+  not a benchmark toy - a change that only wins on one of the two boxes is not a win. Its memory
+  headroom is half of picard's, so watch `min_free_mb` there.
+Both boxes share the same rules: no sudo/apt, guard >= 60 MB free RAM, never kill a co-tenant server,
+never touch `gemini-live-credential.txt`.
+
 ## Measurement discipline
 - One change per experiment. If a change is structural (touches the graph loop), verify parity on
   T20 + T81 before spending a measurement.
