@@ -108,6 +108,24 @@ Gate: SNDR >= 60 dB vs `tests/golden_v21/*/wav.npy`, then per-node vs `tests/gol
 Nano: `ssh picard@100.84.151.116`, nvcc `/usr/local/cuda/bin/nvcc` (sm_53, gcc 8.4, python 3.6);
 `free -m` + `grep NvMapMemFree /proc/meminfo` + `tegrastats` (`lfb`) before every sweep, abort below
 60 MB free RAM. Then M3 (4-stream batching + CUDA Graphs), M4 (streaming pipeline), M5 (admission).
+
+**M2 status (measured 2026-07-29).** The portable C graph interpreter (`runtime/v21/src/pt_v21_host.c`,
+tables from `tools/gen_v21_graph.py`) **passes the M2 gate**: host SNDR 69.63 / 69.88 / 70.18 /
+67.94 / 67.43 dB for T20 / T40 / T81 / T120 / sid1_T29, and `tests/v21_parity_c.py` reports 4010
+nodes compared, 0 over gate, worst rel enc 2.9e-6, flow 3.7e-6, dp 3.2e-6, dec 1.9e-3 (its weights
+are fp16). On the Nano the same binary gives 70.08 dB on T81 in 29.8 s (conv 23.7 s, convT 4.5 s,
+matmul 0.08 s); T20 in 7.3 s.
+`runtime/v21/src/pt_v21_cuda.cu` (sm_53) builds and runs: same binary, `--cuda`, T81 5.26 s (6x the
+CPU path), T20 2.18 s. Its **matmul is verified** (69.67 dB with only matmul on the GPU); conv and
+conv-transpose are not yet numerically matching (`PT_V21_GPU=conv,convT,matmul` bisects them per op;
+with conv on GPU the first diverging node is `/enc_p/encoder/attn_layers.0/conv_q/Conv_output_0`,
+max|d| 8.0, shapes correct). M2 is not closed until the CUDA path passes `tests/v21_parity_c.py`.
+
+Two bugs worth remembering, both found by per-node bisection against the dump:
+* batch is a real dimension on the conv path (the iSTFT runs 4 frames at once). Assuming 1 computed
+  a quarter of the decoder: 18 dB vs 70 dB SNDR on identical weights.
+* fp16 subnormals: 141k of the container's 13.6M fp16 values have exponent 0; flushing them to
+  zero silently changed the decoder.
 ## Facts to keep using (all measured; canonical lists live elsewhere — do not re-derive)
 
 Hardware + GEMM/issue rates: `bench/gpu/RESULTS.md`, `bench/cpu/RESULTS_ISSUE.md`. CPU concurrency

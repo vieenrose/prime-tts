@@ -39,6 +39,7 @@ int main(int argc, char **argv) {
   const char *ckdir = 0;
   const char *shapes = 0;
   int trace_idx = -1;
+  int use_cuda = 0;
   const char *out = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--container") && i + 1 < argc) container = argv[++i];
@@ -49,9 +50,14 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--trace-matmul")) trace_idx = -2;
     else if (!strcmp(argv[i], "--shapes") && i + 1 < argc) shapes = argv[++i];
     else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
+    else if (!strcmp(argv[i], "--cuda")) use_cuda = 1;
   }
   pt_ctx *c = pt_v21_open(container);
   if (!c) return 2;
+  if (use_cuda && pt_v21_cuda_init(c, 1)) {
+    fprintf(stderr, "pt_v21: cuda init failed\n");
+    return 2;
+  }
   if (getenv("PT_V21_CHECK_CONST")) {
     /* container spot-check: print the first payload value of the named container tensors */
     for (int i = 0; i < PT_N_CONT; i++) {

@@ -15,6 +15,10 @@
  */
 #ifndef PT_V21_H_
 #define PT_V21_H_
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stddef.h>
@@ -82,6 +86,30 @@ typedef struct {
   int alive;
 } pt_tv;
 
+struct pt_ctx {
+  int use_cuda;  /* 1 = dispatch conv/convT/matmul to the CUDA kernels */
+  void *map;
+  size_t maplen;
+  char *base;                 /* data start */
+  uint32_t n_tensor;
+  const char **cont_names;    /* ctab index -> container record name */
+  float **cont_f32;           /* ctab index -> fp32 payload (converted when '#h') */
+  int *cont_isz;
+  int64_t *cont_n;
+  int *cont_ndim;
+  int64_t *cont_dims;      /* n_cont * PT_V21_MAX_RANK */
+  int n_cont;
+  pt_tv *V;                   /* PT_N_TENSOR */
+  float *wav;
+  int64_t wav_n;
+  int ck_n;
+  const int *ck_ids;
+  char ck_dir[512];
+  int dev_mode;
+  long n_conv, n_convT, n_matmul, n_alloc_fail;
+  double t_conv, t_convT, t_matmul, t_total;
+};
+
 typedef struct pt_ctx pt_ctx;
 
 /* Open the runtime: mmap the container, resolve pt_graph_ctab names to payload pointers,
@@ -109,10 +137,19 @@ double pt_v21_stats_ms(pt_ctx *c, int which);   /* 0 conv 1 convT 2 matmul 3 tot
 int pt_v21_checkpoints(pt_ctx *c, const char *dir, const int *tensor_ids, int n_ids);
 
 /* CUDA layer (pt_v21_cuda.cu); host build provides the same symbols in pt_v21_host.c. */
-int pt_v21_cuda_init(pt_ctx *c);
+int pt_v21_cuda_init(pt_ctx *c, int verbose);
 void pt_v21_cuda_shutdown(pt_ctx *c);
 /* conv1d over the packed layout: Y[cout][n] = b + sum_k sum_ci Wp[blk][k][ci][co%4] X[ci][t+k*dil]
  * X already points at the column output column 0's first tap reads (shifted by -pad). */
+int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
+                    int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
+                    const float *bias, int64_t batch);
+int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
+                     int64_t ldy, int cout, int s, int pad, int K, const float *wp,
+                     const float *bias, int64_t batch);
+int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda,
+                      const float *B, int64_t ldb, int64_t nn, float *C, int64_t ldc);
+
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
                const float *bias, int64_t batch);
@@ -138,3 +175,7 @@ static double pt_v21_now_impl(void) {
 #define pt_v21_now() pt_v21_now_impl()
 
 #endif /* PT_V21_H_ */
+
+#ifdef __cplusplus
+}
+#endif

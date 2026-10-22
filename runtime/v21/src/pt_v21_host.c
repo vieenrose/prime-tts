@@ -37,28 +37,8 @@ void pt_v21_shape_log(FILE *f) { g_shapes = f; }
 
 
 
-struct pt_ctx {
-  void *map;
-  size_t maplen;
-  char *base;                 /* data start */
-  uint32_t n_tensor;
-  const char **cont_names;    /* ctab index -> container record name */
-  float **cont_f32;           /* ctab index -> fp32 payload (converted when '#h') */
-  int *cont_isz;
-  int64_t *cont_n;
-  int *cont_ndim;
-  int64_t *cont_dims;      /* n_cont * PT_V21_MAX_RANK */
-  int n_cont;
-  pt_tv *V;                   /* PT_N_TENSOR */
-  float *wav;
-  int64_t wav_n;
-  int ck_n;
-  const int *ck_ids;
-  char ck_dir[512];
-  int dev_mode;
-  long n_conv, n_convT, n_matmul, n_alloc_fail;
-  double t_conv, t_convT, t_matmul, t_total;
-};
+/* struct pt_ctx lives in pt_v21.h (the CUDA kernels read it too) */
+
 
 #define V21TV struct pt_ctx
 static int dt_sz(int dt) {
@@ -1321,36 +1301,42 @@ static int op_nonzero(pt_ctx *c, const pt_tv *A, pt_tv *O) {
 }
 
 /* ---------------- weight-bearing ops over the container's packed layouts ---------------- */
-int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
-                int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                const float *bias, int64_t batch) {
+int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
+                    int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
+                    const float *bias, int64_t batch) {
   c->n_conv++;
+  /* n is the OUTPUT length (the caller computed it from the graph shapes); both paths use that
+   * convention so a CUDA swap cannot change the graph's shapes */
+  int64_t Tout = n;
   int cout4 = (cout + 3) / 4 * 4;
-  /* batch is a real dimension: the iSTFT runs its conv/conv-transpose over 4 frames at once */
   for (int64_t b = 0; b < batch; b++) {
     const float *x = X + b * cin * ldx;
     float *y = Y + b * cout4 * ldy;
     for (int co = 0; co < cout4; co++) {
-      float *yr = y + (int64_t) co * ldy;
       float bv = bias ? bias[co] : 0.0f;
-      for (int64_t t = 0; t < n; t++) yr[t] = bv;
+      for (int64_t t = 0; t < Tout; t++)
+        y[(int64_t) co * ldy + t] = bv;
     }
     for (int k = 0; k < K; k++) {
-      const float *wk = wp + (int64_t) k * cin * 4;
+      /* x is the zero-padded scratch whose column j is the graph's input column (j - pad);
+       * tap k of output t reads column t*stride + k*dil, so indices stay in [0, T+2*pad). */
+      const float *xs = x + (int64_t) (k * dil);
+      const float *ws = wp + (int64_t) k * cin * 4;
       for (int blk = 0; blk < cout4 / 4; blk++) {
-        const float *w = wk + (int64_t) blk * cin * 4 * K;
-        for (int64_t ci = 0; ci < cin; ci++) {
-          const float *xr = x + (int64_t) ci * ldx + (int64_t) k * dil;
+        const float *w = ws + (int64_t) blk * K * cin * 4;
+        for (int ci = 0; ci < cin; ci++) {
+          const float *xr = xs + (int64_t) ci * ldx;
           const float *wv = w + (int64_t) ci * 4;
-          for (int r = 0; r < 4; r++) {
-            float wv0 = wv[r];
-            if (wv0 == 0.0f) continue;
-            float *yr = y + (int64_t) (blk * 4 + r) * ldy;
-            if (stride == 1) {
-              for (int64_t t = 0; t < n; t++) yr[t] += wv0 * xr[t];
-            } else {
-              for (int64_t t = 0; t < n; t++) yr[t] += wv0 * xr[t * stride];
-            }
+          float w0 = wv[0], w1 = wv[1], w2 = wv[2], w3 = wv[3];
+          float *yb = y + (int64_t) blk * 4 * ldy;
+          for (int64_t t = 0; t < Tout; t++) {
+            float *yr = yb + t;   /* the four rows this thread-block owns, at output column t */
+            float xv = xr[t * stride];
+            if (xv == 0.0f) continue;
+            yr[0] += w0 * xv;
+            yr[ldy] += w1 * xv;
+            yr[2 * ldy] += w2 * xv;
+            yr[3 * ldy] += w3 * xv;
           }
         }
       }
@@ -1359,8 +1345,9 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   return 0;
 }
 
+
 /* phase/tap conv_transpose1d over the packed [s*C4/4][ntap][Cin][4] layout, with the tail flush */
-int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
+int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
                  int64_t batch) {
   c->n_convT++;
@@ -1405,7 +1392,7 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
   return 0;
 }
 
-int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, const float *B,
+int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, const float *B,
                   int64_t ldb, int64_t nn, float *C, int64_t ldc) {
   c->n_matmul++;
   for (int64_t i = 0; i < m; i++) {
@@ -1421,6 +1408,32 @@ int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, 
   }
   return 0;
 }
+/* Dispatchers used by the graph. The CUDA build (pt_v21_cuda.cu) provides the same names and
+ * forwards to the CPU kernels when ctx->use_cuda is 0, so it defines PT_V21_CUDA and skips these. */
+#ifndef PT_V21_CUDA
+int pt_v21_cuda_init(pt_ctx *c, int verbose) {
+  (void) c;
+  (void) verbose;
+  return -1;   /* this binary was built without CUDA */
+}
+void pt_v21_cuda_shutdown(pt_ctx *c) { (void) c; }
+
+int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
+                int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
+                const float *bias, int64_t batch) {
+  return pt_v21_conv_cpu(c, X, ldx, cin, Y, ldy, n, cout, K, stride, pad, dil, wp, bias, batch);
+}
+int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
+                 int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
+                 int64_t batch) {
+  return pt_v21_convT_cpu(c, X, ldx, cin, tin, Y, ldy, cout, s, pad, K, wp, bias, batch);
+}
+int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, const float *B,
+                  int64_t ldb, int64_t nn, float *C, int64_t ldc) {
+  return pt_v21_matmul_cpu(c, A, m, k, lda, B, ldb, nn, C, ldc);
+}
+#endif
+
 
 /* ---------------- run ---------------- */
 static const int64_t *tvals(const pt_tv *t) { return (const int64_t *) t->p; }
@@ -1728,7 +1741,12 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         int64_t ybytes = (size_t) ((((size_t) N * cout4 * Tout) * 4 + 63) & ~(size_t) 63);
         float *yp = cout4 == cout ? (float *) out[0]->p
                                   : (float *) aligned_alloc(64, ybytes);   /* Cout=1 layers pad to 4 */
-        pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout, cout, K, stride, pad, dil,
+        if (getenv("PT_V21_CONVLOG"))
+          fprintf(stderr, "conv node %d %s T=%lld N=%lld cin=%d cout=%d K=%d s=%d pad=%d dil=%d"
+                          " Tout=%lld ldxp=%lld\n", ni, pt_tdefs[nd->out[0]].origin, (long long) T,
+                  (long long) N, cin, cout, K, stride, pad, dil, (long long) Tout,
+                  (long long) ldxp);
+        pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
                     c->cont_f32[nd->w0], c->cont_f32[nd->w1], N);
         if (cout4 != cout) {
           for (int64_t b = 0; b < N; b++)
