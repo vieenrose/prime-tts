@@ -9,6 +9,7 @@
  */
 #include "pt_v21.h"
 #include <pthread.h>
+#include <sched.h>
 #include "pt_graph_tab.h"
 #include <math.h>
 #include <stdio.h>
@@ -651,6 +652,185 @@ static float *harena_alloc(size_t bytes) {
   return (float *) (g_harena + off);
 }
 
+/* One arena for all fp32 payloads: its size is the sum of the container records that the graph
+ * actually references, computed from the record index (no allocation per record). */
+static int reserve_payload_arena(pt_ctx *c, uint32_t n_tensor) {
+  size_t need = 0;
+  for (uint32_t i = 0; i < n_tensor; i++) {
+    const uint8_t *r = (const uint8_t *) c->map + V21_HDR_SIZE + (size_t) i * V21_REC_SIZE;
+    char nm[65];
+    memcpy(nm, r, 64);
+    nm[64] = 0;
+    if (!nm[0])
+      continue;
+    int64_t nel;
+    memcpy(&nel, r + 64 + 4 + 4 + 48, 8);
+    if (nel <= 0)
+      continue;
+    need += (((size_t) nel * 4 + 64) + 63) & ~(size_t) 63;
+  }
+  return harena_reserve(need);
+}
+
+/* ---- parallel record pass (PT_V21_OPEN_PAR=1) -----------------------------------------------
+ * The serialized open pass is ONE pass of work: the first context materializes every fp32 payload
+ * (84 MB memcpy + 27 MB of fp16 LUT decode, ~100 ms measured) while the other three stream
+ * threads wait on the lock, and the whole thing sits in the ~390 ms serialized startup that runs
+ * before any inference. The payloads are shared, so the work can be split instead: prepare the
+ * record -> ctab map, the payload arena, the shared cache and the fp16 LUT single-threaded under
+ * open_lock; then every thread claims record indices with one atomic counter and materializes
+ * them (the only lock is the arena bump, held for microseconds); a completion barrier, and each
+ * context aliases the finished payloads itself. Bit-identical by construction: same conversion
+ * code over the same bytes, only the thread that runs each record changes. */
+typedef struct {
+  int k;   /* ctab index, -1 when no node references this record */
+  int64_t off, nel;
+  int isz, nd;
+  int64_t dims[PT_V21_MAX_RANK];
+} pt_recinfo;
+
+static pt_recinfo *g_recs;
+static uint32_t g_recs_n;
+static volatile int g_rec_next, g_rec_done;
+static int g_par_state;   /* 0 prepared-not, 1 prepared, -1 prepare failed (fall back) */
+static pthread_mutex_t g_arena_lock = PTHREAD_MUTEX_INITIALIZER;
+static float *v21_load_cont(pt_ctx *c, uint32_t i, const char *name, int64_t off, int64_t n,
+                            int itemsize);
+
+/* The shared cache must already be sized when the parallel loaders publish: host_cont_shared grows
+ * it lazily, and a claim for an unsized index is dropped -- which silently turns every alias into
+ * a private copy (measured: peak RSS 468 MB instead of 272 MB, four payloads instead of one). */
+static void hcache_prealloc(int n) {
+  if ((size_t) n > g_hcache_n) {
+    pt_hrec *nb = (pt_hrec *) realloc(g_hcache, (size_t) n * sizeof(pt_hrec));
+    if (nb) {
+      memset(nb + g_hcache_n, 0, ((size_t) n - g_hcache_n) * sizeof(pt_hrec));
+      g_hcache = nb;
+      g_hcache_n = (size_t) n;
+    }
+  }
+}
+
+static int par_claim(int k, float *p) {
+  int ok = 0;
+  pthread_mutex_lock(&g_hlock);
+  if (k >= 0 && (size_t) k < g_hcache_n) {
+    g_hcache[k].p = p;
+    g_hcache[k].ref = 1;
+    ok = 1;
+  }
+  pthread_mutex_unlock(&g_hlock);
+  return ok;
+}
+
+static void fill_payload(const char *base, const pt_recinfo *ri, float *f) {
+  const uint8_t *src = (const uint8_t *) base + ri->off;
+  if (ri->isz == 4) {
+    memcpy(f, src, (size_t) (ri->nel * 4));
+  } else {
+    const uint16_t *h = (const uint16_t *) src;
+    for (int64_t k = 0; k < ri->nel; k++) {
+      uint32_t u = h2f_table[h[k]];
+      memcpy(&f[k], &u, 4);
+    }
+  }
+}
+
+static int par_prepare(pt_ctx *c, uint32_t n_tensor, const float *itemsize_tab) {
+  g_recs = (pt_recinfo *) calloc((size_t) n_tensor, sizeof(pt_recinfo));
+  if (!g_recs) {
+    g_par_state = -1;
+    return -1;
+  }
+  g_recs_n = n_tensor;
+  for (uint32_t i = 0; i < n_tensor; i++) {
+    const uint8_t *r = (const uint8_t *) c->map + V21_HDR_SIZE + (size_t) i * V21_REC_SIZE;
+    pt_recinfo *ri = &g_recs[i];
+    char nm[65];
+    memcpy(nm, r, 64);
+    nm[64] = 0;
+    ri->k = -1;
+    if (!nm[0])
+      continue;
+    for (int k = 0; k < c->n_cont; k++) {
+      if (pt_graph_ctab[k] && !strcmp(pt_graph_ctab[k], nm)) {
+        ri->k = k;
+        break;
+      }
+    }
+    if (ri->k < 0)
+      continue;
+    memcpy(&ri->nd, r + 64, 4);
+    for (int z = 0; z < PT_V21_MAX_RANK; z++)
+      memcpy(&ri->dims[z], r + 64 + 4 + 4 + 8 * z, 8);
+    memcpy(&ri->nel, r + 64 + 4 + 4 + 48, 8);
+    memcpy(&ri->off, r + 64 + 4 + 4 + 48 + 8, 8);
+    ri->isz = itemsize_tab ? (int) itemsize_tab[i] : 4;
+    if (ri->nel <= 0)
+      ri->k = -1;
+  }
+  g_rec_next = 0;
+  g_rec_done = 0;
+  g_par_state = 1;
+  return 0;
+}
+
+/* Claim loop: each record index is taken by exactly one thread (atomic counter), so the
+ * materialization of a record happens once, on whichever stream thread gets there first. */
+static void par_load(pt_ctx *c) {
+  for (;;) {
+    int i = __sync_fetch_and_add(&g_rec_next, 1);
+    if ((uint32_t) i >= g_recs_n)
+      break;
+    pt_recinfo *ri = &g_recs[i];
+    if (ri->k >= 0 && ri->nel > 0) {
+      pthread_mutex_lock(&g_arena_lock);
+      float *f = harena_alloc((size_t) (ri->nel * 4 + 64));
+      pthread_mutex_unlock(&g_arena_lock);
+      if (!f)
+        f = (float *) malloc((size_t) (ri->nel * 4 + 64));
+      if (f) {
+        fill_payload((const char *) c->base, ri, f);
+        par_claim(ri->k, f);
+      } else {
+        c->n_alloc_fail++;
+      }
+    }
+    __sync_fetch_and_add(&g_rec_done, 1);
+  }
+}
+
+static void par_barrier(void) {
+  while (__sync_add_and_fetch(&g_rec_done, 0) < (int) g_recs_n)
+    sched_yield();
+}
+
+static void par_alias(pt_ctx *c, const char *container) {
+  for (uint32_t i = 0; i < g_recs_n; i++) {
+    pt_recinfo *ri = &g_recs[i];
+    if (ri->k < 0 || ri->nel <= 0)
+      continue;
+    int k = ri->k;
+    c->cont_isz[k] = ri->isz;
+    c->cont_n[k] = ri->nel;
+    c->cont_ndim[k] = ri->nd;
+    for (int z = 0; z < PT_V21_MAX_RANK; z++)
+      c->cont_dims[k * PT_V21_MAX_RANK + z] = ri->dims[z];
+    c->cont_shared[k] = 0;
+    c->cont_f32[k] = host_cont_shared(k, container, ri->nel);
+    if (!c->cont_f32[k]) {
+      /* the load of this record failed (arena exhausted and malloc failed): materialize it here */
+      pthread_mutex_lock(&g_arena_lock);
+      c->cont_f32[k] = v21_load_cont(c, i, pt_graph_ctab[k], ri->off, ri->nel, ri->isz);
+      pthread_mutex_unlock(&g_arena_lock);
+      if (c->cont_f32[k]) {
+        c->cont_shared[k] = 1;
+        host_cont_shared_claim(k, c->cont_f32[k]);
+      }
+    }
+  }
+}
+
 static float *v21_load_cont(pt_ctx *c, uint32_t i, const char *name, int64_t off, int64_t n,
                             int itemsize) {
   float *f = harena_alloc((size_t) (n * 4 + 64));
@@ -841,7 +1021,27 @@ pt_ctx *pt_v21_open(const char *container) {
   static pthread_mutex_t open_lock = PTHREAD_MUTEX_INITIALIZER;
   static int open_ser = -1;
   if (open_ser < 0) open_ser = getenv("PT_V21_OPEN_SERIAL") ? atoi(getenv("PT_V21_OPEN_SERIAL")) : 1;
-  if (open_ser) pthread_mutex_lock(&open_lock);
+  static int open_par = -1;
+  if (open_par < 0) open_par = getenv("PT_V21_OPEN_PAR") ? atoi(getenv("PT_V21_OPEN_PAR")) : 1;
+  int par_done = 0;
+  if (open_par) {
+    pthread_mutex_lock(&open_lock);
+    reserve_payload_arena(c, h.n_tensor);
+    h2f_table_init();   /* LUT first: par_load must not race its construction */
+    hcache_prealloc(c->n_cont);
+    if (g_par_state == 0)
+      par_prepare(c, h.n_tensor, itemsize_tab);
+    if (g_par_state > 0)
+      par_done = 1;
+    pthread_mutex_unlock(&open_lock);
+    if (par_done) {
+      par_load(c);
+      par_barrier();
+      par_alias(c, container);
+    }
+  }
+  if (open_ser && !par_done) pthread_mutex_lock(&open_lock);
+  if (!par_done) {
   {
     /* size the fp32 payload arena: every record that will be materialized on the host */
     size_t need = 0;
@@ -893,7 +1093,8 @@ pt_ctx *pt_v21_open(const char *container) {
       }
     }
   }
-  if (open_ser) pthread_mutex_unlock(&open_lock);
+  }
+  if (open_ser && !par_done) pthread_mutex_unlock(&open_lock);
   free(itemsize_tab);
   c->V = (pt_tv *) calloc(PT_N_TENSOR, sizeof(pt_tv));
   g_ctx = c;
