@@ -141,6 +141,16 @@ static void arena_release(pt_ctx *c, void *mark) {
 int pt_v21_cuda_init(pt_ctx *c, int verbose) {
   if (verbose)
     fprintf(stderr, "pt_v21 cuda: device 0 (sm_53)\n");
+  /* Yielding sync instead of spin-wait: with N streams on a 4-core A57, N threads spinning in
+   * cudaStreamSynchronize steal the cores the other streams need for their host graph work. Must
+   * precede context creation; a context that already exists (another stream) keeps its flags. */
+  {
+    const char *e = getenv("PT_V21_SYNC");
+    int mode = e ? atoi(e) : 2;   /* 0 = driver default (spin), 1 = blocking, 2 = yield (measured best) */
+    if (mode == 1) cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
+    else if (mode == 2) cudaSetDeviceFlags(cudaDeviceScheduleYield);
+    cudaGetLastError();   /* setting flags on an active context is a harmless error */
+  }
   PTCHK(cudaFree(0)); /* force context creation */
   c->use_cuda = 1;
   if (cudaStreamCreateWithFlags((cudaStream_t *) &c->g_stream, cudaStreamNonBlocking)) {

@@ -1,0 +1,396 @@
+diff --git a/runtime/v21/src/pt_v21.h b/runtime/v21/src/pt_v21.h
+index 5bc6aa6..1eabece 100644
+--- a/runtime/v21/src/pt_v21.h
++++ b/runtime/v21/src/pt_v21.h
+@@ -82,6 +82,8 @@ typedef struct {
+   int64_t d[PT_V21_MAX_RANK];
+   int64_t n;
+   void *p;              /* host payload (fp32 = float, i64 = int64_t, bool = uint8_t) */
++  void *dev_p;          /* device payload while a conv chain is in flight (NULL otherwise) */
++  int dev_res;          /* 1 = this tensor's values live only in dev_p (arena) right now */
+   int dev;              /* 1 = payload lives on the CUDA device (pt_v21_cuda.cu) */
+   int alive;
+ } pt_tv;
+@@ -125,6 +127,7 @@ struct pt_ctx {
+   size_t arena_alloc_bytes;   /* arena high-water mark */
+   char *skip;           /* PT_N_NODE: nodes folded into a producer kernel, not executed */
+   int fuse;             /* epilogue fusion enabled for this context */
++  int chain;            /* keep conv results device-resident between chained convs */
+   double *prof_node;   /* per-node ms (prof == 2); allocated lazily */
+   double t_ekind[96];
+   long n_ekind[96];
+@@ -132,6 +135,7 @@ struct pt_ctx {
+   void *g_arena;     /* resident device arena base (M3) */
+   void *g_stream;    /* per-stream CUDA stream so concurrent requests actually overlap (M3) */
+   size_t g_arena_bytes, g_arena_used;
++  void *chain_mark;  /* arena mark for the conv chain currently in flight, NULL when none */
+ };
+ 
+ 
+@@ -184,6 +188,22 @@ double pt_v21_cuda_weights_mib(pt_ctx *c);
+ int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda,
+                       const float *B, int64_t ldb, int64_t nn, float *C, int64_t ldc);
+ 
++/* Per-stream device scratch arena, exposed for the graph loop's chained conv path. */
++void *pt_v21_arena_alloc(pt_ctx *c, size_t bytes);
++void *pt_v21_arena_mark(pt_ctx *c);
++void pt_v21_arena_release(pt_ctx *c, void *mark);
++void pt_v21_chain_upload(pt_ctx *c, void *dst_dev, const void *src_host, size_t bytes);
++void pt_v21_chain_download_sync(pt_ctx *c, void *dst_host, const void *src_dev, size_t bytes);
++
++/* Device-resident conv step. dx_dev points at an *unpadded* device input with row stride tin; the
++ * kernel applies the zero padding itself. The output stays in the arena when final is 0 (no copy
++ * back, no stream sync); when final is 1 the result is copied to Y_host and the chain's arena range
++ * is released. */
++int pt_v21_conv_chain(pt_ctx *c, const float *dx_dev, int64_t tin, int cin, float **dy_dev, int cout,
++                      int K, int stride, int pad, int dil, const float *bias, int64_t batch, int wtab,
++                      int btab, int epi0, int epi1, float ea0, float ea1, int final, float *Y_host,
++                      int64_t Tout);
++
+ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
+                int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
+                const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float a0, float a1);
+diff --git a/runtime/v21/src/pt_v21_cuda.cu b/runtime/v21/src/pt_v21_cuda.cu
+index fcf8eb9..9c83dac 100644
+--- a/runtime/v21/src/pt_v21_cuda.cu
++++ b/runtime/v21/src/pt_v21_cuda.cu
+@@ -133,11 +133,24 @@ static void *arena_alloc(pt_ctx *c, size_t bytes) {
+   c->arena_alloc_bytes = (size_t) off + bytes;
+   return (char *) c->g_arena + off;
+ }
+-static void *arena_mark(pt_ctx *c) { return (char *) c->g_arena + c->g_arena_used; }
+ static void arena_release(pt_ctx *c, void *mark) {
+   c->g_arena_used = (size_t) ((char *) mark - (char *) c->g_arena);
+ }
+ 
++void *pt_v21_arena_alloc(pt_ctx *c, size_t bytes) { return arena_alloc(c, bytes); }
++/* host<->device copies for the chained path, kept here because the graph loop is plain C */
++void pt_v21_chain_upload(pt_ctx *c, void *dst_dev, const void *src_host, size_t bytes) {
++  cudaMemcpyAsync(dst_dev, src_host, bytes, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream);
++}
++void pt_v21_chain_download_sync(pt_ctx *c, void *dst_host, const void *src_dev, size_t bytes) {
++  cudaMemcpy(dst_host, src_dev, bytes, cudaMemcpyDeviceToHost);
++  (void) c;
++}
++void *pt_v21_arena_mark(pt_ctx *c) { return (char *) c->g_arena + c->g_arena_used; }
++void pt_v21_arena_release(pt_ctx *c, void *mark) { arena_release(c, mark); }
++
++static void *arena_mark(pt_ctx *c) { return (char *) c->g_arena + c->g_arena_used; }
++
+ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
+   if (verbose)
+     fprintf(stderr, "pt_v21 cuda: device 0 (sm_53)\n");
+@@ -310,6 +323,73 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
+     yb[(int64_t) (co0 + 3) * ldy + t] = acc.w;
+ }
+ 
++/* Weight-staged conv reading an *unpadded* device input, applying the zero padding in-kernel.
++ *
++ * This is the chained-path kernel: the producer's activations stay in the arena, so there is no
++ * D2H copy, no host-side padded copy, no H2D copy and no stream sync between two convs. Terms
++ * outside the input are exactly the zeros the padded scratch would have supplied, and the pad term
++ * contributes +0.0f to the accumulator, so each output keeps the reference chain bit-for-bit.
++ */
++__global__ void pt_conv_kernel_wsb(const float *__restrict__ x, int64_t ldx, int cin, int64_t tin,
++                                   int K, int dil, int stride, int pad, float *__restrict__ y,
++                                   int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
++                                   const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0,
++                                   int epi1, float ea0, float ea1) {
++  extern __shared__ float4 wsm[];
++  const int NT = blockDim.x;
++  int64_t t = (int64_t) blockIdx.x * NT + threadIdx.x;
++  int blk = (int) blockIdx.y;
++  int64_t b = (int64_t) blockIdx.z;
++  const int kc = K * cin;
++  const float4 *w4 = (const float4 *) wp + (int64_t) blk * kc;
++  for (int idx = threadIdx.x; idx < kc; idx += NT)
++    wsm[idx] = w4[idx];
++  __syncthreads();
++  if (t >= Tout)
++    return;
++  int co0 = blk * 4;
++  float4 acc = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
++                           bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
++                           bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
++                           bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
++  const float *xb = x + b * bsx;
++  for (int k = 0; k < K; k++) {
++    int64_t base = (int64_t) t * stride + (int64_t) k * dil - pad;
++    /* a padded tap contributes only zeros: skip it as a whole, so the channel loop below is the same
++     * branch-free loop as the staged kernel. Skipping adds +-0.0, which cannot change any output
++     * beyond the sign of a zero. */
++    if (base < 0 || base >= tin)
++      continue;
++    for (int ci = 0; ci < cin; ci++) {
++      float4 w = wsm[(int64_t) k * cin + ci];
++      float xv = xb[(int64_t) ci * ldx + base];
++      acc.x += w.x * xv;
++      acc.y += w.y * xv;
++      acc.z += w.z * xv;
++      acc.w += w.w * xv;
++    }
++  }
++  if (epi0 || epi1) {
++    for (int lane = 0; lane < 4; lane++) {
++      float v = (&acc.x)[lane];
++      v = pt_epi_dev(v, epi0, ea0);
++      v = pt_epi_dev(v, epi1, ea1);
++      (&acc.x)[lane] = v;
++    }
++  }
++  float *yb = y + b * bsy;
++  if (co0 + 0 < cout)
++    yb[(int64_t) (co0 + 0) * ldy + t] = acc.x;
++  if (co0 + 1 < cout)
++    yb[(int64_t) (co0 + 1) * ldy + t] = acc.y;
++  if (co0 + 2 < cout)
++    yb[(int64_t) (co0 + 2) * ldy + t] = acc.z;
++  if (co0 + 3 < cout)
++    yb[(int64_t) (co0 + 3) * ldy + t] = acc.w;
++}
++
++
++
+ 
+ /* Weight-staged conv with two output channels per block.
+  *
+@@ -319,6 +399,51 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
+  * blocks. Each lane reads the matching component pair of the packed float4 weight, so every output
+  * channel's accumulation chain is exactly the reference chain: bit-identical.
+  */
++
++/* One step of a device-resident conv chain: no staging copy in, no copy out, no sync when the chain
++ * continues. Returns -1 when the shape is not supported by the chained kernel, in which case the
++ * caller falls back to the plain padded path. */
++int pt_v21_conv_chain(pt_ctx *c, const float *dx_dev, int64_t tin, int cin, float **dy_dev, int cout,
++                      int K, int stride, int pad, int dil, const float *bias, int64_t batch, int wtab,
++                      int btab, int epi0, int epi1, float ea0, float ea1, int final, float *Y_host,
++                      int64_t Tout) {
++  if (!c->use_cuda || !gpu_on("conv"))
++    return -1;
++  int cout4 = (cout + 3) / 4 * 4;
++  size_t wsm_bytes = (size_t) K * cin * sizeof(float4);
++  if (wsm_bytes == 0 || wsm_bytes > 16384)
++    return -1;   /* chained path uses the staged kernel only */
++  size_t yb = (size_t) batch * cout4 * Tout * 4;
++  float *dy = (float *) arena_alloc(c, yb);
++  if (!dy)
++    return -1;
++  float *dw = (float *) weight_ctab(wtab);
++  float *db = bias ? (float *) weight_ctab(btab) : NULL;
++  if (!dw || (bias && !db)) {
++    arena_release(c, arena_mark(c));
++    return -1;
++  }
++  c->n_conv++;
++  *dy_dev = dy;
++  int threads = 256;
++  dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
++  double tA = gpu_prof() ? gpu_now() : 0.0;
++  pt_conv_kernel_wsb<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
++      dx_dev, tin /*rows are unpadded: ldx == tin*/, cin, tin, K, dil, stride, pad, dy, /*ldy=*/Tout,
++      /*Tout=*/Tout, cout, dw, db, (int64_t) cin * tin, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1);
++  if (final) {
++    PTCHK(cudaMemcpyAsync(Y_host, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
++    PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
++    if (c->chain_mark) {
++      arena_release(c, c->chain_mark);
++      c->chain_mark = NULL;
++    }
++  }
++  if (gpu_prof())
++    c->g_kernel_ms += gpu_now() - tA;
++  return 0;
++}
++
+ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
+                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
+                 const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float ea0,
+diff --git a/runtime/v21/src/pt_v21_host.c b/runtime/v21/src/pt_v21_host.c
+index 80d1264..0e7e88f 100644
+--- a/runtime/v21/src/pt_v21_host.c
++++ b/runtime/v21/src/pt_v21_host.c
+@@ -682,6 +682,7 @@ pt_ctx *pt_v21_open(const char *container) {
+     g_cons_built = 1;
+   }
+   c->fuse = getenv("PT_V21_FUSE") ? atoi(getenv("PT_V21_FUSE")) : 1;
++  c->chain = getenv("PT_V21_CHAIN") ? atoi(getenv("PT_V21_CHAIN")) : 1;
+   c->skip = (char *) calloc(PT_N_NODE, 1);
+   c->prof = getenv("PT_V21_EKIND") ? 1 : 0;
+   c->prof_node_on = c->prof && getenv("PT_V21_EKIND")[0] == '2';
+@@ -2041,34 +2042,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+         int64_t d[3] = {N, cout, Tout};     /* the graph sees Cout rows; the packed kernel fills 4 */
+         tv_alloc(c, out[0], DT_F32, d, 3);
+         double t0 = pt_v21_now();
+-        /* The conv reads each input row from -pad to T+pad-1, so it consumes a *padded* row: the
+-         * rows are copied into a [Cin][T+2*pad] scratch, zero-filled in the pad margins.  The CUDA
+-         * conv kernel reads the same padded layout. */
+-        int64_t ldxp = T + 2 * (int64_t) pad;
+-        /* Padded input row: the kernel reads row ci at X + ci*ldx + (k*dil + t), and the graph
+-         * column that output t needs for tap k is (t + k*dil - pad), so the row stores the input
+-         * at offset +pad and the kernel is handed the row start (no negative indexing). */
+-        size_t xpad_bytes =
+-            (size_t) ((((size_t) N * cin * ldxp) * 4 + 63) & ~(size_t) 63);
+-        float *xp = (float *) aligned_alloc(64, xpad_bytes);
+-        memset(xp, 0, xpad_bytes);
+-        for (int64_t b = 0; b < N; b++)
+-          for (int ci = 0; ci < cin; ci++)
+-            memcpy(xp + ((int64_t) b * cin + ci) * ldxp + pad,
+-                   (const float *) X->p + ((int64_t) b * cin + ci) * T, (size_t) (T * 4));
+-        int64_t ybytes = (size_t) ((((size_t) N * cout4 * Tout) * 4 + 63) & ~(size_t) 63);
+-        float *yp = cout4 == cout ? (float *) out[0]->p
+-                                  : (float *) aligned_alloc(64, ybytes);   /* Cout=1 layers pad to 4 */
+-        if (getenv("PT_V21_CONVLOG"))
+-          fprintf(stderr, "conv node %d %s T=%lld N=%lld cin=%d cout=%d K=%d s=%d pad=%d dil=%d"
+-                          " Tout=%lld ldxp=%lld\n", ni, pt_tdefs[nd->out[0]].origin, (long long) T,
+-                  (long long) N, cin, cout, K, stride, pad, dil, (long long) Tout,
+-                  (long long) ldxp);
+-        /* Fuse the elementwise nodes that immediately follow this conv into its epilogue.  A node
+-         * is fusable when its output feeds nothing else and it is LeakyReLU, ReLU, or a scalar
+-         * Mul/Add, and the chain runs in graph order.  The arithmetic is the same fp32 arithmetic
+-         * the interpreter would have done, so results are unchanged; what goes away is a host pass
+-         * over the activation tensor (LEAKYRELU was 144 ms per stream, MUL 60, ADD 106). */
++
+         int epi[2] = {0, 0};
+         float epa[2] = {0.0f, 0.0f};
+         int fused_nodes[3] = {0, 0, 0};
+@@ -2108,13 +2082,124 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+             t = cd->out[0];
+           }
+         }
++        /* The final tensor of the fused epilogue chain: what the rest of the graph consumes. */
++        int fin_t = nd->out[0];
++        for (int i = 0; i < n_fused; i++)
++          fin_t = pt_ndefs[fused_nodes[i]].out[0];
++
++        /* ---------------- device-resident conv chaining ----------------
++         * If this conv's result is consumed by exactly one node and that node is another conv,
++         * the activations stay in the device arena: no copy back to the host, no padded copy on
++         * the host, no copy out to the device, and no stream sync between the two. The sync and
++         * the copy back happen at the first conv whose result the graph actually needs on the
++         * host. Each chained kernel applies the zero padding itself, contributing exact zeros, so
++         * every output keeps the reference accumulation chain bit-for-bit. */
++#ifdef PT_V21_CUDA
++        int next_conv = 0;
++        if (c->chain && c->use_cuda && cout4 == cout && fin_t >= 0 && g_n_cons[fin_t] == 1) {
++          int cn = g_cons_node[fin_t];
++          next_conv = (cn >= 0 && !c->skip[cn] && pt_ndefs[cn].op == PT_CONV &&
++                       pt_ndefs[cn].in[0] == fin_t);
++        }
++        int in_dev = (c->chain && c->use_cuda && X->dev_res && X->dev_p) ? 1 : 0;
++        if ((next_conv || in_dev) && c->use_cuda && cout4 == cout) {
++          const float *dx_dev = NULL;
++          if (in_dev) {
++            dx_dev = (const float *) X->dev_p;
++          } else {
++            size_t xcb = (size_t) N * cin * T * 4;
++            void *p = pt_v21_arena_alloc(c, xcb);
++            if (p) {
++              pt_v21_chain_upload(c, p, X->p, xcb);
++              dx_dev = (const float *) p;
++            }
++          }
++          if (dx_dev) {
++            if (!c->chain_mark)
++              c->chain_mark = pt_v21_arena_mark(c);   /* chain start: released at the chain end */
++            float *dy = NULL;
++            int r = pt_v21_conv_chain(c, dx_dev, T, cin, &dy, cout, K, stride, pad, dil,
++                                      c->cont_f32[nd->w1], N, nd->w0, nd->w1, epi[0], epi[1], epa[0],
++                                      epa[1], next_conv ? 0 : 1, (float *) out[0]->p, Tout);
++            if (r == 0) {
++              if (n_fused) {
++                int last_out = nd->out[0];
++                for (int i = 0; i < n_fused; i++) {
++                  int cn2 = fused_nodes[i];
++                  int ao = pt_ndefs[cn2].out[0];
++                  c->skip[cn2] = 1;
++                  c->V[ao] = c->V[last_out];
++                  c->V[ao].dev = (i == n_fused - 1) ? 1 : 2;
++                  c->V[ao].alive = 1;
++                  c->V[ao].dev_res = 0;
++                  c->V[ao].dev_p = NULL;
++                  last_out = ao;
++                  c->V[nd->out[0]].dev = 2;
++                }
++              }
++              if (next_conv) {
++                /* hand the arena buffer to the consumer as the tensor's payload */
++                pt_tv *fin = &c->V[fin_t];
++                if (fin->alive && fin->p) free(fin->p);
++                fin->p = NULL;
++                fin->dev_p = dy;
++                fin->dev_res = 1;
++                fin->dev = 1;
++                fin->alive = 1;
++              }
++              c->t_conv += pt_v21_now() - t0;
++              break;
++            }
++            /* shape not supported by the chained kernel: fall back to the padded host path. A
++             * device-resident input has no host payload, so bring it back first. */
++            c->chain_mark = NULL;
++            if (in_dev) {
++              size_t nb = (size_t) X->n * 4;
++              float *tmp = (float *) aligned_alloc(64, (nb + 63) & ~(size_t) 63);
++              pt_v21_chain_download_sync(c, tmp, X->dev_p, nb);
++              X->dev_res = 0;
++              X->dev_p = NULL;
++              if (X->p) free(X->p);
++              X->p = tmp;
++              X->dev = 0;
++            }
++          }
++        }
++
++        /* The conv reads each input row from -pad to T+pad-1, so it consumes a *padded* row: the
++         * rows are copied into a [Cin][T+2*pad] scratch, zero-filled in the pad margins.  The CUDA
++         * conv kernel reads the same padded layout. */
++        int64_t ldxp = T + 2 * (int64_t) pad;
++        /* Padded input row: the kernel reads row ci at X + ci*ldx + (k*dil + t), and the graph
++         * column that output t needs for tap k is (t + k*dil - pad), so the row stores the input
++         * at offset +pad and the kernel is handed the row start (no negative indexing). */
++        size_t xpad_bytes =
++            (size_t) ((((size_t) N * cin * ldxp) * 4 + 63) & ~(size_t) 63);
++        float *xp = (float *) aligned_alloc(64, xpad_bytes);
++        memset(xp, 0, xpad_bytes);
++        for (int64_t b = 0; b < N; b++)
++          for (int ci = 0; ci < cin; ci++)
++            memcpy(xp + ((int64_t) b * cin + ci) * ldxp + pad,
++                   (const float *) X->p + ((int64_t) b * cin + ci) * T, (size_t) (T * 4));
++        int64_t ybytes = (size_t) ((((size_t) N * cout4 * Tout) * 4 + 63) & ~(size_t) 63);
++        float *yp = cout4 == cout ? (float *) out[0]->p
++                                  : (float *) aligned_alloc(64, ybytes);   /* Cout=1 layers pad to 4 */
++        if (getenv("PT_V21_CONVLOG"))
++          fprintf(stderr, "conv node %d %s T=%lld N=%lld cin=%d cout=%d K=%d s=%d pad=%d dil=%d"
++                          " Tout=%lld ldxp=%lld\n", ni, pt_tdefs[nd->out[0]].origin, (long long) T,
++                  (long long) N, cin, cout, K, stride, pad, dil, (long long) Tout,
++                  (long long) ldxp);
++        /* Fuse the elementwise nodes that immediately follow this conv into its epilogue.  A node
++         * is fusable when its output feeds nothing else and it is LeakyReLU, ReLU, or a scalar
++         * Mul/Add, and the chain runs in graph order.  The arithmetic is the same fp32 arithmetic
++         * the interpreter would have done, so results are unchanged; what goes away is a host pass
++         * over the activation tensor (LEAKYRELU was 144 ms per stream, MUL 60, ADD 106). */
++#endif /* PT_V21_CUDA */
++
+         pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
+                     c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1, epi[0], epi[1],
+                     epa[0], epa[1]);
+         if (n_fused) {
+-          /* The conv's buffer becomes the last fused node's tensor: the conv's own tensor id stops
+-           * owning it (dev 2 is never freed) so the buffer is freed exactly once, at the last use of
+-           * the final tensor, which is what the un-fused graph would have done. */
+           int last_out = nd->out[0];
+           for (int i = 0; i < n_fused; i++) {
+             int cn = fused_nodes[i];
+@@ -2134,6 +2219,11 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+           free(yp);
+         }
+         free(xp);
++        /* a chain that ends on the plain path releases its arena range here */
++        if (c->chain_mark) {
++          pt_v21_arena_release(c, c->chain_mark);
++          c->chain_mark = NULL;
++        }
+         c->t_conv += pt_v21_now() - t0;
+         break;
+       }
