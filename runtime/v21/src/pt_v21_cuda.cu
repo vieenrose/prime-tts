@@ -1075,6 +1075,64 @@ __global__ void pt_matmul_kernel(const float *__restrict__ A, int64_t m, int64_t
     cr[3] = acc.w;
 }
 
+
+/* Tiled matmul: block = 64 rows x 64 columns, 256 threads, 4x4 outputs per thread, p walked in
+ * chunks of 16 through shared memory. Each output still accumulates p = 0..k-1 in order onto 0,
+ * the chain of pt_matmul_kernel: bit-identical. */
+__global__ void __launch_bounds__(256) pt_matmul_kernel_t(
+    const float *__restrict__ A, int64_t m, int64_t k, int64_t lda, const float *__restrict__ B,
+    int64_t ldb, int64_t nn, float *__restrict__ C, int64_t ldc) {
+  __shared__ float4 As[16][16];   /* [p][row group] = 4 rows */
+  __shared__ float4 Bs[16][16];   /* [p][column quad] */
+  const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+  const int64_t i0 = (int64_t) blockIdx.y * 64, j0 = (int64_t) blockIdx.x * 64;
+  float4 a0 = make_float4(0.f, 0.f, 0.f, 0.f), a1 = a0, a2 = a0, a3 = a0;   /* rows 4ty+0..3 */
+  const int lr = tid >> 4, lq = tid & 15;
+  for (int64_t p0 = 0; p0 < k; p0 += 16) {
+    int64_t p = p0 + lr;
+    float4 av = make_float4(0.f, 0.f, 0.f, 0.f), bv = av;
+    if (p < k) {
+      int64_t r = i0 + 4 * lq;
+      if (r + 0 < m) av.x = A[(r + 0) * lda + p];
+      if (r + 1 < m) av.y = A[(r + 1) * lda + p];
+      if (r + 2 < m) av.z = A[(r + 2) * lda + p];
+      if (r + 3 < m) av.w = A[(r + 3) * lda + p];
+      int64_t cidx = j0 + 4 * lq;
+      const float *bp = B + p * ldb;
+      if (cidx + 0 < nn) bv.x = bp[cidx + 0];
+      if (cidx + 1 < nn) bv.y = bp[cidx + 1];
+      if (cidx + 2 < nn) bv.z = bp[cidx + 2];
+      if (cidx + 3 < nn) bv.w = bp[cidx + 3];
+    }
+    As[lr][lq] = av;
+    Bs[lr][lq] = bv;
+    __syncthreads();
+    int pn = (int) ((k - p0) < 16 ? (k - p0) : 16);
+    for (int rr = 0; rr < pn; rr++) {
+      float4 a = As[rr][ty];
+      float4 b = Bs[rr][tx];
+      a0.x += a.x * b.x; a0.y += a.x * b.y; a0.z += a.x * b.z; a0.w += a.x * b.w;
+      a1.x += a.y * b.x; a1.y += a.y * b.y; a1.z += a.y * b.z; a1.w += a.y * b.w;
+      a2.x += a.z * b.x; a2.y += a.z * b.y; a2.z += a.z * b.z; a2.w += a.z * b.w;
+      a3.x += a.w * b.x; a3.y += a.w * b.y; a3.z += a.w * b.z; a3.w += a.w * b.w;
+    }
+    __syncthreads();
+  }
+  float4 *rows[4] = {&a0, &a1, &a2, &a3};
+  for (int j = 0; j < 4; j++) {
+    int64_t i = i0 + 4 * ty + j;
+    if (i >= m)
+      continue;
+    int64_t c0 = j0 + 4 * tx;
+    float *cr = C + i * ldc;
+    float4 v = *rows[j];
+    if (c0 + 0 < nn) cr[c0 + 0] = v.x;
+    if (c0 + 1 < nn) cr[c0 + 1] = v.y;
+    if (c0 + 2 < nn) cr[c0 + 2] = v.z;
+    if (c0 + 3 < nn) cr[c0 + 3] = v.w;
+  }
+}
+
 int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, const float *B,
                   int64_t ldb, int64_t nn, float *C, int64_t ldc) {
   if (!c->use_cuda || !gpu_on("matmul"))
@@ -1101,11 +1159,20 @@ int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, 
   }
   PTCHK(cudaMemcpyAsync(dA, A, ab, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
   PTCHK(cudaMemcpyAsync(dB, B, bb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
+  static int mt = -1;
+  if (mt < 0) mt = getenv("PT_V21_MM_TILED") ? atoi(getenv("PT_V21_MM_TILED")) : 1;
+  if (mt) {
+    dim3 gt((unsigned) ((nn + 63) / 64), (unsigned) ((m + 63) / 64));
+    pt_matmul_kernel_t<<<gt, 256, 0, (cudaStream_t) c->g_stream>>>(dA, m, k, lda, dB, ldb, nn, dC,
+                                                                     ldc);
+  } else {
   int tx = 32, ty = 8;
   dim3 block(tx, ty);
   dim3 grid((unsigned) ((nn / 4 + tx - 1) / tx), (unsigned) ((m + ty - 1) / ty));
   pt_matmul_kernel<<<grid, block, 0, (cudaStream_t) c->g_stream>>>(dA, m, k, lda, dB, ldb, nn, dC,
                                                                     ldc);
+  }
+  PTCHK(cudaGetLastError());
   PTCHK(cudaMemcpyAsync(C, dC, cb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   if (d_own) {
