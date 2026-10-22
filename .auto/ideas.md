@@ -108,6 +108,17 @@ pre-faulting is ~3 ms worse-or-neutral, 3/3. Faults are free (fault-around + hot
 99 ms is compute (84 MB memcpy + LUT fp16 convert, already optimized in runs 65/70). No wall A/B was
 needed: a zero mechanism contribution bounds the wall effect at zero. Mapping tuning is exhausted.
 
+## Desync mechanism (run 94): why host work structurally cannot move the wall
+Stream start offsets from serialized open are ~25-100 ms (PHASE data); per-op granularity is
+~1-3 ms (conv ~3 ms, elementwise ~1 ms, softmax 7.5 ms over 6 calls, einsum 4.7 ms x2). The
+offset/granularity ratio is 25-100x, so the 4 streams' op phases are effectively RANDOM relative to
+each other and the GPU idles only if all 4 are simultaneously host-bound -- which the offsets make
+near-impossible except in synchronized startup/shutdown. Hence sub-100 ms host optimizations are
+hidden STRUCTURALLY, not just empirically (this upgrades run 70's observation to a mechanism, and
+reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only synchronized phases
+expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
+serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
+
 ## Killed by measurement #5 (run 81): PreferL1 cache config for the GEMM convs
 `cudaFuncSetCacheConfig(ig/ig8, PreferL1)`, env-gated, wsm/plain/convT/matmul untouched (wsm needs
 up to 48 KB shared). N=1 kernel+sync, alternating 3 pairs: 395.8/396.3/397.6 vs 401.9/396.9/402.6
