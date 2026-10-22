@@ -132,6 +132,10 @@ int main(int argc, char **argv) {
   printf("  conv=%ld convT=%ld matmul=%ld  conv %.1f ms  convT %.1f ms  matmul %.1f ms  total %.1f ms\n",
          pt_v21_stats_conv(c), pt_v21_stats_convT(c), pt_v21_stats_matmul(c),
          pt_v21_stats_ms(c, 0), pt_v21_stats_ms(c, 1), pt_v21_stats_ms(c, 2), pt_v21_stats_ms(c, 3));
+  if (getenv("PT_V21_EKIND")) {
+    char rep[512];
+    fprintf(stderr, "  host op kinds (ms):%s\n", pt_v21_ekind_report(c, rep, sizeof(rep)));
+  }
   if (use_cuda)
     fprintf(stderr, "  gpu split: alloc %.1f ms  copy %.1f ms  kernel+sync %.1f ms  free %.1f ms\n",
             pt_v21_stat_ms(c, 0), pt_v21_stat_ms(c, 1), pt_v21_stat_ms(c, 2), pt_v21_stat_ms(c, 3));

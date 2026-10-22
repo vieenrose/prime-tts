@@ -43,8 +43,8 @@ run1=$(ssh "$NANO" "cd ~/primetts && PT_V21_ARENA_MB=$ARENA ./build/pt_v21_par -
 s1=$(echo "$run1" | sed -n 's/.*slowest stream \([0-9][0-9]*\) ms.*/\1/p' | head -1)
 
 # ---- GPU phase split (where the time actually goes; the driver prints this under PT_V21_CUDAPROF)
-split=$(ssh "$NANO" "cd ~/primetts && PT_V21_CUDAPROF=1 PT_V21_ARENA_MB=$ARENA ./build/pt_v21_nano --container build/v21.ptk --case $CASE --cuda 2>&1 | grep -E 'gpu split' | head -1")
-echo "  $split"
+split=$(ssh "$NANO" "cd ~/primetts && PT_V21_CUDAPROF=1 PT_V21_EKIND=1 PT_V21_ARENA_MB=$ARENA ./build/pt_v21_nano --container build/v21.ptk --case $CASE --cuda 2>&1 | grep -E 'gpu split|host op kinds' | head -2")
+echo "$split"
 
 echo "METRIC n4_wall_ms=$wall"
 echo "METRIC n1_stream_ms=${s1:-0}"

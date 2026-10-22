@@ -113,6 +113,11 @@ struct pt_ctx {
    * staging, the kernels themselves, or per-call cudaMalloc. */
   double g_alloc_ms, g_copy_ms, g_kernel_ms, g_free_ms;
   long g_calls;
+  /* per-op-kind host time, filled when prof is set: this is what tells a fresh iteration which of
+   * the 41 op kinds is actually costing the ~2.7 s of host graph work */
+  int prof;
+  double t_ekind[96];
+  long n_ekind[96];
   void *g_weights;   /* ctab index -> device pointer, resident weights (M3) */
   void *g_arena;     /* resident device arena base (M3) */
   void *g_stream;    /* per-stream CUDA stream so concurrent requests actually overlap (M3) */
@@ -124,6 +129,8 @@ typedef struct pt_ctx pt_ctx;
 
 /* GPU phase split, 0 alloc 1 copy 2 kernel+sync 3 free (PT_V21_CUDAPROF=1 fills these) */
 double pt_v21_stat_ms(pt_ctx *c, int which);
+/* Top host op kinds by time, "CONST=812.3(1924) MUL=301.4(145) ..." into buf; NULL op ids skipped */
+const char *pt_v21_ekind_report(pt_ctx *c, char *buf, int bufsz);
 
 /* Open the runtime: mmap the container, resolve pt_graph_ctab names to payload pointers,
  * convert '#h' (fp16) payloads to fp32 once (27.3 MB decoder weights -> 54.5 MB host copy). */

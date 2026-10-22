@@ -211,6 +211,51 @@ static int bin_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *B, pt_tv *O) {
                                     : op == PT_LEQ ? (AV <= BV)
                                     : op == PT_AND ? ((AV != 0) && (BV != 0))
                                     : op == PT_OR ? ((AV != 0) || (BV != 0)) : (AV != 0) ^ (BV != 0)));
+    } else if (!isbool && dt == DT_F32 && adt == DT_F32 && bdt == DT_F32 &&
+               (op == PT_ADD || op == PT_SUB || op == PT_MUL || op == PT_DIV || op == PT_MAX ||
+                op == PT_MIN) &&
+               A->n == O->n && (B->n == O->n || B->n == 1)) {
+    /* elementwise fast path: same-shape (or scalar-broadcast) fp32 on contiguous buffers. A plain
+     * loop over 4-byte lanes is what gcc -O3 turns into NEON on the A57; the strided BC_LOOP below
+     * cannot be vectorized and was 349 ms of a 4.4 s stream on ADD alone.
+     * Bit-exactness: for +,-,*,max,min an fp32 op is correctly rounded, which is exactly what the
+     * double-then-round path computes, so the outputs are unchanged bit for bit. */
+      const float *a = (const float *) A->p, *b = (const float *) B->p;
+      float *o = (float *) O->p;
+      int64_t n = O->n;
+      int bcast_scalar = (B->n == 1);
+      float bs = bcast_scalar ? b[0] : 0.0f;
+      if (op == PT_ADD) {
+        if (bcast_scalar)
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] + bs;
+        else
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] + b[i];
+      } else if (op == PT_SUB) {
+        if (bcast_scalar)
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] - bs;
+        else
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] - b[i];
+      } else if (op == PT_MUL) {
+        if (bcast_scalar)
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] * bs;
+        else
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] * b[i];
+      } else if (op == PT_DIV) {
+        if (bcast_scalar)
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] / bs;
+        else
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] / b[i];
+      } else if (op == PT_MAX) {
+        if (bcast_scalar)
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] > bs ? a[i] : bs;
+        else
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] > b[i] ? a[i] : b[i];
+      } else {
+        if (bcast_scalar)
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] < bs ? a[i] : bs;
+        else
+          for (int64_t i = 0; i < n; i++) o[i] = a[i] < b[i] ? a[i] : b[i];
+      }
     } else {
       float *o = (float *) O->p;
       BC_LOOP(av = AV; bv = BV;
@@ -513,6 +558,7 @@ pt_ctx *pt_v21_open(const char *container) {
   free(itemsize_tab);
   c->V = (pt_tv *) calloc(PT_N_TENSOR, sizeof(pt_tv));
   g_ctx = c;
+  c->prof = getenv("PT_V21_EKIND") ? 1 : 0;
   return c;
 }
 
@@ -1402,6 +1448,36 @@ int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_
   return 0;
 }
 
+const char *pt_v21_ekind_report(pt_ctx *c, char *buf, int bufsz) {
+  /* top op kinds by accumulated host time */
+  int order[96];
+  for (int i = 0; i < 96; i++) order[i] = i;
+  for (int i = 0; i < 96; i++)
+    for (int j = i + 1; j < 96; j++)
+      if (c->t_ekind[order[j]] > c->t_ekind[order[i]]) {
+        int t = order[i];
+        order[i] = order[j];
+        order[j] = t;
+      }
+  buf[0] = 0;
+  int off = 0;
+  static const char *names[96] = {
+#define PT_X(n) #n,
+    PT_OPS(PT_X)
+#undef PT_X
+  };
+  for (int k = 0; k < 96 && off < bufsz - 40; k++) {
+    int o = order[k];
+    if (c->t_ekind[o] < 5e-5)
+      break;
+    if (k >= 12)
+      break;
+    off += snprintf(buf + off, bufsz - off, " %s=%.1f(%ld)", names[o], c->t_ekind[o] * 1000.0,
+                    c->n_ekind[o]);
+  }
+  return buf;
+}
+
 double pt_v21_stat_ms(pt_ctx *c, int which) {
   switch (which) {
     case 0: return c->g_alloc_ms;
@@ -1508,6 +1584,8 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
   double t0 = pt_v21_now();
   c->n_conv = c->n_convT = c->n_matmul = 0;
   c->t_conv = c->t_convT = c->t_matmul = 0.0;
+  memset(c->t_ekind, 0, sizeof(c->t_ekind));
+  memset(c->n_ekind, 0, sizeof(c->n_ekind));
   for (int i = 0; i < PT_N_TENSOR; i++) {
     pt_tv *t = &c->V[i];
     if (t->dev != 2) tv_free(t);
@@ -1537,6 +1615,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
     g_node = idx;
     g_op = nd->op;
     if (g_trace == idx) dump_inputs(idx);
+    double tA = c->prof ? pt_v21_now() : 0.0;
     switch (nd->op) {
       case PT_CONST: {
         /* constants live in the container (floats) or the int pool: alias, never copy */
@@ -1874,6 +1953,10 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         fprintf(stderr, "pt_v21: node %d op %d (%s) unhandled\n", idx, nd->op,
                 pt_graph_tnames[nd->out[0] >= 0 ? nd->out[0] : 0]);
         return -1;
+    }
+    if (c->prof) {
+      c->t_ekind[nd->op] += pt_v21_now() - tA;
+      c->n_ekind[nd->op]++;
     }
     if (r) {
       fprintf(stderr, "pt_v21: node %d op %d failed (%s)\n", idx, nd->op,
