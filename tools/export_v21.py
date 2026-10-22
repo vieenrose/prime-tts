@@ -161,14 +161,9 @@ def conv1d_ref(X: np.ndarray, W: np.ndarray, B: np.ndarray, stride: int, pad: in
     xp = np.zeros((Cin, T + 2 * pad), np.float32)
     xp[:, pad:pad + T] = X
     Tout = (T + 2 * pad - dilation * (K - 1) - 1) // stride + 1
-    out = np.zeros((Cout, Tout), np.float32)
-    for co in range(Cout):
-        acc = np.full(Tout, B[co], np.float32)
-        for k in range(K):
-            for ci in range(Cin):
-                acc += W[co, ci, k] * xp[ci, k * dilation::stride]
-        out[co] = acc
-    return out
+    idx = (np.arange(Tout)[:, None] * stride + np.arange(K)[None, :] * dilation).reshape(-1)
+    patches = xp[:, idx].reshape(Cin, K, Tout)
+    return np.einsum("ock,ckt->ct", W, patches) + np.asarray(B, np.float32)[:Cout, None]
 
 
 def conv_transpose1d_ref(X: np.ndarray, W: np.ndarray, B: np.ndarray, stride: int, pad: int) -> np.ndarray:
@@ -176,18 +171,24 @@ def conv_transpose1d_ref(X: np.ndarray, W: np.ndarray, B: np.ndarray, stride: in
     Cin, Cout, K = W.shape
     Tin = X.shape[1]
     Tout = (Tin - 1) * stride - 2 * pad + K
-    out = np.tile(B.astype(np.float32)[None, :], (Cout, 1))
-    for q in range(Tin):
-        for k in range(K):
-            t = q * stride + k - pad
-            if 0 <= t < Tout:
-                out[:, t] += W[:, :, k].T @ X[:, q]
+    out = np.tile(np.asarray(B, np.float32)[:Cout][None, :], (1, 1)).repeat(Tout, 1)
+    for k in range(K):
+        t = np.arange(Tin) * stride + k - pad
+        ok = (t >= 0) & (t < Tout)
+        if not ok.any():
+            continue
+        contrib = W[:, :, k].T @ X[:, ok]  # [Cout, n_ok]
+        out[:, t[ok]] += contrib
     return out
 
 
 def conv_transpose1d_packed(X: np.ndarray, Wp: np.ndarray, B: np.ndarray, s: int, pad: int,
                             Cout: int, K: int) -> np.ndarray:
-    """What the runtime does: s phases x ntap taps over q, then out[q*s + r - pad] = P_r[q]."""
+    """What the runtime does: s phases x ntap taps over q, then out[q*s + r - pad] = P_r[q].
+
+    Phase r / tap j is ONNX kernel tap k = r + j*s, and for output index t = q*s + r - pad that
+    tap reads input q - j (because t = (q-j)*s + k - pad), so tap j is a j-step delay of x.
+    """
     Cin, Tin = X.shape
     nt = convT_ntap(K, s)
     Wph = unpack_conv(Wp)  # [s*C4][Cin][nt]
@@ -196,7 +197,10 @@ def conv_transpose1d_packed(X: np.ndarray, Wp: np.ndarray, B: np.ndarray, s: int
     for r in range(s):
         for j in range(nt):
             wr = Wph[r * C4:(r + 1) * C4, :, j]  # [C4,Cin]
-            P[r] += wr @ X
+            if j == 0:
+                P[r] += wr @ X
+            elif j < Tin:
+                P[r, :, j:] += wr @ X[:, :-j]
         P[r] += B[:C4][None, :]
     Tout = (Tin - 1) * s - 2 * pad + K
     out = np.zeros((Cout, Tout), np.float32)
@@ -268,15 +272,21 @@ def group_of(node_name: str) -> str:
 
 
 def module_of(node_name: str) -> str:
-    """'/enc_p/encoder/attn_layers.0/conv_q/Conv' -> 'encoder.attn_layers.0.conv_q'."""
-    segs = [s for s in node_name.split("/") if s][:-1]
+    """'/enc_p/encoder/attn_layers.0/conv_q/Conv' -> 'encoder.attn_layers.0.conv_q'.
+
+    Collapses the torch Sequential scopes and drops the trailing op name.  Nodes that sit
+    directly under a group ('/dec/ConvTranspose_2') keep their own name, so packed tensor names
+    stay unique ('dec.ConvTranspose_2.wp')."""
+    segs = [s for s in node_name.split("/") if s]
+    if len(segs) <= 2:  # node sits directly under a group root: keep its own name
+        return segs[-1]
     out: list[str] = []
-    for s in segs:
+    for s in segs[:-1]:
         if out and s.startswith(out[-1] + "."):
             out[-1] = s
         else:
             out.append(s)
-    return ".".join(out) or "root"
+    return ".".join(out) or (segs[-1] if segs else "root")
 
 
 def attrs_of(node) -> dict:
@@ -386,13 +396,45 @@ class Exporter:
             return "shape"
         return "shape"
 
+    # ---- source-tensor lookup (for the round-trip gate) ---------------------------------
+    def weight_source(self, l: dict) -> tuple[str | None, np.ndarray | None]:
+        """The ONNX-shaped tensor a packed entry must reproduce, plus its ONNX name."""
+        if l["op"] == "constant":
+            return l["src"], np.ascontiguousarray(self.const[l["src"]], np.float32)
+        if not l.get("onnx"):
+            return None, None
+        nm = l["onnx"][0]
+        if nm in self.init:
+            W = np.ascontiguousarray(self.init[nm], np.float32)
+        elif nm in self.const:
+            W = np.ascontiguousarray(self.const[nm], np.float32)
+        else:
+            W = np.ascontiguousarray(self.dynamic_weight(nm), np.float32)
+        if l["op"] == "matmul" and W.ndim == 2:
+            W = W.T
+        return nm, W
+
+    def bias_source(self, l: dict) -> np.ndarray:
+        """The ONNX bias vector a packed bias entry must reproduce (zeros when the op has none)."""
+        op = l["op"]
+        n = self.g.node[l["idx"]]
+        if op in ("conv1d", "conv_transpose1d"):
+            bn = n.input[2] if len(n.input) > 2 and n.input[2] in self.init else None
+            b = self.init[bn] if bn else np.zeros(l["params"]["cout"], np.float32)
+        elif op == "layernorm":
+            b = self.init[n.input[2]]
+        else:
+            b = np.zeros(l["params"]["cout4"], np.float32)
+        b = np.ascontiguousarray(np.asarray(b, np.float32))
+        return pad_vec(b, max(len(b), l["params"].get("cout", len(b))))
+
     # ---- pass over the graph -----------------------------------------------------------
     def run(self) -> None:
         graph_outputs = {o.name for o in self.g.output}
         for idx, n in enumerate(self.g.node):
             a = attrs_of(n)
             grp = group_of(n.name) if n.name else group_of(n.output[0])
-            mod = module_of(n.name) if n.name else module_of(n.output[0])
+            mod = strip_group_prefix(module_of(n.name)) if n.name else strip_group_prefix(module_of(n.output[0]))
             entry: dict = dict(idx=idx, graph=grp, module=mod, onnx_op=n.op_type,
                                op=n.op_type.lower(), name=n.name, inputs=list(n.input),
                                outputs=list(n.output), attrs=a,
@@ -400,7 +442,7 @@ class Exporter:
                                packed=[], dtype="fp32", params={}, shape="")
             if n.op_type == "Constant":
                 entry["kind"] = "constant"
-                self.export_constant(idx, n)
+                self.export_constant(idx, n, entry)
             elif n.op_type == "Conv":
                 self.conv_entry(idx, n, grp, mod, a, entry)
             elif n.op_type == "ConvTranspose":
@@ -453,13 +495,24 @@ class Exporter:
         assert grpn == 1, f"v2.1 export handles group==1 convs only, {n.name} has group={grpn}"
         is_head = mod.startswith("subband") or mod.startswith("conv_post") or n.name == "/dec/Conv"
         h16 = (grp == "dec" and not is_head)
-        item = FP16 if h16 else FP32
-        suffix = H16 if h16 else ""
+        split = (self.hilo == grp)
+        item = FP16 if (h16 and not split) else FP32
+        suffix = H16 if (h16 and not split) else ""
         b = self.init.get(n.input[2]) if len(n.input) > 2 and n.input[2] in self.init else np.zeros(Cout, np.float32)
-        wp = self.add(f"{grp}.{mod}.wp{suffix}", pack_conv(W), grp, item)
+        if split:
+            hi, lo = split_hilo(W)
+            wp = self.add(f"{grp}.{mod}.whi{H16}", pack_conv(hi), grp, FP16)
+            wl = self.add(f"{grp}.{mod}.wlo{H16}", pack_conv(lo), grp, FP16)
+            packed = [wp, wl]
+            dtype = "fp16_hilo"
+        else:
+            wp = self.add(f"{grp}.{mod}.wp{suffix}", pack_conv(W), grp, item)
+            packed = [wp]
+            dtype = "fp16" if h16 else "fp32"
         bp = self.add(f"{grp}.{mod}.b", pad_vec(np.asarray(b, np.float32), r4(Cout)), grp, FP32)
+        packed.append(bp)
         entry.update(op="conv1d", onnx=[wn] + ([n.input[2]] if len(n.input) > 2 else []),
-                     packed=[wp, bp], dtype="fp16" if h16 else "fp32",
+                     packed=packed, dtype=dtype,
                      packed_shape=list(self.tensors[-2][1].shape),
                      params=dict(kernel=K, stride=stride, pad=pad, dilation=dil, group=1,
                                  cin=Cin, cout=Cout, cout4=r4(Cout)),
@@ -624,6 +677,10 @@ class Exporter:
         self.meta["samples_per_frame"] = (self.meta["gen_istft_hop_size"] *
                                           np.prod([g[2] for g in geom], dtype=np.float64) *
                                           self.meta["gen_istft_hop_size"])
+        # per-record payload width, in record order (self-describing container: a reader that
+        # parses the record table can get the width from data instead of the name suffix)
+        widths = [float(isz) for _n, _a, isz in self.tensors] + [float(FP32)]
+        self.add("dtype.table", np.array(widths, np.float32), "meta", FP32)
 
 
 # --------------------------------------------------------------------------- gates
@@ -643,17 +700,18 @@ def gate_round_trip(ex: "Exporter", path: str, tol: float = 1e-6) -> list[dict]:
         if ref is None:
             continue
         rebuilt = rebuild(l, back)
-        isz = 2 if l["packed"][0].endswith(H16) else FP16 if False else 4
+        isz = 2 if l["packed"][0].endswith(H16) else FP32
         # fp16 storage can only represent fp16-rounded values, so the round-trip target is
-        # round_fp16(ONNX tensor); fp32 targets the ONNX tensor itself.
-        want = as_fp16_values(ref) if isz == 2 else ref
+        # round_fp16(ONNX tensor); fp32/HiLo targets the ONNX tensor itself.
+        want = as_fp16_values(ref) if (isz == 2 and l["dtype"] == "fp16") else ref
         dW = float(np.max(np.abs(rebuilt - want)))
         dB = 0.0
+        # biases are always stored fp32; compare them with the ONNX bias directly
         if l["op"] in ("conv1d", "conv_transpose1d", "layernorm", "matmul") and len(l["packed"]) > 1:
-            want_B = as_fp16_values(ex.bias_source(l)) if isz == 2 else ex.bias_source(l)
-            dB = float(np.max(np.abs(back[l["packed"][1]][0][: rebuilt.shape[-1] if l["op"] == "matmul" else
-                                                          l["params"].get("cout", rebuilt.shape[-1])) -
-                                want_B[: l["params"].get("cout", rebuilt.shape[-1])])))
+            n = int(l["params"].get("cout", l["params"].get("C", rebuilt.shape[-1])))
+            got_B = np.asarray(back[l["packed"][1]][0].reshape(-1)[:n], np.float32)
+            want_B = np.asarray(ex.bias_source(l), np.float32)[:n]
+            dB = float(np.max(np.abs(got_B - want_B)))
         if dW > tol or dB > tol:
             raise GateFailure(f"gate(a) round-trip: {refname} via {l['packed'][0]} "
                               f"max|W-rebuilt|={dW:.3e} max|bias-b|={dB:.3e} (tol {tol:g}) "
@@ -664,10 +722,13 @@ def gate_round_trip(ex: "Exporter", path: str, tol: float = 1e-6) -> list[dict]:
 
 
 def rebuild(l: dict, back: dict) -> np.ndarray:
-    """Rebuild the ONNX-shaped weight from packed container tensors."""
+    """Rebuild the ONNX-shaped weight from packed container tensors (HiLo entries sum)."""
     p = l["params"]
     if l["op"] == "conv1d":
-        return unpack_conv(back[l["packed"][0]][0])[: p["cout"]]
+        W = unpack_conv(back[l["packed"][0]][0])[: p["cout"]]
+        if l["dtype"] == "fp16_hilo" and len(l["packed"]) > 1:
+            W = W + unpack_conv(back[l["packed"][1]][0])[: p["cout"]]
+        return W
     if l["op"] == "conv_transpose1d":
         return unpack_convtranspose(back[l["packed"][0]][0], p["stride"], p["cout"], p["cin"], p["kernel"])
     if l["op"] == "matmul":
@@ -691,7 +752,7 @@ def gate_packing(ex: "Exporter", tol: float = 1e-5) -> list[str]:
         if d > tol:
             raise GateFailure(f"gate(a) conv packing: {c['name']} max|out-out_ref|={d:.3e}")
     for e in ex.convT:
-        T = 8
+        T = 9
         X = rng.standard_normal((e["Cin"], T)).astype(np.float32)
         Wp = pack_convtranspose(e["W"], e["s"], e["pad"])
         Bp = pad_vec(e["B"], r4(e["Cout"]))
@@ -737,7 +798,8 @@ def predict_budget(ex: "Exporter") -> dict:
         p, op = l.get("params", {}), l["op"]
         if op == "conv1d":
             isz = 2 if l["dtype"] == "fp16" else 4
-            pred[l["graph"]] += align64(p["cout4"] * p["cin"] * p["kernel"] * isz)
+            nwp = 2 if l["dtype"] == "fp16_hilo" else 1
+            pred[l["graph"]] += nwp * align64(p["cout4"] * p["cin"] * p["kernel"] * isz)
             pred[l["graph"]] += align64(p["cout4"] * 4)
         elif op == "conv_transpose1d":
             isz = 2 if l["dtype"] == "fp16" else 4
@@ -756,3 +818,153 @@ def predict_budget(ex: "Exporter") -> dict:
             a = ex.const[l["src"]]
             pred[l["graph"]] += align64(a.size * 4)
     return dict(pred)
+
+
+# --------------------------------------------------------------------------- main
+
+def budget_table(ex: "Exporter", predicted: dict, container_bytes: int, container_path: str) -> str:
+    rows = []
+    groups = sorted(set(list(ex.bytes_by_group) + list(predicted)))
+    tot_pred = tot_act = 0
+    for g in groups:
+        act = ex.bytes_by_group[g]
+        pred = predicted.get(g, 0)
+        tot_pred += pred
+        tot_act += act
+        fp16 = sum(align64(a.size * 2) for nm, a, isz in ex.tensors if isz == 2 and group_of_name(nm) == g)
+        fp32 = sum(align64(a.size * 4) for nm, a, isz in ex.tensors if isz == 4 and group_of_name(nm) == g)
+        rows.append((g, ex.params_by_group[g], fp32, fp16, pred, act))
+    lines = [f"{'group':7s} {'params':>11s} {'fp32 B':>11s} {'fp16 B':>11s} {'predicted':>11s} {'container':>11s}"]
+    for g, p, f32, f16, pred, act in rows:
+        lines.append(f"{g:7s} {p:11,d} {f32:11,d} {f16:11,d} {pred:11,d} {act:11,d}")
+    lines.append(f"{'TOTAL':7s} {sum(r[1] for r in rows):11,d} "
+                 f"{sum(r[2] for r in rows):11,d} {sum(r[3] for r in rows):11,d} "
+                 f"{tot_pred:11,d} {tot_act:11,d}")
+    dev = (tot_act - tot_pred) / tot_pred * 100.0
+    lines.append(f"container payload {container_bytes:,d} B; predicted dtype budget {tot_pred:,d} B; "
+                 f"deviation {dev:+.2f}% (gate 2%)")
+    if abs(dev) > 2.0:
+        raise GateFailure(f"gate(c) budget: container {container_bytes:,d} vs predicted {tot_pred:,d} "
+                          f"({dev:+.2f}%)")
+    return "\n".join(lines)
+
+
+STRIP_FIRST = {"enc_p", "dp", "flow", "dec", "emb_g"}
+
+
+def strip_group_prefix(module: str) -> str:
+    """Node names already carry the group as their first segment; drop it so packed names read
+    'dec.ups.0.wp', not 'dec.dec.ups.0.wp'."""
+    s = module.split(".")
+    return ".".join(s[1:]) if len(s) > 1 and s[0] in STRIP_FIRST else module
+
+
+def group_of_name(name: str) -> str:
+    return name.split(".")[0]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model", default="model/v21_mbistft_16k/primetts_v21_3voice.onnx")
+    ap.add_argument("--out", default="build/v21.ptk")
+    ap.add_argument("--layers-json", default="spec/v21_layers.json")
+    ap.add_argument("--probe-dir", default="tests/golden_v21/_probe")
+    ap.add_argument("--hilo", default="none", choices=["none", "enc", "dec"],
+                    help="split the chosen group's conv weights into fp16 hi+lo pairs (8-stream tier)")
+    args = ap.parse_args()
+
+    ex = Exporter(args.model, args.probe_dir, args.hilo)
+    ex.run()
+
+    print(f"model {args.model}: {len(ex.g.node)} nodes, {len(ex.init)} initializers "
+          f"({sum(int(a.size) for a in ex.init.values()):,d} params), {len(ex.const)} Constant nodes")
+
+    # gate (a) part 1: packed layouts reproduce ONNX conv / conv-transpose outputs
+    pack_lines = gate_packing(ex)
+    print(f"packing gate: {len(ex.conv)} conv1d + {len(ex.convT)} conv_transpose1d layouts checked "
+          f"against an ONNX reference (random [Cin][8] input):")
+    print("\n".join(pack_lines))
+
+    n_t, data_bytes = write_ptk(args.out, ex.tensors)
+    ex.container_bytes = data_bytes
+
+    # gate (a) part 2: rebuild every weight from the written container and compare with ONNX
+    rows = gate_round_trip(ex, args.out)
+    dws = [r["max_dW"] for r in rows]
+    dbs = [r["max_dB"] for r in rows]
+    print(f"round-trip gate: {len(rows)} weight entries rebuilt from {args.out}; "
+          f"max|W-rebuilt|={max(dws):.3e}  max|bias-b|={max(dbs):.3e}  (tol 1e-6)  OK")
+    per_op = collections.Counter(r["op"] for r in rows)
+    print("  entries per op:", dict(per_op))
+
+    cov = gate_coverage(ex)
+    print("coverage gate:", json.dumps(cov))
+
+    pred = predict_budget(ex)
+    print("dtype budget table (bytes per group):")
+    print(budget_table(ex, pred, data_bytes, args.out))
+
+    # spec json
+    op_counts = collections.Counter(l["onnx_op"] for l in ex.layers)
+    dt_counts = collections.Counter(l["dtype"] for l in ex.layers if l["packed"])
+    doc = {
+        "model": os.path.relpath(args.model),
+        "container": os.path.relpath(args.out),
+        "container_format": {
+            "magic": "0x50544B31", "version": VERSION, "record": "<64si4x6qqq",
+            "alignment": 64,
+            "payload_width": "fp32 (4 B) default; tensors named '#h'-suffixed carry fp16 (2 B); "
+                             "'dtype.table' (fp32, one itemsize per record, record order)",
+            "note": "the v1 reader (runtime/py/pt.py, runtime/src/weights.c) assumes 4 B payloads; "
+                    "the runtime lane must honour the per-record width (dtype.table) for v2.1",
+        },
+        "meta": ex.meta,
+        "counts": dict(nodes=len(ex.g.node), initializers=len(ex.init),
+                       initializer_params=int(sum(int(a.size) for a in ex.init.values())),
+                       constant_nodes=len(ex.const), constant_params=int(sum(a.size for a in ex.const.values())),
+                       tensors=n_t, payload_bytes=data_bytes, layers=len(ex.layers),
+                       nodes_listed=len(ex.nodes), weight_entries=len(rows)),
+        "op_counts": dict(op_counts.most_common()),
+        "dtype_counts": dict(dt_counts),
+        "bytes_by_group": dict(ex.bytes_by_group),
+        "params_by_group": dict(ex.params_by_group),
+        "predicted_bytes_by_group": dict(pred),
+        "notes": [
+            "dtype policy (measured, docs/v21_plan.md): fp32 encoder/flow/dp conv weights, fp16 decoder "
+            "conv weights (measured 67.4 dB for that set), fp16 activations are free (87.9 dB); "
+            "embeddings, LayerNorm, Softmax, flow scales and the iSTFT head stay fp32.",
+            "fp16 payload tensors are the decoder conv_pre/ups./resblocks. weights; their values are "
+            "exactly round_fp16(ONNX weight) - gate (a) checks against that reference.",
+            "v2.1 activations are [N,C,T] for convs and [N,T,C] around the encoder attention/LayerNorm; "
+            "the Transpose entries in `layers` are the boundaries the runtime folds into its own layout.",
+            "26 MatMul nodes have no weights (attention scores/values, iSTFT cos-sin basis): the runtime "
+            "must run them as real GEMMs, they are not K=1 convs like v1's linears.",
+            "The iSTFT head is: subband_conv_post -> [4 subbands, 16 bins] magnitude/phase -> Exp/Sin/Cos "
+            "-> Einsum bkt,kn->bnt with a 16x16 constant basis -> three stride-4 ConvTransposes "
+            "(two of them constant delta kernels = zero-insert upsamplers, one with a ScatterND-built "
+            "4x4x4 kernel) -> Pad -> the 63-tap [1,4,63] lowpass to `wav`.",
+            "/dec/ConvTranspose_2's kernel is computed by the graph (ScatterND of 1/4 into a 4x4x4 "
+            "zero tensor, x4); it is exported from a probe dump, see dynamic_weight().",
+            "zh-TW front-end coverage: known gap, not measured (g2pw is not ported); this export covers "
+            "the phoneme-id graph only.",
+        ],
+        "constants": ex.constants,
+        "layers": ex.layers,
+        "nodes": ex.nodes,
+    }
+    os.makedirs(os.path.dirname(args.layers_json) or ".", exist_ok=True)
+    with open(args.layers_json, "w") as f:
+        json.dump(doc, f, indent=1, default=str)
+    print(f"wrote {args.out}: {n_t} tensors, {data_bytes/1e6:.2f} MB payload "
+          f"({sum(a.size for _n, a, _i in ex.tensors):,d} elements); "
+          f"{len(ex.layers)} layer entries + {len(ex.nodes)} node records -> {args.layers_json} "
+          f"({os.path.getsize(args.layers_json)/1e6:.2f} MB)")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except GateFailure as e:
+        print(f"GATE FAILED: {e}")
+        raise SystemExit(2)
