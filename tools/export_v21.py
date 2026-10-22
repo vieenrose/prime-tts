@@ -56,6 +56,7 @@ kernel, built by ScatterND in the graph).  It is read from a tools/probe_shapes.
 from __future__ import annotations
 
 import argparse
+import math
 import collections
 import json
 import os
@@ -334,6 +335,10 @@ class Exporter:
         self.m = onnx.load(model_path)
         self.g = self.m.graph
         self.init = {i.name: numpy_helper.to_array(i) for i in self.g.initializer}
+        self.producer = {o: n for n in self.g.node for o in n.output}
+        self.folded: list[str] = []      # graph-computed weights folded to constants
+        self._fold_cache: dict[str, np.ndarray] = {}
+        self.gate_e: list[str] = []      # fold-vs-ONNXRuntime evidence lines
         self.const: dict[str, np.ndarray] = {}
         self.const_node: dict[str, int] = {}
         for idx, n in enumerate(self.g.node):
@@ -356,16 +361,191 @@ class Exporter:
         self.params_by_group[group] += a.size
         return name
 
+    # ---- constant folding of graph-computed weights -------------------------------------------
+    # 30 of v2.1's 155 Conv/ConvTranspose/MatMul/Gemm nodes take their weight from a graph VALUE
+    # whose producers are Reshape/Transpose/Unsqueeze/Constant/Mul - all constant-foldable, because
+    # none of them depend on the audio/text inputs.  Folding them at export time is what makes the
+    # runtime dependency-free: the weight becomes a container tensor.  The probe dump is used as
+    # GROUND TRUTH for the fold (gate e), never as the source - a dump value is one execution's
+    # activation, and only matches a weight when the weight really is input-independent.
+    FOLD_OPS = ("Constant", "Reshape", "Transpose", "Unsqueeze", "Squeeze", "Mul", "Add", "Sub",
+                "Div", "Cast", "Concat", "Slice", "Gather", "Neg", "Exp", "Sqrt", "Abs", "MatMul",
+                "Softmax", "ScatterND", "Tile", "Expand", "Where", "Clip", "Pad", "Relu", "Sigmoid",
+                "Tanh", "Softplus", "Erf", "ReduceSum", "Mean", "Gemm", "Shape", "Identity",
+                "Equal", "Less", "Greater", "LessOrEqual", "GreaterOrEqual", "Not", "And", "Or",
+                "Xor", "Flatten", "Range", "CumSum", "Max", "Min", "Sum", "Reciprocal", "Pow",
+                "Log", "Floor", "Ceil", "Round", "Sign", "ConstantOfShape", "EyeLike")
+
+    def fold(self, name: str, _seen: frozenset = frozenset()) -> np.ndarray:
+        """Evaluate a value of the graph as a constant, or raise GateFailure.  Memoized: shared
+        sub-DAGs of constants are evaluated once."""
+        if name in self._fold_cache:
+            return self._fold_cache[name]
+        v = self._fold(name, _seen)
+        self._fold_cache[name] = v
+        return v
+
+    def _fold(self, name: str, _seen: frozenset) -> np.ndarray:
+        if name in self.init:
+            return np.asarray(self.init[name], np.float32)
+        if name in _seen:
+            raise GateFailure(f"cycle folding weight {name}")
+        node = self.producer.get(name)
+        if node is None:
+            raise GateFailure(f"weight {name} is a graph INPUT - not constant-foldable")
+        a = attrs_of(node)
+        op = node.op_type
+        if op not in self.FOLD_OPS:
+            raise GateFailure(f"weight {name}: unsupported fold op {op} ({node.name})")
+        ins = [self.fold(i, _seen | {name}) for i in node.input if i and (i in self.init or i in self.producer)]
+        if op == "Constant":
+            return np.asarray(numpy_helper.to_array(node.attribute[0].t), np.float32)
+        if op == "Reshape":
+            shape = [int(v) for v in np.asarray(ins[1]).reshape(-1)]
+            return np.reshape(ins[0], shape)
+        if op == "Transpose":
+            return np.transpose(ins[0], a.get("perm", None))
+        if op in ("Unsqueeze", "Squeeze"):
+            axes = tuple(int(v) for v in (np.asarray(ins[1]).reshape(-1) if len(ins) > 1
+                                          else a.get("axes", [])))
+            return (np.expand_dims(ins[0], axes) if op == "Unsqueeze" else np.squeeze(ins[0], axes))
+        if op in ("Mul", "Add", "Sub", "Div"):
+            f = {"Mul": np.multiply, "Add": np.add, "Sub": np.subtract, "Div": np.divide}[op]
+            return f(ins[0], ins[1])
+        if op == "Cast":
+            return ins[0].astype(onnx.helper.tensor_dtype_to_np_dtype(int(a["to"])))
+        if op == "Concat":
+            return np.concatenate(ins, int(a["axis"]))
+        if op == "Slice":
+            st, en = list(np.asarray(ins[1]).astype(int)), list(np.asarray(ins[2]).astype(int))
+            ax = list(np.asarray(ins[3]).astype(int)) if len(ins) > 3 else list(range(len(st)))
+            sp = list(np.asarray(ins[4]).astype(int)) if len(ins) > 4 else [1] * len(st)
+            sl = [slice(0, None, 1)] * ins[0].ndim
+            for a_, s_, e_, p_ in zip(ax, st, en, sp):
+                sl[a_] = slice(s_, e_, p_)
+            return ins[0][tuple(sl)]
+        if op == "Gather":
+            return np.take(ins[0], np.asarray(ins[1]).astype(int), axis=int(a["axis"]))
+        if op == "MatMul":
+            return np.matmul(ins[0], ins[1])
+        if op == "Gemm":
+            A, B = ins[0], ins[1]
+            if int(a.get("transB", 0)):
+                B = B.T
+            if int(a.get("transA", 0)):
+                A = A.T
+            out = float(a.get("alpha", 1.0)) * (A @ B)
+            if len(ins) > 2:
+                out = out + float(a.get("beta", 1.0)) * ins[2]
+            return out
+        if op == "ScatterND":
+            out = np.array(ins[0], np.float32, copy=True)
+            ix = np.asarray(ins[1]).astype(np.int64)
+            up = np.asarray(ins[2], np.float32)
+            if ix.ndim == 1:                        # one update, index path of length r
+                out[tuple(int(v) for v in ix)] = up
+                return out
+            n = int(np.prod(ix.shape[:-1]))          # [N..., r] -> N updates, each an r-path
+            paths = ix.reshape(n, ix.shape[-1])
+            vals = up.reshape(n, *up.shape[ix.ndim - 1:])
+            for i in range(n):
+                out[tuple(int(v) for v in paths[i])] = vals[i]
+            return out
+        if op == "Tile":
+            return np.tile(ins[0], [int(v) for v in np.asarray(ins[1]).astype(int)])
+        if op == "Expand":
+            return np.broadcast_to(ins[0], [int(v) for v in np.asarray(ins[1]).astype(int)]).copy()
+        if op == "Where":
+            return np.where(ins[0] != 0, ins[1], ins[2])
+        if op == "Clip":
+            lo = float(ins[1].reshape(-1)[0]) if len(ins) > 1 and ins[1].size else None
+            hi = float(ins[2].reshape(-1)[0]) if len(ins) > 2 and ins[2].size else None
+            return np.clip(ins[0], lo, hi)
+        if op == "Pad":
+            pads = [int(v) for v in np.asarray(ins[1]).astype(int).reshape(-1)]
+            k = len(pads) // 2
+            return np.pad(ins[0], [(pads[i], pads[i + k]) for i in range(k)], mode="constant")
+        if op in ("Relu", "Sigmoid", "Tanh", "Softplus", "Erf"):
+            f = {"Relu": lambda x: np.maximum(x, 0), "Sigmoid": lambda x: 1.0 / (1.0 + np.exp(-x)),
+                 "Tanh": np.tanh, "Softplus": lambda x: np.log1p(np.exp(-np.abs(x))) + np.maximum(x, 0),
+                 "Erf": lambda x: np.vectorize(math.erf)(x).astype(np.float32)}[op]
+            return f(ins[0])
+        if op == "ReduceSum":
+            ax = tuple(int(v) for v in np.asarray(ins[1]).astype(int)) if len(ins) > 1 \
+                 else tuple(int(v) for v in a.get("axes", []))
+            return np.sum(ins[0], axis=ax, keepdims=bool(int(a.get("keepdims", 1))))
+        if op == "Mean":
+            ax = tuple(int(v) for v in a.get("axes", []))
+            return np.mean(ins[0], axis=ax, keepdims=bool(int(a.get("keepdims", 1))))
+        if op == "Shape":
+            return np.array(ins[0].shape, np.float32)
+        if op == "ConstantOfShape":
+            shape = tuple(int(v) for v in np.asarray(ins[0]).astype(int).reshape(-1))
+            v = numpy_helper.to_array(a["value"]) if "value" in a else np.array(0.0, np.float32)
+            return np.full(shape, v, np.float32)
+        if op == "EyeLike":
+            m = int(ins[0].shape[0])
+            k = int(a.get("k", 0))
+            dt = onnx.helper.tensor_dtype_to_np_dtype(int(a["dtype"])) if "dtype" in a else np.float32
+            return np.eye(m, dtype=dt)
+        if op == "Identity":
+            return ins[0]
+        if op in ("Equal", "Less", "Greater", "LessOrEqual", "GreaterOrEqual"):
+            f = {"Equal": np.equal, "Less": np.less, "Greater": np.greater,
+                 "LessOrEqual": np.less_equal, "GreaterOrEqual": np.greater_equal}[op]
+            return f(ins[0], ins[1]).astype(np.float32)
+        if op in ("Not", "And", "Or", "Xor"):
+            f = {"Not": np.logical_not, "And": np.logical_and, "Or": np.logical_or,
+                 "Xor": np.logical_xor}[op]
+            args = [x.astype(bool) for x in ins]
+            return (args[0] if op == "Not" else f(args[0], args[1])).astype(np.float32)
+        if op in ("Max", "Min", "Sum"):
+            f = {"Max": np.maximum, "Min": np.minimum, "Sum": np.add}[op]
+            out = ins[0]
+            for x in ins[1:]:
+                out = f(out, x)
+            return out
+        if op == "Flatten":
+            ax = int(a.get("axis", 1))
+            return ins[0].reshape(int(np.prod(ins[0].shape[:ax])), -1)
+        if op == "Range":
+            return np.arange(float(ins[0]), float(ins[1]), float(ins[2]), dtype=np.float32)
+        if op == "CumSum":
+            return np.cumsum(ins[0], axis=int(np.asarray(ins[1]).reshape(-1)[0]) if len(ins) > 1 else 0,
+                             dtype=np.float32)
+        if op in ("Reciprocal", "Pow", "Log", "Floor", "Ceil", "Round", "Sign"):
+            f = {"Reciprocal": lambda x: 1.0 / x, "Pow": np.power, "Log": np.log,
+                 "Floor": np.floor, "Ceil": np.ceil, "Round": np.round, "Sign": np.sign}[op]
+            return f(*ins)
+        if op == "Softmax":
+            ax = int(a.get("axis", -1))
+            m = ins[0].max(axis=ax, keepdims=True)
+            e = np.exp(ins[0] - m)
+            return e / e.sum(axis=ax, keepdims=True)
+        return {"Neg": np.negative, "Exp": np.exp, "Sqrt": np.sqrt, "Abs": np.abs,
+                "Softmax": lambda x: np.exp(x - x.max()) / np.exp(x - x.max()).sum()}[op](ins[0])
+
     def dynamic_weight(self, onnx_name: str) -> np.ndarray:
-        """Weight v2.1 computes at run time: read it from a probe dump (probe_shapes naming)."""
-        if not self.probe_dir:
-            raise GateFailure(
-                f"weight {onnx_name} is computed by the graph, not a constant: pass --probe-dir "
-                f"(a tools/probe_shapes.py --dump-dir) so it can be exported")
-        f = os.path.join(self.probe_dir, onnx_name.replace("/", "_") + ".npy")
-        if not os.path.exists(f):
-            raise GateFailure(f"dynamic weight {onnx_name} not found in probe dump {f}")
-        return np.ascontiguousarray(np.load(f), np.float32)
+        """Weight v2.1 computes at run time: fold it from constants, and (when a probe dump exists)
+        check the fold against ONNXRuntime's own value for that tensor."""
+        w = np.ascontiguousarray(self.fold(onnx_name), np.float32)
+        self.folded.append(onnx_name)
+        if self.probe_dir:
+            f = os.path.join(self.probe_dir, onnx_name.replace("/", "_") + ".npy")
+            if os.path.exists(f):
+                d = np.ascontiguousarray(np.load(f), np.float32)
+                if d.shape != w.shape:
+                    raise GateFailure(f"folded weight {onnx_name} shape {w.shape} != probe dump "
+                                      f"{d.shape} (the value is NOT input-independent)")
+                dev = float(np.max(np.abs(d - w)))
+                if dev > 1e-5:
+                    raise GateFailure(f"GATE FAILED (e) fold vs ONNXRuntime: {onnx_name} "
+                                      f"max|folded-dumped|={dev:.3e}")
+                self.gate_e.append(f"  fold {onnx_name:34s} shape={str(w.shape):22s} "
+                                   f"max|fold-ORT|={dev:.2e}  OK")
+            else:
+                self.gate_e.append(f"  fold {onnx_name:34s} shape={str(w.shape):22s} (no dump to compare)")
+        return w
 
     def epilogue(self, node) -> str:
         """Consumer ops immediately after this node's output (what the runtime should fuse)."""
@@ -743,14 +923,34 @@ def gate_packing(ex: "Exporter", tol: float = 1e-5) -> list[str]:
     rng = np.random.default_rng(7)
     for c in ex.conv:
         T = 8
+        # A Conv whose ONNX bias input is a longer tensor than its Cout is a FUSED ADD bias (v2.1 has
+        # 32 such convs); the export path for those is the Add epilogue, not the conv bias, so the
+        # packing gate compares against a zero bias and reports the shape mismatch in the line.
+        nb = int(np.asarray(c["B"]).reshape(-1).shape[0])
+        bias = c["B"] if nb == c["Cout"] else np.zeros(c["Cout"], np.float32)
+        note = "" if nb == c["Cout"] else f" [bias input is {nb} long -> fused-Add, gate uses 0 bias]"
         X = rng.standard_normal((c["Cin"], T)).astype(np.float32)
         Wp = np.asarray(pack_conv(c["W"]), np.float32)
-        want = conv1d_ref(X, c["W"], c["B"], c["stride"], c["pad"], c["dilation"])
-        got = conv1d_ref(X, unpack_conv(Wp)[: c["Cout"]], pad_vec(c["B"], r4(c["Cout"]))[: c["Cout"]],
+        want = conv1d_ref(X, c["W"], bias, c["stride"], c["pad"], c["dilation"])
+        got = conv1d_ref(X, unpack_conv(Wp)[: c["Cout"]], pad_vec(bias, r4(c["Cout"]))[: c["Cout"]],
                          c["stride"], c["pad"], c["dilation"])
         d = float(np.max(np.abs(want - got)))
         if d > tol:
             raise GateFailure(f"gate(a) conv packing: {c['name']} max|out-out_ref|={d:.3e}")
+        self_note = note
+    for e in ex.convT:
+        T = 9
+        X = rng.standard_normal((e["Cin"], T)).astype(np.float32)
+        Wp = pack_convtranspose(e["W"], e["s"], e["pad"])
+        Bp = pad_vec(e["B"], r4(e["Cout"]))
+        want = conv_transpose1d_ref(X, e["W"], e["B"], e["s"], e["pad"])
+        got = conv_transpose1d_packed(X, Wp, Bp, e["s"], e["pad"], e["Cout"], e["K"])
+        d = float(np.max(np.abs(want - got)))
+        if d > tol:
+            raise GateFailure(f"gate(a) convT packing: {e['name']} max|out-out_ref|={d:.3e} "
+                              f"(s={e['s']} K={e['K']} pad={e['pad']})")
+        out.append(f"  conv packing {c['name']:30s} Cin={c['Cin']:4d} Cout={c['Cout']:4d} "
+                   f"s={c['stride']} K={c['K']} pad={c['pad']} max|out-out_ref|={d:.2e}{self_note}  OK")
     for e in ex.convT:
         T = 9
         X = rng.standard_normal((e["Cin"], T)).astype(np.float32)
@@ -878,6 +1078,11 @@ def main() -> int:
 
     print(f"model {args.model}: {len(ex.g.node)} nodes, {len(ex.init)} initializers "
           f"({sum(int(a.size) for a in ex.init.values()):,d} params), {len(ex.const)} Constant nodes")
+
+    # gate (e): graph-computed weights folded to constants, each checked against ONNXRuntime's own
+    # value for that tensor from the probe dump (the fold must be input-independent to match).
+    print(f"gate (e) constant folding: {len(ex.folded)} graph-computed weight(s) folded")
+    print("\n".join(ex.gate_e))
 
     # gate (a) part 1: packed layouts reproduce ONNX conv / conv-transpose outputs
     pack_lines = gate_packing(ex)
