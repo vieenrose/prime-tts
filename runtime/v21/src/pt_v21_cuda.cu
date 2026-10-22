@@ -58,6 +58,7 @@ static int gpu_prof(void) {
  * steady state has no cudaMalloc/cudaFree at all (measured: 222 ms alloc + 65 ms free per T81 run,
  * and the per-call weight copy is inside the 153 ms copy split). */
 static void **g_wdev;      /* ctab index -> device pointer, read-only across streams */
+static void *g_wbase;      /* single pooled allocation backing every resident record */
 static int g_wdev_n, g_wref;
 
 static size_t g_wdev_bytes;
@@ -88,21 +89,46 @@ static int weights_upload_locked(pt_ctx *c, int verbose) {
     return -1;
   }
   g_wdev_n = n;
+  /* Pool every record into one device allocation: 336 cudaMalloc calls cost ~280 ms of startup
+   * (measured) and serialize across streams. A single allocation with 256-byte sub-alignment keeps
+   * the same per-record pointers the ctab hands out, so kernels and refcounting are unchanged. */
+  size_t *offs = (size_t *) calloc((size_t) n, sizeof(size_t));
+  if (!offs) {
+    g_wref = 0;
+    return -1;
+  }
   size_t total = 0;
+  for (int i = 0; i < n; i++) {
+    const void *h = pt_v21_cont(c, i);
+    size_t nb = (size_t) pt_v21_cont_bytes(c, i);
+    if (!h || nb == 0) {
+      offs[i] = 0;
+      continue;
+    }
+    offs[i] = total;
+    total += (nb + 255) & ~(size_t) 255;
+    g_wdev_bytes += nb;
+  }
+  if (cudaMalloc(&g_wbase, total ? total : 1) != cudaSuccess) {
+    fprintf(stderr, "pt_v21 cuda: pooled weight allocation failed (%zu B)\n", total);
+    free(offs);
+    g_wref = 0;
+    return -1;
+  }
   for (int i = 0; i < n; i++) {
     const void *h = pt_v21_cont(c, i);
     size_t nb = (size_t) pt_v21_cont_bytes(c, i);
     if (!h || nb == 0)
       continue;
-    g_wdev_bytes += nb;
-    if (cudaMalloc(&g_wdev[i], nb) != cudaSuccess ||
-        cudaMemcpy(g_wdev[i], h, nb, cudaMemcpyHostToDevice) != cudaSuccess) {
+    g_wdev[i] = (char *) g_wbase + offs[i];
+    if (cudaMemcpy(g_wdev[i], h, nb, cudaMemcpyHostToDevice) != cudaSuccess) {
       fprintf(stderr, "pt_v21 cuda: weight upload failed for ctab %d (%zu B)\n", i, nb);
+      free(offs);
       g_wref = 0;
       return -1;
     }
-    total += nb;
   }
+  free(offs);
   if (verbose)
     fprintf(stderr, "pt_v21 cuda: %d container records resident on the GPU (%.1f MiB)\n", n,
             (double) total / 1048576.0);
@@ -128,9 +154,9 @@ static void *weight_ctab(int idx) {
 static void weights_release(void) {
   pthread_mutex_lock(&g_wlock);
   if (--g_wref <= 0) {
-    for (int i = 0; i < g_wdev_n; i++)
-      if (g_wdev[i])
-        cudaFree(g_wdev[i]);
+    if (g_wbase)
+      cudaFree(g_wbase);
+    g_wbase = NULL;
     free(g_wdev);
     g_wdev = NULL;
     g_wdev_n = 0;

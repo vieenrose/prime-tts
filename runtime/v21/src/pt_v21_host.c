@@ -1905,7 +1905,7 @@ const char *pt_v21_ekind_report(pt_ctx *c, char *buf, int bufsz) {
     int o = order[k];
     if (c->t_ekind[o] < 5e-5)
       break;
-    if (k >= 12)
+    if (k >= 30)
       break;
     off += snprintf(buf + off, bufsz - off, " %s=%.1f(%ld)", names[o], c->t_ekind[o] * 1000.0,
                     c->n_ekind[o]);
