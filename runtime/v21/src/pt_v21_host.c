@@ -365,9 +365,37 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
    * arithmetic, where a last-ulp difference could flip an integer length. */
   static int ff = -1;
   if (ff < 0) ff = getenv("PT_V21_F32MATH") ? atoi(getenv("PT_V21_F32MATH")) : 1;
+  static int ft = -1;
+  if (ft < 0) ft = getenv("PT_V21_FASTTRIG") ? atoi(getenv("PT_V21_FASTTRIG")) : 1;
   if (!g && ff && n >= 4096 && (op == PT_EXP || op == PT_TANH || op == PT_SIGMOID)) {
     if (op == PT_EXP)
       for (int64_t i = 0; i < n; i++) o[i] = expf(a[i]);
+    else if (ft && op == PT_TANH)
+      for (int64_t i = 0; i < n; i++) {
+        float x = a[i];
+        if (x < -4.0f) o[i] = -1.0f;
+        else if (x > 4.0f) o[i] = 1.0f;
+        else {
+          float x2 = x * x;
+          float num = x * (135135.0f + x2 * (17325.0f + x2 * (378.0f + x2)));
+          float den = 135135.0f + x2 * (62370.0f + x2 * (3150.0f + x2 * 28.0f));
+          o[i] = num / den;
+        }
+      }
+    else if (ft && op == PT_SIGMOID)
+      for (int64_t i = 0; i < n; i++) {
+        float x = a[i] * 0.5f;
+        float t;
+        if (x < -4.0f) t = -1.0f;
+        else if (x > 4.0f) t = 1.0f;
+        else {
+          float x2 = x * x;
+          float num = x * (135135.0f + x2 * (17325.0f + x2 * (378.0f + x2)));
+          float den = 135135.0f + x2 * (62370.0f + x2 * (3150.0f + x2 * 28.0f));
+          t = num / den;
+        }
+        o[i] = 0.5f * (t + 1.0f);
+      }
     else if (op == PT_TANH)
       for (int64_t i = 0; i < n; i++) o[i] = tanhf(a[i]);
     else
