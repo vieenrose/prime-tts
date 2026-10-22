@@ -60,3 +60,19 @@ tokens x $12/1M = $0.0067 per turn, which is more than the entire native audio-t
   (`你 好 ， 欢 迎 ...`) in one measured call - it needs a formatting guard before TTS.
 - Live native audio: Google lists 24-70 languages for Live voice output but the response language
   cannot be pinned; zh-TW output quality is the thing the local PrimeTTS model replaces.
+
+## Response modality probe (re-run 2026-10-22, gemini-3.8-live, v1beta, SDK 1.x)
+
+| session config | result |
+|---|---|
+| `response_modalities: ["AUDIO"]` | accepted, model streams audio |
+| `response_modalities: ["TEXT"]` | **APIError 1007: "The requested combination of response modalities (TEXT) is not supported by the model."** |
+| `response_modalities: ["AUDIO","TEXT"]` | **APIError 1007: "(AUDIO, TEXT) is not supported by the model."** |
+| `["TEXT"] + output_audio_transcription` | APIError 1007 (same) |
+| `gemini-2.5-live-preview-rt-03-11`, `gemini-2.0-flash-live-001` | APIError 1008: not found / not supported for bidiGenerateContent on this API version |
+
+`types.Modality` offers TEXT/IMAGE/AUDIO/VIDEO, so the *schema* allows TEXT; the model refuses it.
+The way to get the model's text out of `gemini-3.8-live` is `output_transcription` on the audio
+turn (measured working in `server/live_asr.py`) - the audio is still generated and billed.
+So "audio in, text out" is available as a *by-product*, not as a mode; the cost table above
+(561 discarded audio-out tokens = 91% of that leg) is the consequence.

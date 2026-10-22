@@ -124,9 +124,12 @@ def tag(name):
 
 
 def main():
+    global MD
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="tests/golden")
+    ap.add_argument("--model-dir", default=MD)
     args = ap.parse_args()
+    MD = args.model_dir
     meta = json.load(open(f"{MD}/meta.json"))
     so = ort.SessionOptions(); so.intra_op_num_threads = 4
     sA = ort.InferenceSession(f"{MD}/acoustic_encoder.onnx", so, providers=["CPUExecutionProvider"])

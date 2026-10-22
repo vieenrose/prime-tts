@@ -1,0 +1,5629 @@
+{
+ "model": "PrimeTTS v1b_16k",
+ "container": "v1b16k.ptk",
+ "meta": {
+  "sample_rate": 16000,
+  "abs_frame_bins": 512,
+  "max_frames": 1000,
+  "hop_size": 256,
+  "n_mels": 80,
+  "use_frame_pitch": true,
+  "use_frame_pitch_refiner": true
+ },
+ "notes": [
+  "All activations are channel-major [C][T] (time contiguous); ONNX MatMuls over [T][C] become K=1 convs.",
+  "Cout is zero-padded to a multiple of 4 everywhere; padded channels stay exactly 0 through every op.",
+  "frame_mask / token mask are all-ones in this pipeline (host_regulate: np.ones), so the mask multiplies are identities.",
+  "Encoder/decoder GLU dwconv: groups=168, 336 outputs: out o reads in o//2; glu = out[:168] * sigmoid(out[168:]).",
+  "Vocoder stage output = (rb0 + rb1 + rb2) / 3, each rb = 3 x [x += conv2(snake(conv1(snake(x))))]."
+ ],
+ "layers": [
+  {
+   "graph": "enc",
+   "module": "phone",
+   "op": "embedding",
+   "onnx": [
+    "m.phone.weight"
+   ],
+   "shape_table": [
+    256,
+    168
+   ],
+   "packed": [
+    "enc.phone.emb"
+   ]
+  },
+  {
+   "graph": "enc",
+   "module": "tone",
+   "op": "embedding",
+   "onnx": [
+    "m.tone.weight"
+   ],
+   "shape_table": [
+    16,
+    168
+   ],
+   "packed": [
+    "enc.tone.emb"
+   ]
+  },
+  {
+   "graph": "enc",
+   "module": "lang",
+   "op": "embedding",
+   "onnx": [
+    "m.lang.weight"
+   ],
+   "shape_table": [
+    4,
+    168
+   ],
+   "packed": [
+    "enc.lang.emb"
+   ]
+  },
+  {
+   "graph": "enc",
+   "module": "speaker",
+   "op": "embedding",
+   "onnx": [
+    "m.speaker.weight"
+   ],
+   "shape_table": [
+    2,
+    64
+   ],
+   "packed": [
+    "enc.speaker.emb"
+   ]
+  },
+  {
+   "graph": "enc",
+   "module": "speaker_proj",
+   "op": "linear",
+   "onnx": [
+    "m.speaker_proj.weight",
+    "m.speaker_proj.bias"
+   ],
+   "W_shape": [
+    64,
+    168
+   ],
+   "packed": [
+    "enc.speaker_proj.wp",
+    "enc.speaker_proj.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.0.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.0.norm1.weight",
+    "m.encoder.0.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.0.norm1.g",
+    "enc.encoder.0.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.0.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.encoder.0.depth.weight",
+    "m.encoder.0.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "enc.encoder.0.depth.dw",
+    "enc.encoder.0.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.0.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.encoder.0.point.weight",
+    "m.encoder.0.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "enc.encoder.0.point.wp",
+    "enc.encoder.0.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.0.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.0.norm2.weight",
+    "m.encoder.0.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.0.norm2.g",
+    "enc.encoder.0.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.0.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_483",
+    "m.encoder.0.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    672
+   ],
+   "packed": [
+    "enc.encoder.0.ff.0.wp",
+    "enc.encoder.0.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.0.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_484",
+    "m.encoder.0.ff.3.bias"
+   ],
+   "W_shape": [
+    672,
+    168
+   ],
+   "packed": [
+    "enc.encoder.0.ff.3.wp",
+    "enc.encoder.0.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.1.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.1.norm1.weight",
+    "m.encoder.1.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.1.norm1.g",
+    "enc.encoder.1.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.1.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.encoder.1.depth.weight",
+    "m.encoder.1.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "enc.encoder.1.depth.dw",
+    "enc.encoder.1.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.1.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.encoder.1.point.weight",
+    "m.encoder.1.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "enc.encoder.1.point.wp",
+    "enc.encoder.1.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.1.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.1.norm2.weight",
+    "m.encoder.1.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.1.norm2.g",
+    "enc.encoder.1.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.1.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_485",
+    "m.encoder.1.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    672
+   ],
+   "packed": [
+    "enc.encoder.1.ff.0.wp",
+    "enc.encoder.1.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.1.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_486",
+    "m.encoder.1.ff.3.bias"
+   ],
+   "W_shape": [
+    672,
+    168
+   ],
+   "packed": [
+    "enc.encoder.1.ff.3.wp",
+    "enc.encoder.1.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.2.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.2.norm1.weight",
+    "m.encoder.2.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.2.norm1.g",
+    "enc.encoder.2.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.2.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.encoder.2.depth.weight",
+    "m.encoder.2.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "enc.encoder.2.depth.dw",
+    "enc.encoder.2.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.2.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.encoder.2.point.weight",
+    "m.encoder.2.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "enc.encoder.2.point.wp",
+    "enc.encoder.2.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.2.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.2.norm2.weight",
+    "m.encoder.2.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.2.norm2.g",
+    "enc.encoder.2.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.2.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_487",
+    "m.encoder.2.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    672
+   ],
+   "packed": [
+    "enc.encoder.2.ff.0.wp",
+    "enc.encoder.2.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.2.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_488",
+    "m.encoder.2.ff.3.bias"
+   ],
+   "W_shape": [
+    672,
+    168
+   ],
+   "packed": [
+    "enc.encoder.2.ff.3.wp",
+    "enc.encoder.2.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.3.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.3.norm1.weight",
+    "m.encoder.3.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.3.norm1.g",
+    "enc.encoder.3.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.3.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.encoder.3.depth.weight",
+    "m.encoder.3.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "enc.encoder.3.depth.dw",
+    "enc.encoder.3.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.3.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.encoder.3.point.weight",
+    "m.encoder.3.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "enc.encoder.3.point.wp",
+    "enc.encoder.3.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.3.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.3.norm2.weight",
+    "m.encoder.3.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.3.norm2.g",
+    "enc.encoder.3.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.3.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_489",
+    "m.encoder.3.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    672
+   ],
+   "packed": [
+    "enc.encoder.3.ff.0.wp",
+    "enc.encoder.3.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.3.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_490",
+    "m.encoder.3.ff.3.bias"
+   ],
+   "W_shape": [
+    672,
+    168
+   ],
+   "packed": [
+    "enc.encoder.3.ff.3.wp",
+    "enc.encoder.3.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.4.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.4.norm1.weight",
+    "m.encoder.4.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.4.norm1.g",
+    "enc.encoder.4.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.4.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.encoder.4.depth.weight",
+    "m.encoder.4.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "enc.encoder.4.depth.dw",
+    "enc.encoder.4.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.4.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.encoder.4.point.weight",
+    "m.encoder.4.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "enc.encoder.4.point.wp",
+    "enc.encoder.4.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.4.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.encoder.4.norm2.weight",
+    "m.encoder.4.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.encoder.4.norm2.g",
+    "enc.encoder.4.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.4.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_491",
+    "m.encoder.4.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    672
+   ],
+   "packed": [
+    "enc.encoder.4.ff.0.wp",
+    "enc.encoder.4.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "encoder.4.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_492",
+    "m.encoder.4.ff.3.bias"
+   ],
+   "W_shape": [
+    672,
+    168
+   ],
+   "packed": [
+    "enc.encoder.4.ff.3.wp",
+    "enc.encoder.4.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "duration_head.0",
+   "op": "layernorm",
+   "onnx": [
+    "m.duration_head.0.weight",
+    "m.duration_head.0.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.duration_head.0.g",
+    "enc.duration_head.0.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "duration_head.1",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_493",
+    "m.duration_head.1.bias"
+   ],
+   "W_shape": [
+    168,
+    168
+   ],
+   "packed": [
+    "enc.duration_head.1.wp",
+    "enc.duration_head.1.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "duration_head.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_494",
+    "m.duration_head.3.bias"
+   ],
+   "W_shape": [
+    168,
+    1
+   ],
+   "packed": [
+    "enc.duration_head.3.wp",
+    "enc.duration_head.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "energy_head.0",
+   "op": "layernorm",
+   "onnx": [
+    "m.energy_head.0.weight",
+    "m.energy_head.0.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.energy_head.0.g",
+    "enc.energy_head.0.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "energy_head.1",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_495",
+    "m.energy_head.1.bias"
+   ],
+   "W_shape": [
+    168,
+    84
+   ],
+   "packed": [
+    "enc.energy_head.1.wp",
+    "enc.energy_head.1.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "energy_head.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_496",
+    "m.energy_head.3.bias"
+   ],
+   "W_shape": [
+    84,
+    1
+   ],
+   "packed": [
+    "enc.energy_head.3.wp",
+    "enc.energy_head.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "bright_head.0",
+   "op": "layernorm",
+   "onnx": [
+    "m.bright_head.0.weight",
+    "m.bright_head.0.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.bright_head.0.g",
+    "enc.bright_head.0.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "bright_head.1",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_497",
+    "m.bright_head.1.bias"
+   ],
+   "W_shape": [
+    168,
+    84
+   ],
+   "packed": [
+    "enc.bright_head.1.wp",
+    "enc.bright_head.1.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "bright_head.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_498",
+    "m.bright_head.3.bias"
+   ],
+   "W_shape": [
+    84,
+    1
+   ],
+   "packed": [
+    "enc.bright_head.3.wp",
+    "enc.bright_head.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "pitch_head.0",
+   "op": "layernorm",
+   "onnx": [
+    "m.pitch_head.0.weight",
+    "m.pitch_head.0.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "enc.pitch_head.0.g",
+    "enc.pitch_head.0.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "enc",
+   "module": "pitch_head.1",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_499",
+    "m.pitch_head.1.bias"
+   ],
+   "W_shape": [
+    168,
+    168
+   ],
+   "packed": [
+    "enc.pitch_head.1.wp",
+    "enc.pitch_head.1.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "pitch_head.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_500",
+    "m.pitch_head.3.bias"
+   ],
+   "W_shape": [
+    168,
+    2
+   ],
+   "packed": [
+    "enc.pitch_head.3.wp",
+    "enc.pitch_head.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "energy_proj",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_504",
+    "m.energy_proj.bias"
+   ],
+   "W_shape": [
+    1,
+    168
+   ],
+   "packed": [
+    "enc.energy_proj.w",
+    "enc.energy_proj.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "enc",
+   "module": "bright_proj",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_505",
+    "m.bright_proj.bias"
+   ],
+   "W_shape": [
+    1,
+    168
+   ],
+   "packed": [
+    "enc.bright_proj.w",
+    "enc.bright_proj.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "frame_proj.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_644",
+    "m.frame_proj.0.bias"
+   ],
+   "W_shape": [
+    8,
+    168
+   ],
+   "packed": [
+    "dec.frame_proj.0.wp",
+    "dec.frame_proj.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "frame_proj.2",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_645",
+    "m.frame_proj.2.bias"
+   ],
+   "W_shape": [
+    168,
+    168
+   ],
+   "packed": [
+    "dec.frame_proj.2.wp",
+    "dec.frame_proj.2.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "local_ctx.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_646",
+    "m.local_ctx.0.bias"
+   ],
+   "W_shape": [
+    504,
+    336
+   ],
+   "packed": [
+    "dec.local_ctx.0.wp",
+    "dec.local_ctx.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "local_ctx.2",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_647",
+    "m.local_ctx.2.bias"
+   ],
+   "W_shape": [
+    336,
+    168
+   ],
+   "packed": [
+    "dec.local_ctx.2.wp",
+    "dec.local_ctx.2.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "abs_frame",
+   "op": "embedding",
+   "onnx": [
+    "m.abs_frame.weight"
+   ],
+   "shape_table": [
+    512,
+    168
+   ],
+   "packed": [
+    "dec.abs_frame.emb"
+   ]
+  },
+  {
+   "graph": "dec",
+   "module": "frame_pitch_refiner.0",
+   "op": "conv1d",
+   "onnx": [
+    "m.frame_pitch_refiner.0.weight",
+    "m.frame_pitch_refiner.0.bias"
+   ],
+   "W_shape": [
+    96,
+    178,
+    5
+   ],
+   "group": 1,
+   "kernel": 5,
+   "pad": 2,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "silu",
+   "packed": [
+    "dec.frame_pitch_refiner.0.wp",
+    "dec.frame_pitch_refiner.0.b"
+   ],
+   "packed_shape": [
+    24,
+    5,
+    178,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "frame_pitch_refiner.2",
+   "op": "grouped_conv1d",
+   "onnx": [
+    "m.frame_pitch_refiner.2.weight",
+    "m.frame_pitch_refiner.2.bias"
+   ],
+   "W_shape": [
+    96,
+    24,
+    5
+   ],
+   "group": 4,
+   "kernel": 5,
+   "pad": 2,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "silu",
+   "packed": [
+    "dec.frame_pitch_refiner.2.g0.wp",
+    "dec.frame_pitch_refiner.2.g0.b",
+    "dec.frame_pitch_refiner.2.g1.wp",
+    "dec.frame_pitch_refiner.2.g1.b",
+    "dec.frame_pitch_refiner.2.g2.wp",
+    "dec.frame_pitch_refiner.2.g2.b",
+    "dec.frame_pitch_refiner.2.g3.wp",
+    "dec.frame_pitch_refiner.2.g3.b"
+   ],
+   "shape": "4 groups of [24][T] -> [24][T]"
+  },
+  {
+   "graph": "dec",
+   "module": "frame_pitch_refiner.4",
+   "op": "conv1d",
+   "onnx": [
+    "m.frame_pitch_refiner.4.weight",
+    "m.frame_pitch_refiner.4.bias"
+   ],
+   "W_shape": [
+    2,
+    96,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.frame_pitch_refiner.4.wp",
+    "dec.frame_pitch_refiner.4.b"
+   ],
+   "packed_shape": [
+    1,
+    1,
+    96,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "pitch_proj.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_658",
+    "m.pitch_proj.0.bias"
+   ],
+   "W_shape": [
+    2,
+    168
+   ],
+   "packed": [
+    "dec.pitch_proj.0.wp",
+    "dec.pitch_proj.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "pitch_proj.2",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_659",
+    "m.pitch_proj.2.bias"
+   ],
+   "W_shape": [
+    168,
+    168
+   ],
+   "packed": [
+    "dec.pitch_proj.2.wp",
+    "dec.pitch_proj.2.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.0.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.0.norm1.weight",
+    "m.decoder.0.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.0.norm1.g",
+    "dec.decoder.0.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.0.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.decoder.0.depth.weight",
+    "m.decoder.0.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "dec.decoder.0.depth.dw",
+    "dec.decoder.0.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.0.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.decoder.0.point.weight",
+    "m.decoder.0.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.decoder.0.point.wp",
+    "dec.decoder.0.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.0.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.0.norm2.weight",
+    "m.decoder.0.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.0.norm2.g",
+    "dec.decoder.0.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.0.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_660",
+    "m.decoder.0.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    504
+   ],
+   "packed": [
+    "dec.decoder.0.ff.0.wp",
+    "dec.decoder.0.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.0.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_661",
+    "m.decoder.0.ff.3.bias"
+   ],
+   "W_shape": [
+    504,
+    168
+   ],
+   "packed": [
+    "dec.decoder.0.ff.3.wp",
+    "dec.decoder.0.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.1.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.1.norm1.weight",
+    "m.decoder.1.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.1.norm1.g",
+    "dec.decoder.1.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.1.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.decoder.1.depth.weight",
+    "m.decoder.1.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "dec.decoder.1.depth.dw",
+    "dec.decoder.1.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.1.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.decoder.1.point.weight",
+    "m.decoder.1.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.decoder.1.point.wp",
+    "dec.decoder.1.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.1.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.1.norm2.weight",
+    "m.decoder.1.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.1.norm2.g",
+    "dec.decoder.1.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.1.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_662",
+    "m.decoder.1.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    504
+   ],
+   "packed": [
+    "dec.decoder.1.ff.0.wp",
+    "dec.decoder.1.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.1.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_663",
+    "m.decoder.1.ff.3.bias"
+   ],
+   "W_shape": [
+    504,
+    168
+   ],
+   "packed": [
+    "dec.decoder.1.ff.3.wp",
+    "dec.decoder.1.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.2.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.2.norm1.weight",
+    "m.decoder.2.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.2.norm1.g",
+    "dec.decoder.2.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.2.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.decoder.2.depth.weight",
+    "m.decoder.2.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "dec.decoder.2.depth.dw",
+    "dec.decoder.2.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.2.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.decoder.2.point.weight",
+    "m.decoder.2.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.decoder.2.point.wp",
+    "dec.decoder.2.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.2.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.2.norm2.weight",
+    "m.decoder.2.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.2.norm2.g",
+    "dec.decoder.2.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.2.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_664",
+    "m.decoder.2.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    504
+   ],
+   "packed": [
+    "dec.decoder.2.ff.0.wp",
+    "dec.decoder.2.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.2.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_665",
+    "m.decoder.2.ff.3.bias"
+   ],
+   "W_shape": [
+    504,
+    168
+   ],
+   "packed": [
+    "dec.decoder.2.ff.3.wp",
+    "dec.decoder.2.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.3.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.3.norm1.weight",
+    "m.decoder.3.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.3.norm1.g",
+    "dec.decoder.3.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.3.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.decoder.3.depth.weight",
+    "m.decoder.3.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "dec.decoder.3.depth.dw",
+    "dec.decoder.3.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.3.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.decoder.3.point.weight",
+    "m.decoder.3.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.decoder.3.point.wp",
+    "dec.decoder.3.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.3.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.3.norm2.weight",
+    "m.decoder.3.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.3.norm2.g",
+    "dec.decoder.3.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.3.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_666",
+    "m.decoder.3.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    504
+   ],
+   "packed": [
+    "dec.decoder.3.ff.0.wp",
+    "dec.decoder.3.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.3.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_667",
+    "m.decoder.3.ff.3.bias"
+   ],
+   "W_shape": [
+    504,
+    168
+   ],
+   "packed": [
+    "dec.decoder.3.ff.3.wp",
+    "dec.decoder.3.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.4.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.4.norm1.weight",
+    "m.decoder.4.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.4.norm1.g",
+    "dec.decoder.4.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.4.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.decoder.4.depth.weight",
+    "m.decoder.4.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "dec.decoder.4.depth.dw",
+    "dec.decoder.4.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.4.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.decoder.4.point.weight",
+    "m.decoder.4.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.decoder.4.point.wp",
+    "dec.decoder.4.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.4.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.4.norm2.weight",
+    "m.decoder.4.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.4.norm2.g",
+    "dec.decoder.4.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.4.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_668",
+    "m.decoder.4.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    504
+   ],
+   "packed": [
+    "dec.decoder.4.ff.0.wp",
+    "dec.decoder.4.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.4.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_669",
+    "m.decoder.4.ff.3.bias"
+   ],
+   "W_shape": [
+    504,
+    168
+   ],
+   "packed": [
+    "dec.decoder.4.ff.3.wp",
+    "dec.decoder.4.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.5.norm1",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.5.norm1.weight",
+    "m.decoder.5.norm1.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.5.norm1.g",
+    "dec.decoder.5.norm1.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.5.depth",
+   "op": "dwconv1d",
+   "onnx": [
+    "m.decoder.5.depth.weight",
+    "m.decoder.5.depth.bias"
+   ],
+   "W_shape": [
+    336,
+    1,
+    7
+   ],
+   "group": 168,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "multiplier": 2,
+   "packed": [
+    "dec.decoder.5.depth.dw",
+    "dec.decoder.5.depth.b"
+   ],
+   "shape": "[Cin][T] -> [Cin*mult][T]; out o reads in o//mult"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.5.point",
+   "op": "conv1d",
+   "onnx": [
+    "m.decoder.5.point.weight",
+    "m.decoder.5.point.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    1
+   ],
+   "group": 1,
+   "kernel": 1,
+   "pad": 0,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.decoder.5.point.wp",
+    "dec.decoder.5.point.b"
+   ],
+   "packed_shape": [
+    42,
+    1,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.5.norm2",
+   "op": "layernorm",
+   "onnx": [
+    "m.decoder.5.norm2.weight",
+    "m.decoder.5.norm2.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.decoder.5.norm2.g",
+    "dec.decoder.5.norm2.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.5.ff.0",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_670",
+    "m.decoder.5.ff.0.bias"
+   ],
+   "W_shape": [
+    168,
+    504
+   ],
+   "packed": [
+    "dec.decoder.5.ff.0.wp",
+    "dec.decoder.5.ff.0.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "decoder.5.ff.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_671",
+    "m.decoder.5.ff.3.bias"
+   ],
+   "W_shape": [
+    504,
+    168
+   ],
+   "packed": [
+    "dec.decoder.5.ff.3.wp",
+    "dec.decoder.5.ff.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "frame_gru",
+   "op": "bigru",
+   "onnx": [
+    "onnx::GRU_715",
+    "onnx::GRU_716",
+    "onnx::GRU_714"
+   ],
+   "hidden": 84,
+   "gate_order": "z,r,h (ONNX)",
+   "linear_before_reset": 1,
+   "packed": [
+    "dec.frame_gru.wih.wp",
+    "dec.frame_gru.wih.b",
+    "dec.frame_gru.r",
+    "dec.frame_gru.rb"
+   ],
+   "shape": "[168][F] -> [2*84][F] (fwd | bwd)"
+  },
+  {
+   "graph": "dec",
+   "module": "mel_head.0",
+   "op": "layernorm",
+   "onnx": [
+    "m.mel_head.0.weight",
+    "m.mel_head.0.bias"
+   ],
+   "C": 168,
+   "eps": 9.999999747378752e-06,
+   "packed": [
+    "dec.mel_head.0.g",
+    "dec.mel_head.0.beta"
+   ],
+   "shape": "over channels, per time column"
+  },
+  {
+   "graph": "dec",
+   "module": "mel_head.1",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_717",
+    "m.mel_head.1.bias"
+   ],
+   "W_shape": [
+    168,
+    168
+   ],
+   "packed": [
+    "dec.mel_head.1.wp",
+    "dec.mel_head.1.b"
+   ],
+   "epilogue": "silu",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "mel_head.3",
+   "op": "linear",
+   "onnx": [
+    "onnx::MatMul_718",
+    "m.mel_head.3.bias"
+   ],
+   "W_shape": [
+    168,
+    80
+   ],
+   "packed": [
+    "dec.mel_head.3.wp",
+    "dec.mel_head.3.b"
+   ],
+   "epilogue": "none",
+   "shape": "[Cin][T] -> [Cout][T] (K=1 conv)"
+  },
+  {
+   "graph": "dec",
+   "module": "postnet.0",
+   "op": "conv1d",
+   "onnx": [
+    "m.postnet.0.weight",
+    "m.postnet.0.bias"
+   ],
+   "W_shape": [
+    168,
+    80,
+    5
+   ],
+   "group": 1,
+   "kernel": 5,
+   "pad": 2,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "tanh",
+   "packed": [
+    "dec.postnet.0.wp",
+    "dec.postnet.0.b"
+   ],
+   "packed_shape": [
+    42,
+    5,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "postnet.2",
+   "op": "conv1d",
+   "onnx": [
+    "m.postnet.2.weight",
+    "m.postnet.2.bias"
+   ],
+   "W_shape": [
+    168,
+    168,
+    5
+   ],
+   "group": 1,
+   "kernel": 5,
+   "pad": 2,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "tanh",
+   "packed": [
+    "dec.postnet.2.wp",
+    "dec.postnet.2.b"
+   ],
+   "packed_shape": [
+    42,
+    5,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "dec",
+   "module": "postnet.4",
+   "op": "conv1d",
+   "onnx": [
+    "m.postnet.4.weight",
+    "m.postnet.4.bias"
+   ],
+   "W_shape": [
+    80,
+    168,
+    5
+   ],
+   "group": 1,
+   "kernel": 5,
+   "pad": 2,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "dec.postnet.4.wp",
+    "dec.postnet.4.b"
+   ],
+   "packed_shape": [
+    20,
+    5,
+    168,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "conv_pre",
+   "op": "conv1d",
+   "onnx": [
+    "conv_pre.weight",
+    "conv_pre.bias"
+   ],
+   "W_shape": [
+    160,
+    80,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.conv_pre.wp",
+    "voc.conv_pre.b"
+   ],
+   "packed_shape": [
+    40,
+    7,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "up_acts.0",
+   "op": "snake",
+   "onnx": [
+    "up_acts.0.log_alpha"
+   ],
+   "C": 160,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.up_acts.0.a",
+    "voc.up_acts.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "ups.0",
+   "op": "conv_transpose1d",
+   "onnx": [
+    "ups.0.weight",
+    "ups.0.bias"
+   ],
+   "W_shape": [
+    160,
+    80,
+    16
+   ],
+   "stride": 8,
+   "kernel": 16,
+   "pad": 4,
+   "packed": [
+    "voc.ups.0.wp",
+    "voc.ups.0.b"
+   ],
+   "packed_shape": [
+    160,
+    2,
+    160,
+    4
+   ],
+   "impl": "s phases x 2-tap conv (pad 1) over q in [0,Tin], then out[q*s+r-pad] = P_r[q]",
+   "shape": "[Cin][T] -> [Cout][T*stride]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.0.acts1.0.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.0.acts1.0.a",
+    "voc.resblocks.0.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.0.convs1.0.weight",
+    "resblocks.0.convs1.0.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.0.convs1.0.wp",
+    "voc.resblocks.0.convs1.0.b"
+   ],
+   "packed_shape": [
+    20,
+    3,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.0.acts2.0.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.0.acts2.0.a",
+    "voc.resblocks.0.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.0.convs2.0.weight",
+    "resblocks.0.convs2.0.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.0.convs2.0.wp",
+    "voc.resblocks.0.convs2.0.b"
+   ],
+   "packed_shape": [
+    20,
+    3,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.0.acts1.1.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.0.acts1.1.a",
+    "voc.resblocks.0.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.0.convs1.1.weight",
+    "resblocks.0.convs1.1.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 3,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.0.convs1.1.wp",
+    "voc.resblocks.0.convs1.1.b"
+   ],
+   "packed_shape": [
+    20,
+    3,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.0.acts2.1.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.0.acts2.1.a",
+    "voc.resblocks.0.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.0.convs2.1.weight",
+    "resblocks.0.convs2.1.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.0.convs2.1.wp",
+    "voc.resblocks.0.convs2.1.b"
+   ],
+   "packed_shape": [
+    20,
+    3,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.0.acts1.2.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.0.acts1.2.a",
+    "voc.resblocks.0.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.0.convs1.2.weight",
+    "resblocks.0.convs1.2.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 5,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.0.convs1.2.wp",
+    "voc.resblocks.0.convs1.2.b"
+   ],
+   "packed_shape": [
+    20,
+    3,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.0.acts2.2.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.0.acts2.2.a",
+    "voc.resblocks.0.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.0.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.0.convs2.2.weight",
+    "resblocks.0.convs2.2.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.0.convs2.2.wp",
+    "voc.resblocks.0.convs2.2.b"
+   ],
+   "packed_shape": [
+    20,
+    3,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.1.acts1.0.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.1.acts1.0.a",
+    "voc.resblocks.1.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.1.convs1.0.weight",
+    "resblocks.1.convs1.0.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.1.convs1.0.wp",
+    "voc.resblocks.1.convs1.0.b"
+   ],
+   "packed_shape": [
+    20,
+    7,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.1.acts2.0.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.1.acts2.0.a",
+    "voc.resblocks.1.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.1.convs2.0.weight",
+    "resblocks.1.convs2.0.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.1.convs2.0.wp",
+    "voc.resblocks.1.convs2.0.b"
+   ],
+   "packed_shape": [
+    20,
+    7,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.1.acts1.1.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.1.acts1.1.a",
+    "voc.resblocks.1.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.1.convs1.1.weight",
+    "resblocks.1.convs1.1.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 9,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.1.convs1.1.wp",
+    "voc.resblocks.1.convs1.1.b"
+   ],
+   "packed_shape": [
+    20,
+    7,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.1.acts2.1.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.1.acts2.1.a",
+    "voc.resblocks.1.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.1.convs2.1.weight",
+    "resblocks.1.convs2.1.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.1.convs2.1.wp",
+    "voc.resblocks.1.convs2.1.b"
+   ],
+   "packed_shape": [
+    20,
+    7,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.1.acts1.2.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.1.acts1.2.a",
+    "voc.resblocks.1.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.1.convs1.2.weight",
+    "resblocks.1.convs1.2.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 15,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.1.convs1.2.wp",
+    "voc.resblocks.1.convs1.2.b"
+   ],
+   "packed_shape": [
+    20,
+    7,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.1.acts2.2.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.1.acts2.2.a",
+    "voc.resblocks.1.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.1.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.1.convs2.2.weight",
+    "resblocks.1.convs2.2.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.1.convs2.2.wp",
+    "voc.resblocks.1.convs2.2.b"
+   ],
+   "packed_shape": [
+    20,
+    7,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.2.acts1.0.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.2.acts1.0.a",
+    "voc.resblocks.2.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.2.convs1.0.weight",
+    "resblocks.2.convs1.0.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.2.convs1.0.wp",
+    "voc.resblocks.2.convs1.0.b"
+   ],
+   "packed_shape": [
+    20,
+    11,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.2.acts2.0.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.2.acts2.0.a",
+    "voc.resblocks.2.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.2.convs2.0.weight",
+    "resblocks.2.convs2.0.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.2.convs2.0.wp",
+    "voc.resblocks.2.convs2.0.b"
+   ],
+   "packed_shape": [
+    20,
+    11,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.2.acts1.1.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.2.acts1.1.a",
+    "voc.resblocks.2.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.2.convs1.1.weight",
+    "resblocks.2.convs1.1.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 15,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.2.convs1.1.wp",
+    "voc.resblocks.2.convs1.1.b"
+   ],
+   "packed_shape": [
+    20,
+    11,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.2.acts2.1.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.2.acts2.1.a",
+    "voc.resblocks.2.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.2.convs2.1.weight",
+    "resblocks.2.convs2.1.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.2.convs2.1.wp",
+    "voc.resblocks.2.convs2.1.b"
+   ],
+   "packed_shape": [
+    20,
+    11,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.2.acts1.2.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.2.acts1.2.a",
+    "voc.resblocks.2.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.2.convs1.2.weight",
+    "resblocks.2.convs1.2.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 25,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.2.convs1.2.wp",
+    "voc.resblocks.2.convs1.2.b"
+   ],
+   "packed_shape": [
+    20,
+    11,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.2.acts2.2.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.2.acts2.2.a",
+    "voc.resblocks.2.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.2.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.2.convs2.2.weight",
+    "resblocks.2.convs2.2.bias"
+   ],
+   "W_shape": [
+    80,
+    80,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.2.convs2.2.wp",
+    "voc.resblocks.2.convs2.2.b"
+   ],
+   "packed_shape": [
+    20,
+    11,
+    80,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "up_acts.1",
+   "op": "snake",
+   "onnx": [
+    "up_acts.1.log_alpha"
+   ],
+   "C": 80,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.up_acts.1.a",
+    "voc.up_acts.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "ups.1",
+   "op": "conv_transpose1d",
+   "onnx": [
+    "ups.1.weight",
+    "ups.1.bias"
+   ],
+   "W_shape": [
+    80,
+    40,
+    16
+   ],
+   "stride": 8,
+   "kernel": 16,
+   "pad": 4,
+   "packed": [
+    "voc.ups.1.wp",
+    "voc.ups.1.b"
+   ],
+   "packed_shape": [
+    80,
+    2,
+    80,
+    4
+   ],
+   "impl": "s phases x 2-tap conv (pad 1) over q in [0,Tin], then out[q*s+r-pad] = P_r[q]",
+   "shape": "[Cin][T] -> [Cout][T*stride]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.3.acts1.0.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.3.acts1.0.a",
+    "voc.resblocks.3.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.3.convs1.0.weight",
+    "resblocks.3.convs1.0.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.3.convs1.0.wp",
+    "voc.resblocks.3.convs1.0.b"
+   ],
+   "packed_shape": [
+    10,
+    3,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.3.acts2.0.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.3.acts2.0.a",
+    "voc.resblocks.3.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.3.convs2.0.weight",
+    "resblocks.3.convs2.0.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.3.convs2.0.wp",
+    "voc.resblocks.3.convs2.0.b"
+   ],
+   "packed_shape": [
+    10,
+    3,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.3.acts1.1.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.3.acts1.1.a",
+    "voc.resblocks.3.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.3.convs1.1.weight",
+    "resblocks.3.convs1.1.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 3,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.3.convs1.1.wp",
+    "voc.resblocks.3.convs1.1.b"
+   ],
+   "packed_shape": [
+    10,
+    3,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.3.acts2.1.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.3.acts2.1.a",
+    "voc.resblocks.3.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.3.convs2.1.weight",
+    "resblocks.3.convs2.1.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.3.convs2.1.wp",
+    "voc.resblocks.3.convs2.1.b"
+   ],
+   "packed_shape": [
+    10,
+    3,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.3.acts1.2.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.3.acts1.2.a",
+    "voc.resblocks.3.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.3.convs1.2.weight",
+    "resblocks.3.convs1.2.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 5,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.3.convs1.2.wp",
+    "voc.resblocks.3.convs1.2.b"
+   ],
+   "packed_shape": [
+    10,
+    3,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.3.acts2.2.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.3.acts2.2.a",
+    "voc.resblocks.3.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.3.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.3.convs2.2.weight",
+    "resblocks.3.convs2.2.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.3.convs2.2.wp",
+    "voc.resblocks.3.convs2.2.b"
+   ],
+   "packed_shape": [
+    10,
+    3,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.4.acts1.0.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.4.acts1.0.a",
+    "voc.resblocks.4.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.4.convs1.0.weight",
+    "resblocks.4.convs1.0.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.4.convs1.0.wp",
+    "voc.resblocks.4.convs1.0.b"
+   ],
+   "packed_shape": [
+    10,
+    7,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.4.acts2.0.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.4.acts2.0.a",
+    "voc.resblocks.4.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.4.convs2.0.weight",
+    "resblocks.4.convs2.0.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.4.convs2.0.wp",
+    "voc.resblocks.4.convs2.0.b"
+   ],
+   "packed_shape": [
+    10,
+    7,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.4.acts1.1.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.4.acts1.1.a",
+    "voc.resblocks.4.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.4.convs1.1.weight",
+    "resblocks.4.convs1.1.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 9,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.4.convs1.1.wp",
+    "voc.resblocks.4.convs1.1.b"
+   ],
+   "packed_shape": [
+    10,
+    7,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.4.acts2.1.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.4.acts2.1.a",
+    "voc.resblocks.4.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.4.convs2.1.weight",
+    "resblocks.4.convs2.1.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.4.convs2.1.wp",
+    "voc.resblocks.4.convs2.1.b"
+   ],
+   "packed_shape": [
+    10,
+    7,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.4.acts1.2.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.4.acts1.2.a",
+    "voc.resblocks.4.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.4.convs1.2.weight",
+    "resblocks.4.convs1.2.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 15,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.4.convs1.2.wp",
+    "voc.resblocks.4.convs1.2.b"
+   ],
+   "packed_shape": [
+    10,
+    7,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.4.acts2.2.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.4.acts2.2.a",
+    "voc.resblocks.4.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.4.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.4.convs2.2.weight",
+    "resblocks.4.convs2.2.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.4.convs2.2.wp",
+    "voc.resblocks.4.convs2.2.b"
+   ],
+   "packed_shape": [
+    10,
+    7,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.5.acts1.0.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.5.acts1.0.a",
+    "voc.resblocks.5.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.5.convs1.0.weight",
+    "resblocks.5.convs1.0.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.5.convs1.0.wp",
+    "voc.resblocks.5.convs1.0.b"
+   ],
+   "packed_shape": [
+    10,
+    11,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.5.acts2.0.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.5.acts2.0.a",
+    "voc.resblocks.5.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.5.convs2.0.weight",
+    "resblocks.5.convs2.0.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.5.convs2.0.wp",
+    "voc.resblocks.5.convs2.0.b"
+   ],
+   "packed_shape": [
+    10,
+    11,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.5.acts1.1.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.5.acts1.1.a",
+    "voc.resblocks.5.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.5.convs1.1.weight",
+    "resblocks.5.convs1.1.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 15,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.5.convs1.1.wp",
+    "voc.resblocks.5.convs1.1.b"
+   ],
+   "packed_shape": [
+    10,
+    11,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.5.acts2.1.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.5.acts2.1.a",
+    "voc.resblocks.5.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.5.convs2.1.weight",
+    "resblocks.5.convs2.1.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.5.convs2.1.wp",
+    "voc.resblocks.5.convs2.1.b"
+   ],
+   "packed_shape": [
+    10,
+    11,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.5.acts1.2.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.5.acts1.2.a",
+    "voc.resblocks.5.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.5.convs1.2.weight",
+    "resblocks.5.convs1.2.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 25,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.5.convs1.2.wp",
+    "voc.resblocks.5.convs1.2.b"
+   ],
+   "packed_shape": [
+    10,
+    11,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.5.acts2.2.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.5.acts2.2.a",
+    "voc.resblocks.5.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.5.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.5.convs2.2.weight",
+    "resblocks.5.convs2.2.bias"
+   ],
+   "W_shape": [
+    40,
+    40,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.5.convs2.2.wp",
+    "voc.resblocks.5.convs2.2.b"
+   ],
+   "packed_shape": [
+    10,
+    11,
+    40,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "up_acts.2",
+   "op": "snake",
+   "onnx": [
+    "up_acts.2.log_alpha"
+   ],
+   "C": 40,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.up_acts.2.a",
+    "voc.up_acts.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "ups.2",
+   "op": "conv_transpose1d",
+   "onnx": [
+    "ups.2.weight",
+    "ups.2.bias"
+   ],
+   "W_shape": [
+    40,
+    20,
+    4
+   ],
+   "stride": 2,
+   "kernel": 4,
+   "pad": 1,
+   "packed": [
+    "voc.ups.2.wp",
+    "voc.ups.2.b"
+   ],
+   "packed_shape": [
+    10,
+    2,
+    40,
+    4
+   ],
+   "impl": "s phases x 2-tap conv (pad 1) over q in [0,Tin], then out[q*s+r-pad] = P_r[q]",
+   "shape": "[Cin][T] -> [Cout][T*stride]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.6.acts1.0.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.6.acts1.0.a",
+    "voc.resblocks.6.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.6.convs1.0.weight",
+    "resblocks.6.convs1.0.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.6.convs1.0.wp",
+    "voc.resblocks.6.convs1.0.b"
+   ],
+   "packed_shape": [
+    5,
+    3,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.6.acts2.0.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.6.acts2.0.a",
+    "voc.resblocks.6.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.6.convs2.0.weight",
+    "resblocks.6.convs2.0.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.6.convs2.0.wp",
+    "voc.resblocks.6.convs2.0.b"
+   ],
+   "packed_shape": [
+    5,
+    3,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.6.acts1.1.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.6.acts1.1.a",
+    "voc.resblocks.6.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.6.convs1.1.weight",
+    "resblocks.6.convs1.1.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 3,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.6.convs1.1.wp",
+    "voc.resblocks.6.convs1.1.b"
+   ],
+   "packed_shape": [
+    5,
+    3,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.6.acts2.1.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.6.acts2.1.a",
+    "voc.resblocks.6.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.6.convs2.1.weight",
+    "resblocks.6.convs2.1.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.6.convs2.1.wp",
+    "voc.resblocks.6.convs2.1.b"
+   ],
+   "packed_shape": [
+    5,
+    3,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.6.acts1.2.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.6.acts1.2.a",
+    "voc.resblocks.6.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.6.convs1.2.weight",
+    "resblocks.6.convs1.2.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 5,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.6.convs1.2.wp",
+    "voc.resblocks.6.convs1.2.b"
+   ],
+   "packed_shape": [
+    5,
+    3,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.6.acts2.2.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.6.acts2.2.a",
+    "voc.resblocks.6.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.6.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.6.convs2.2.weight",
+    "resblocks.6.convs2.2.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.6.convs2.2.wp",
+    "voc.resblocks.6.convs2.2.b"
+   ],
+   "packed_shape": [
+    5,
+    3,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.7.acts1.0.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.7.acts1.0.a",
+    "voc.resblocks.7.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.7.convs1.0.weight",
+    "resblocks.7.convs1.0.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.7.convs1.0.wp",
+    "voc.resblocks.7.convs1.0.b"
+   ],
+   "packed_shape": [
+    5,
+    7,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.7.acts2.0.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.7.acts2.0.a",
+    "voc.resblocks.7.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.7.convs2.0.weight",
+    "resblocks.7.convs2.0.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.7.convs2.0.wp",
+    "voc.resblocks.7.convs2.0.b"
+   ],
+   "packed_shape": [
+    5,
+    7,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.7.acts1.1.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.7.acts1.1.a",
+    "voc.resblocks.7.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.7.convs1.1.weight",
+    "resblocks.7.convs1.1.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 9,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.7.convs1.1.wp",
+    "voc.resblocks.7.convs1.1.b"
+   ],
+   "packed_shape": [
+    5,
+    7,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.7.acts2.1.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.7.acts2.1.a",
+    "voc.resblocks.7.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.7.convs2.1.weight",
+    "resblocks.7.convs2.1.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.7.convs2.1.wp",
+    "voc.resblocks.7.convs2.1.b"
+   ],
+   "packed_shape": [
+    5,
+    7,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.7.acts1.2.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.7.acts1.2.a",
+    "voc.resblocks.7.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.7.convs1.2.weight",
+    "resblocks.7.convs1.2.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 15,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.7.convs1.2.wp",
+    "voc.resblocks.7.convs1.2.b"
+   ],
+   "packed_shape": [
+    5,
+    7,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.7.acts2.2.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.7.acts2.2.a",
+    "voc.resblocks.7.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.7.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.7.convs2.2.weight",
+    "resblocks.7.convs2.2.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.7.convs2.2.wp",
+    "voc.resblocks.7.convs2.2.b"
+   ],
+   "packed_shape": [
+    5,
+    7,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.8.acts1.0.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.8.acts1.0.a",
+    "voc.resblocks.8.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.8.convs1.0.weight",
+    "resblocks.8.convs1.0.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.8.convs1.0.wp",
+    "voc.resblocks.8.convs1.0.b"
+   ],
+   "packed_shape": [
+    5,
+    11,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.8.acts2.0.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.8.acts2.0.a",
+    "voc.resblocks.8.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.8.convs2.0.weight",
+    "resblocks.8.convs2.0.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.8.convs2.0.wp",
+    "voc.resblocks.8.convs2.0.b"
+   ],
+   "packed_shape": [
+    5,
+    11,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.8.acts1.1.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.8.acts1.1.a",
+    "voc.resblocks.8.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.8.convs1.1.weight",
+    "resblocks.8.convs1.1.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 15,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.8.convs1.1.wp",
+    "voc.resblocks.8.convs1.1.b"
+   ],
+   "packed_shape": [
+    5,
+    11,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.8.acts2.1.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.8.acts2.1.a",
+    "voc.resblocks.8.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.8.convs2.1.weight",
+    "resblocks.8.convs2.1.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.8.convs2.1.wp",
+    "voc.resblocks.8.convs2.1.b"
+   ],
+   "packed_shape": [
+    5,
+    11,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.8.acts1.2.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.8.acts1.2.a",
+    "voc.resblocks.8.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.8.convs1.2.weight",
+    "resblocks.8.convs1.2.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 25,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.8.convs1.2.wp",
+    "voc.resblocks.8.convs1.2.b"
+   ],
+   "packed_shape": [
+    5,
+    11,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.8.acts2.2.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.8.acts2.2.a",
+    "voc.resblocks.8.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.8.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.8.convs2.2.weight",
+    "resblocks.8.convs2.2.bias"
+   ],
+   "W_shape": [
+    20,
+    20,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.8.convs2.2.wp",
+    "voc.resblocks.8.convs2.2.b"
+   ],
+   "packed_shape": [
+    5,
+    11,
+    20,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "up_acts.3",
+   "op": "snake",
+   "onnx": [
+    "up_acts.3.log_alpha"
+   ],
+   "C": 20,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.up_acts.3.a",
+    "voc.up_acts.3.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "ups.3",
+   "op": "conv_transpose1d",
+   "onnx": [
+    "ups.3.weight",
+    "ups.3.bias"
+   ],
+   "W_shape": [
+    20,
+    10,
+    4
+   ],
+   "stride": 2,
+   "kernel": 4,
+   "pad": 1,
+   "packed": [
+    "voc.ups.3.wp",
+    "voc.ups.3.b"
+   ],
+   "packed_shape": [
+    6,
+    2,
+    20,
+    4
+   ],
+   "impl": "s phases x 2-tap conv (pad 1) over q in [0,Tin], then out[q*s+r-pad] = P_r[q]",
+   "shape": "[Cin][T] -> [Cout][T*stride]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.9.acts1.0.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.9.acts1.0.a",
+    "voc.resblocks.9.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.9.convs1.0.weight",
+    "resblocks.9.convs1.0.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.9.convs1.0.wp",
+    "voc.resblocks.9.convs1.0.b"
+   ],
+   "packed_shape": [
+    3,
+    3,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.9.acts2.0.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.9.acts2.0.a",
+    "voc.resblocks.9.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.9.convs2.0.weight",
+    "resblocks.9.convs2.0.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.9.convs2.0.wp",
+    "voc.resblocks.9.convs2.0.b"
+   ],
+   "packed_shape": [
+    3,
+    3,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.9.acts1.1.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.9.acts1.1.a",
+    "voc.resblocks.9.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.9.convs1.1.weight",
+    "resblocks.9.convs1.1.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 3,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.9.convs1.1.wp",
+    "voc.resblocks.9.convs1.1.b"
+   ],
+   "packed_shape": [
+    3,
+    3,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.9.acts2.1.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.9.acts2.1.a",
+    "voc.resblocks.9.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.9.convs2.1.weight",
+    "resblocks.9.convs2.1.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.9.convs2.1.wp",
+    "voc.resblocks.9.convs2.1.b"
+   ],
+   "packed_shape": [
+    3,
+    3,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.9.acts1.2.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.9.acts1.2.a",
+    "voc.resblocks.9.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.9.convs1.2.weight",
+    "resblocks.9.convs1.2.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 5,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.9.convs1.2.wp",
+    "voc.resblocks.9.convs1.2.b"
+   ],
+   "packed_shape": [
+    3,
+    3,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.9.acts2.2.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.9.acts2.2.a",
+    "voc.resblocks.9.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.9.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.9.convs2.2.weight",
+    "resblocks.9.convs2.2.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    3
+   ],
+   "group": 1,
+   "kernel": 3,
+   "pad": 1,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.9.convs2.2.wp",
+    "voc.resblocks.9.convs2.2.b"
+   ],
+   "packed_shape": [
+    3,
+    3,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.10.acts1.0.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.10.acts1.0.a",
+    "voc.resblocks.10.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.10.convs1.0.weight",
+    "resblocks.10.convs1.0.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.10.convs1.0.wp",
+    "voc.resblocks.10.convs1.0.b"
+   ],
+   "packed_shape": [
+    3,
+    7,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.10.acts2.0.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.10.acts2.0.a",
+    "voc.resblocks.10.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.10.convs2.0.weight",
+    "resblocks.10.convs2.0.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.10.convs2.0.wp",
+    "voc.resblocks.10.convs2.0.b"
+   ],
+   "packed_shape": [
+    3,
+    7,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.10.acts1.1.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.10.acts1.1.a",
+    "voc.resblocks.10.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.10.convs1.1.weight",
+    "resblocks.10.convs1.1.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 9,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.10.convs1.1.wp",
+    "voc.resblocks.10.convs1.1.b"
+   ],
+   "packed_shape": [
+    3,
+    7,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.10.acts2.1.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.10.acts2.1.a",
+    "voc.resblocks.10.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.10.convs2.1.weight",
+    "resblocks.10.convs2.1.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.10.convs2.1.wp",
+    "voc.resblocks.10.convs2.1.b"
+   ],
+   "packed_shape": [
+    3,
+    7,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.10.acts1.2.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.10.acts1.2.a",
+    "voc.resblocks.10.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.10.convs1.2.weight",
+    "resblocks.10.convs1.2.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 15,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.10.convs1.2.wp",
+    "voc.resblocks.10.convs1.2.b"
+   ],
+   "packed_shape": [
+    3,
+    7,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.10.acts2.2.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.10.acts2.2.a",
+    "voc.resblocks.10.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.10.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.10.convs2.2.weight",
+    "resblocks.10.convs2.2.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.10.convs2.2.wp",
+    "voc.resblocks.10.convs2.2.b"
+   ],
+   "packed_shape": [
+    3,
+    7,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.acts1.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.11.acts1.0.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.11.acts1.0.a",
+    "voc.resblocks.11.acts1.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.convs1.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.11.convs1.0.weight",
+    "resblocks.11.convs1.0.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.11.convs1.0.wp",
+    "voc.resblocks.11.convs1.0.b"
+   ],
+   "packed_shape": [
+    3,
+    11,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.acts2.0",
+   "op": "snake",
+   "onnx": [
+    "resblocks.11.acts2.0.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.11.acts2.0.a",
+    "voc.resblocks.11.acts2.0.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.convs2.0",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.11.convs2.0.weight",
+    "resblocks.11.convs2.0.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.11.convs2.0.wp",
+    "voc.resblocks.11.convs2.0.b"
+   ],
+   "packed_shape": [
+    3,
+    11,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.acts1.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.11.acts1.1.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.11.acts1.1.a",
+    "voc.resblocks.11.acts1.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.convs1.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.11.convs1.1.weight",
+    "resblocks.11.convs1.1.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 15,
+   "dilation": 3,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.11.convs1.1.wp",
+    "voc.resblocks.11.convs1.1.b"
+   ],
+   "packed_shape": [
+    3,
+    11,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.acts2.1",
+   "op": "snake",
+   "onnx": [
+    "resblocks.11.acts2.1.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.11.acts2.1.a",
+    "voc.resblocks.11.acts2.1.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.convs2.1",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.11.convs2.1.weight",
+    "resblocks.11.convs2.1.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.11.convs2.1.wp",
+    "voc.resblocks.11.convs2.1.b"
+   ],
+   "packed_shape": [
+    3,
+    11,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.acts1.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.11.acts1.2.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.11.acts1.2.a",
+    "voc.resblocks.11.acts1.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.convs1.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.11.convs1.2.weight",
+    "resblocks.11.convs1.2.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 25,
+   "dilation": 5,
+   "stride": 1,
+   "epilogue": "snake(next)",
+   "packed": [
+    "voc.resblocks.11.convs1.2.wp",
+    "voc.resblocks.11.convs1.2.b"
+   ],
+   "packed_shape": [
+    3,
+    11,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.acts2.2",
+   "op": "snake",
+   "onnx": [
+    "resblocks.11.acts2.2.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.resblocks.11.acts2.2.a",
+    "voc.resblocks.11.acts2.2.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "resblocks.11.convs2.2",
+   "op": "conv1d",
+   "onnx": [
+    "resblocks.11.convs2.2.weight",
+    "resblocks.11.convs2.2.bias"
+   ],
+   "W_shape": [
+    10,
+    10,
+    11
+   ],
+   "group": 1,
+   "kernel": 11,
+   "pad": 5,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "none",
+   "packed": [
+    "voc.resblocks.11.convs2.2.wp",
+    "voc.resblocks.11.convs2.2.b"
+   ],
+   "packed_shape": [
+    3,
+    11,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  },
+  {
+   "graph": "voc",
+   "module": "post_act",
+   "op": "snake",
+   "onnx": [
+    "post_act.log_alpha"
+   ],
+   "C": 10,
+   "formula": "x + sin(a*x)^2 / a, a = clip(exp(log_alpha), 1e-4, 100)",
+   "packed": [
+    "voc.post_act.a",
+    "voc.post_act.ia"
+   ]
+  },
+  {
+   "graph": "voc",
+   "module": "conv_post",
+   "op": "conv1d",
+   "onnx": [
+    "conv_post.weight",
+    "conv_post.bias"
+   ],
+   "W_shape": [
+    1,
+    10,
+    7
+   ],
+   "group": 1,
+   "kernel": 7,
+   "pad": 3,
+   "dilation": 1,
+   "stride": 1,
+   "epilogue": "tanh",
+   "packed": [
+    "voc.conv_post.wp",
+    "voc.conv_post.b"
+   ],
+   "packed_shape": [
+    1,
+    7,
+    10,
+    4
+   ],
+   "shape": "[Cin][T] -> [Cout][T + 2*pad - dil*(K-1)]"
+  }
+ ]
+}

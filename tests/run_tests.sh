@@ -8,7 +8,9 @@ cd "$(dirname "$0")/.."
 ARCH=$(uname -m)
 make -C runtime -j4 >/dev/null
 B=build/$ARCH
+PTK=${PTK:-build/v1b8k.ptk}
+GOLD=${GOLD:-tests/golden}
 echo "== kernels ($ARCH)"
 $B/test_kernels tests/kern
 echo "== end-to-end vs onnxruntime golden"
-$B/test_e2e build/v1b8k.ptk tests/golden zh_greeting en_thanks mix_booking zh_phone_sid1 random_T90 random_T23
+$B/test_e2e $PTK $GOLD zh_greeting en_thanks mix_booking zh_phone_sid1 random_T90 random_T23

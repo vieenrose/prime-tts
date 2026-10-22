@@ -272,11 +272,18 @@ def main():
     ex.graph("enc", f"{args.model_dir}/acoustic_encoder.onnx")
     ex.graph("dec", f"{args.model_dir}/acoustic_decoder.onnx")
     ex.graph("voc", f"{args.model_dir}/vocoder.onnx")
+    # Vocoder geometry as data so the runtime is not locked to one variant: per stage
+    # [stage_channels (ConvT Cin, = resblock channels), stride, pad, kernel].
+    stages = sorted((l for l in ex.layers if l["graph"] == "voc" and l["module"].startswith("ups.")),
+                    key=lambda l: int(l["module"].split(".")[1]))
+    assert len(stages) == 4, stages
+    ex.add("voc.geom", np.array([[l["W_shape"][1], l["stride"], l["pad"], l["kernel"]] for l in stages],
+                                np.float32))
     n, nb = ex.write(args.out)
     meta = json.load(open(f"{args.model_dir}/meta.json"))
     nparam = sum(t.size for t in ex.tensors.values())
     doc = {
-        "model": "PrimeTTS v1b_8k",
+        "model": f"PrimeTTS {os.path.basename(args.model_dir)}",
         "container": os.path.basename(args.out),
         "meta": meta,
         "notes": [
