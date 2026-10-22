@@ -496,7 +496,9 @@ def main():
     ap.add_argument("--golden", default=GOLDEN)
     ap.add_argument("--case", default="T81", help="golden case dir name, or 'all'")
     ap.add_argument("--probe", default=os.path.join(GOLDEN, "_probe_T81"),
-                    help="full onnxruntime node dump for the case; 'none' to skip the node gate")
+                    help="full onnxruntime node dump for --probe-case; 'none' to skip the node gate")
+    ap.add_argument("--probe-case", default="T81",
+                    help="the case the node dump was generated for; other cases get the audio gate only")
     ap.add_argument("--rel", type=float, default=1e-3, help="per-node rel gate, fp32-weight groups")
     ap.add_argument("--rel-fp16", type=float, default=2e-3,
                     help="per-node rel gate for the decoder (its weights are fp16 in the container)")
@@ -522,6 +524,8 @@ def main():
         if s < args.sndr_min:
             fail += 1
         probe_dir = None if args.probe in ("none", "") else args.probe
+        if probe_dir and c != args.probe_case:
+            probe_dir = None                       # the node dump exists for one case only
         if probe_dir and os.path.isdir(probe_dir):
             exempt = noise_exemption(o) if noise == 0.0 else set()
             per = {}
