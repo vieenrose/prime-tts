@@ -575,6 +575,67 @@ __global__ void pt_convT_kernel_wsm(const float *__restrict__ x, int64_t ldx, in
     yb[(int64_t) (co0 + 3) * ldy + oi] = acc.w;
 }
 
+
+/* Phase-major conv-transpose: blockIdx.z = batch*s + phase, and thread i of the block computes the
+ * output oi = q*s + r - pad of that phase. The time-major kernel above lets every block cover all s
+ * phases and keeps only the threads whose output belongs to the current phase busy, so (s-1)/s of
+ * the threads idle in every phase (3/4 for the s=4 upsamplers). Here no thread idles, and a block
+ * stages only its own phase slice, once. Each output still sums taps t ascending and channels ci
+ * ascending onto the bias: the reference chain, bit-identical. */
+__global__ void pt_convT_kernel_ph(const float *__restrict__ x, int64_t ldx, int cin, int64_t tin,
+                                   float *__restrict__ y, int64_t ldy, int64_t Lout, int cout, int s,
+                                   int pad, int ntap, const float *__restrict__ wp,
+                                   const float *__restrict__ bias, int64_t bsx, int64_t bsy) {
+  extern __shared__ float4 wph[];
+  const int NT = blockDim.x;
+  const int kc = ntap * cin;
+  const int nblk = ((cout + 3) / 4 * 4) / 4;
+  int r = (int) (blockIdx.z % s);
+  int64_t b = (int64_t) (blockIdx.z / s);
+  int blk = (int) blockIdx.y;
+  const float4 *wsrc = (const float4 *) wp + (int64_t) blk * kc + (int64_t) r * nblk * kc;
+  for (int idx = threadIdx.x; idx < kc; idx += NT)
+    wph[idx] = wsrc[idx];
+  __syncthreads();
+  /* first q whose output index is >= 0 */
+  int64_t q0 = (pad - r + s - 1) / s;
+  if (pad - r < 0) q0 = 0;
+  int64_t q = q0 + (int64_t) blockIdx.x * NT + threadIdx.x;
+  int64_t oi = q * s + r - pad;
+  if (oi < 0 || oi >= Lout)
+    return;
+  int co0 = blk * 4;
+  float4 acc = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                           bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                           bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                           bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  const float *xb = x + b * bsx;
+  for (int t = 0; t < ntap; t++) {
+    int64_t tq = q - t;
+    if (tq < 0 || tq >= tin)
+      continue;
+    const float4 *wt = wph + (int64_t) t * cin;
+    const float *xs = xb + tq;
+    for (int ci = 0; ci < cin; ci++) {
+      float4 w = wt[ci];
+      float xv = xs[(int64_t) ci * ldx];
+      acc.x += w.x * xv;
+      acc.y += w.y * xv;
+      acc.z += w.z * xv;
+      acc.w += w.w * xv;
+    }
+  }
+  float *yb = y + b * bsy;
+  if (co0 + 0 < cout)
+    yb[(int64_t) (co0 + 0) * ldy + oi] = acc.x;
+  if (co0 + 1 < cout)
+    yb[(int64_t) (co0 + 1) * ldy + oi] = acc.y;
+  if (co0 + 2 < cout)
+    yb[(int64_t) (co0 + 2) * ldy + oi] = acc.z;
+  if (co0 + 3 < cout)
+    yb[(int64_t) (co0 + 3) * ldy + oi] = acc.w;
+}
+
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
                  int64_t batch, int wtab, int btab) {
@@ -632,7 +693,16 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
   size_t wbuf_bytes = dbuf ? 2 * one : one;
   int wsm = one > 0 && wbuf_bytes <= gate && getenv("PT_V21_CONVT_WSM") == NULL;
   dim3 grid((unsigned) ((Lout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
-  if (wsm) {
+  int ph = getenv("PT_V21_CONVT_PH") ? atoi(getenv("PT_V21_CONVT_PH")) : 1;
+  if (wsm && ph) {
+    /* outputs per phase: at most ceil(Lout/s) + 1 */
+    int64_t nq = (Lout + pad) / s + 2;
+    dim3 gph((unsigned) ((nq + threads - 1) / threads), (unsigned) (cout4 / 4),
+             (unsigned) (batch * s));
+    pt_convT_kernel_ph<<<gph, threads, one, (cudaStream_t) c->g_stream>>>(
+        dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
+        (int64_t) cin * ldx, (int64_t) cout4 * Lout);
+  } else if (wsm) {
     pt_convT_kernel_wsm<<<grid, threads, wbuf_bytes, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
         (int64_t) cin * ldx, (int64_t) cout4 * Lout, dbuf);
