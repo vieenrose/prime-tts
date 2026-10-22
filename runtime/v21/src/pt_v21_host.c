@@ -583,6 +583,16 @@ static void host_cont_shared_put(int k, float *p, int owned) {
   pthread_mutex_unlock(&g_hlock);
 }
 
+static uint32_t h2f_table[65536];
+static int h2f_table_ready = 0;
+static void h2f_table_init(void) {
+  if (h2f_table_ready)
+    return;
+  for (int h = 0; h < 65536; h++)
+    h2f_table[h] = (uint32_t) half2float_bits((uint16_t) h);
+  h2f_table_ready = 1;
+}
+
 static float *v21_load_cont(pt_ctx *c, uint32_t i, const char *name, int64_t off, int64_t n,
                             int itemsize) {
   float *f = (float *) malloc((size_t) (n * 4 + 64));
@@ -594,9 +604,10 @@ static float *v21_load_cont(pt_ctx *c, uint32_t i, const char *name, int64_t off
   if (itemsize == 4) {
     memcpy(f, src, (size_t) (n * 4));
   } else {
+    h2f_table_init();
     const uint16_t *h = (const uint16_t *) src;
     for (int64_t k = 0; k < n; k++) {
-      uint32_t u = (uint32_t) half2float_bits(h[k]);
+      uint32_t u = h2f_table[h[k]];
       memcpy(&f[k], &u, 4);
     }
   }
