@@ -44,6 +44,20 @@ tail waste but a much slower per-element rate (0.66 vs 0.88 effective -- ig8 sti
 Tout to 128 and trimming needs padded intermediates that break the conv->conv chain. Do not pursue
 without evidence from a packing-aware measurement, not a single-stream model.
 
+## Killed by measurement #6 (run 82): pre-faulting the container mmap
+`MAP_POPULATE` (+`WILLNEED`, env-gated `PT_V21_POPULATE`, page cache hot post-rsync) on the 111 MB
+container mapping. Record-pass+map, alternating 3 pairs: 99.0/98.7/99.2 vs 101.9/102.1/101.0 --
+pre-faulting is ~3 ms worse-or-neutral, 3/3. Faults are free (fault-around + hot page cache); the
+99 ms is compute (84 MB memcpy + LUT fp16 convert, already optimized in runs 65/70). No wall A/B was
+needed: a zero mechanism contribution bounds the wall effect at zero. Mapping tuning is exhausted.
+
+## Killed by measurement #5 (run 81): PreferL1 cache config for the GEMM convs
+`cudaFuncSetCacheConfig(ig/ig8, PreferL1)`, env-gated, wsm/plain/convT/matmul untouched (wsm needs
+up to 48 KB shared). N=1 kernel+sync, alternating 3 pairs: 395.8/396.3/397.6 vs 401.9/396.9/402.6
+(0/3 wins, directionally worse). The kernels' working sets already live in shared tiles by design;
+the remaining global traffic is streaming with low reuse, so a bigger L1 cannot help. Same family
+as the __ldg discard (same cache hierarchy). L1/shared tuning for these kernels is exhausted.
+
 ## Killed as stale or under-bar (run 80, by code reading + measured bounds, no Nano run spent)
 - **Constant folding in the generator: STALE PREMISE.** `PT_CONST` (host.c:2192) aliases the container
   or int pool and never copies; CONST totals 3.1 ms/stream. There is no per-request materialization
