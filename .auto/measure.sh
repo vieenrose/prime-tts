@@ -32,15 +32,15 @@ ssh "$NANO" 'test -x ~/primetts/build/pt_v21_par' || fail "pt_v21_par missing on
 # ---- N=4 (primary). Also sample free RAM during the run: memory is the Nano's real constraint.
 run4=$(ssh "$NANO" "cd ~/primetts && (for i in \$(seq 1 40); do free -m | sed -n 2p | tr -s ' ' | cut -d' ' -f4 >> /tmp/ar_mem.txt; sleep 0.3; done > /dev/null 2>&1 &) ; PT_V21_ARENA_MB=$ARENA ./build/pt_v21_par --container build/v21.ptk --case $CASE --cuda --parallel $N4 2>&1; echo \"MINFREE \$(sort -n /tmp/ar_mem.txt | head -1)\"; rm -f /tmp/ar_mem.txt")
 echo "$run4" | sed -n '1,4p'
-wall=$(echo "$run4" | grep -oE '^N=[0-9]+  wall [0-9]+ ms' | grep -oE '[0-9]+' | head -1)
-sndr=$(echo "$run4" | grep -oE 'min SNDR [-0-9.]+' | grep -oE '[-0-9]+$' | head -1)
-minfree=$(echo "$run4" | grep -oE 'MINFREE [0-9]+' | grep -oE '[0-9]+')
+wall=$(echo "$run4" | sed -n 's/^N=[0-9][0-9]*  wall \([0-9][0-9]*\) ms.*/\1/p' | head -1)
+sndr=$(echo "$run4" | sed -n 's/.*min SNDR \([0-9][0-9.]*\) dB$/\1/p' | head -1)
+minfree=$(echo "$run4" | sed -n 's/^MINFREE \([0-9][0-9]*\)$/\1/p' | head -1)
 [ -n "$wall" ] || fail "no wall time in N=4 output"
 [ -n "$sndr" ] || fail "no SNDR in N=4 output"
 
 # ---- N=1 single-stream latency
 run1=$(ssh "$NANO" "cd ~/primetts && PT_V21_ARENA_MB=$ARENA ./build/pt_v21_par --container build/v21.ptk --case $CASE --cuda --parallel 1 2>&1")
-s1=$(echo "$run1" | grep -oE 'slowest stream [0-9]+ ms' | grep -oE '[0-9]+' | head -1)
+s1=$(echo "$run1" | sed -n 's/.*slowest stream \([0-9][0-9]*\) ms.*/\1/p' | head -1)
 
 # ---- GPU phase split (where the time actually goes; the driver prints this under PT_V21_CUDAPROF)
 split=$(ssh "$NANO" "cd ~/primetts && PT_V21_CUDAPROF=1 PT_V21_ARENA_MB=$ARENA ./build/pt_v21_nano --container build/v21.ptk --case $CASE --cuda 2>&1 | grep -E 'gpu split' | head -1")
