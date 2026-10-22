@@ -503,8 +503,13 @@ __global__ void pt_convT_kernel(const float *__restrict__ x, int64_t ldx, int ci
 __global__ void pt_convT_kernel_wsm(const float *__restrict__ x, int64_t ldx, int cin, int64_t tin,
                                     float *__restrict__ y, int64_t ldy, int64_t Lout, int cout, int s,
                                     int pad, int ntap, const float *__restrict__ wp,
-                                    const float *__restrict__ bias, int64_t bsx, int64_t bsy) {
-  extern __shared__ float4 wbuf[];   /* two phase slices: [phase & 1][t*cin + ci] */
+                                    const float *__restrict__ bias, int64_t bsx, int64_t bsy,
+                                    int dbuf) {
+  /* dbuf=1: two phase slices, next phase prefetched while this one computes.
+   * dbuf=0: one slice, reloaded per phase behind a barrier - half the shared memory, so the
+   * cin=512 upsampler (32 KB per phase) fits under the 48 KB per-block limit. Same arithmetic
+   * order either way: bit-identical. */
+  extern __shared__ float4 wbuf[];   /* [phase & 1][t*cin + ci], or one slice when dbuf=0 */
   const int NT = blockDim.x;
   const int kc = ntap * cin;
   const int nblk = ((cout + 3) / 4 * 4) / 4;
@@ -519,11 +524,17 @@ __global__ void pt_convT_kernel_wsm(const float *__restrict__ x, int64_t ldx, in
   const float *xb = x + b * bsx;
   const float4 *wbase = (const float4 *) wp + (int64_t) blk * kc;
   int live = oi < Lout;
-  for (int idx = threadIdx.x; idx < kc; idx += NT)
-    wbuf[idx] = wbase[idx];   /* prime phase 0 */
+  if (dbuf)
+    for (int idx = threadIdx.x; idx < kc; idx += NT)
+      wbuf[idx] = wbase[idx];   /* prime phase 0 */
   for (int r = 0; r < s; r++) {
-    int cur = r & 1;
-    if (r + 1 < s) {
+    int cur = dbuf ? (r & 1) : 0;
+    if (!dbuf) {
+      /* the trailing barrier of the previous phase guarantees nobody still reads the slice */
+      const float4 *nx = wbase + (int64_t) r * nblk * kc;
+      for (int idx = threadIdx.x; idx < kc; idx += NT)
+        wbuf[idx] = nx[idx];
+    } else if (r + 1 < s) {
       const float4 *nx = wbase + (int64_t) (r + 1) * nblk * kc;
       for (int idx = threadIdx.x; idx < kc; idx += NT)
         wbuf[(cur ^ 1) * kc + idx] = nx[idx];
@@ -612,13 +623,19 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
     }
   }
   int threads = 256;
-  size_t wbuf_bytes = (size_t) 2 * ntap * cin * sizeof(float4);
-  int wsm = wbuf_bytes > 0 && wbuf_bytes <= 32768 && getenv("PT_V21_CONVT_WSM") == NULL;
+  /* prefer the double-buffered slice; fall back to one slice per phase when two do not fit */
+  const char *gk = getenv("PT_V21_CONVT_KB");
+  size_t gate = gk ? (size_t) atol(gk) * 1024 : 49152;
+  size_t one = (size_t) ntap * cin * sizeof(float4);
+  int dbuf = getenv("PT_V21_CONVT_SB") ? 0 : 1;
+  if (2 * one > gate) dbuf = 0;
+  size_t wbuf_bytes = dbuf ? 2 * one : one;
+  int wsm = one > 0 && wbuf_bytes <= gate && getenv("PT_V21_CONVT_WSM") == NULL;
   dim3 grid((unsigned) ((Lout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   if (wsm) {
     pt_convT_kernel_wsm<<<grid, threads, wbuf_bytes, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
-        (int64_t) cin * ldx, (int64_t) cout4 * Lout);
+        (int64_t) cin * ldx, (int64_t) cout4 * Lout, dbuf);
   } else {
     pt_convT_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, tin, dy,
                                                                        /*ldy=*/Lout, /*Lout=*/Lout,
