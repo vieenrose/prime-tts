@@ -107,7 +107,7 @@ Baseline (this commit): **N=4 wall 9.9 s**, N=1 4.5 s, SNDR 70.08 dB, min free ~
   scratch at `t*stride + k*dil` (no negative indexing); fp16 subnormals decode exactly (141k of them);
   batch is a real dimension on the dec/iSTFT conv path (four frames at once); **shared-payload work
   must be checked with peak RSS, not SNDR** (a dropped ctab claim duplicates payloads silently).
-- Resident GPU weights (uploaded once, ctab-indexed, refcounted, shared read-only) + per-stream 32 MB
+- Resident GPU weights (uploaded once, ctab-indexed, refcounted, shared read-only) + per-stream 8 MB
   bump arena + per-stream non-blocking CUDA streams + async staging copies: alloc 222 -> 0 ms,
   free 65 -> 0 ms, copies 153 -> 40 ms, single-stream T81 5.38 -> 4.44 s. Kept (commit `e072b0b`).
 - Known bug patterns, do not reintroduce: conv/convT lanes are **Cout channels** (all lanes multiply
