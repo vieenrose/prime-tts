@@ -17,12 +17,7 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
 - **Device-resident residuals (conv -> Add -> LeakyReLU -> conv).** Tried and reverted: the Add's
   second operand is not device-resident, so falling back to `bin_op` reads the stale host buffer of
   the chained conv (SNDR 0 dB). Needs both operands resident before it can work.
-- **Constant folding in the generator.** 1924 of 4066 nodes are `Constant`; they are materialized as
-  fresh tensors every request. Bake them into read-only pooled tables with no per-run copy.
-- **Shape-only op elision.** Reshape/Transpose/Squeeze/Unsqueeze/Expand that only rename a view
-  should not memcpy; carry a strided view and materialize only at kernels needing contiguity.
-- **Encoder convs (cin=768):** the 4-channel weight slice is 36 KB so they fall back to the unsliced
-  kernel. A float2-lane slice halves that to 18 KB and fits shared.
+
 
 ## Learned this session (do not relearn)
 - `__syncthreads()` must be reached by every thread in the block.
@@ -48,6 +43,22 @@ full waves, so most of it is hidden in practice. The alternatives are worse: `ig
 tail waste but a much slower per-element rate (0.66 vs 0.88 effective -- ig8 still wins); padding
 Tout to 128 and trimming needs padded intermediates that break the conv->conv chain. Do not pursue
 without evidence from a packing-aware measurement, not a single-stream model.
+
+## Killed as stale or under-bar (run 80, by code reading + measured bounds, no Nano run spent)
+- **Constant folding in the generator: STALE PREMISE.** `PT_CONST` (host.c:2192) aliases the container
+  or int pool and never copies; CONST totals 3.1 ms/stream. There is no per-request materialization
+  to fold away.
+- **Encoder-conv float2 slice: STALE.** The wsm gate is 48 KB now, so the 36 KB cin=768/K=3 slices
+  already take the weight-staged kernel with 512-thread blocks. Nothing falls back.
+- **Pinned staging for conv I/O: killed by run 77.** The engine does ~0.8 GB/s from pageable memory
+  no matter the call pattern, and pinned ADDS its own memcpy -- and per-stream copy volume (~130 MB)
+  hides behind kernel time on the copy engine anyway, so even free copies would not move the wall.
+- **Matmul launch coalescing: under bar.** 50 calls total 11-14 ms; batching same-shape grids saves
+  only launch overhead (~50 x ~10 us = 0.5 ms) while adding booking complexity.
+- **Shape-only op elision: under bar + risky.** Transpose/Reshape/etc. total ~15 ms of hidden host
+  work; views would disturb the alive/dev liveness flags the chain and trim paths rely on.
+- **-mcpu=cortex-a57 / -flto: not worth a loop.** Would only reschedule scalar double code (~25 ms
+  of hidden host work); numerics-neutral but provably under bar.
 
 ## Killed by measurement #4 (run 77)
 - **Async and pinned-staging variants of the 111 MB weight upload.** With the clock ramped (run 75),
