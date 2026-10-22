@@ -2427,7 +2427,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
                                   : (float *) aligned_alloc(64, ybytes);   /* Cout=1 layers pad to 4 */
         if (getenv("PT_V21_CONVLOG"))
           fprintf(stderr, "conv node %d %s T=%lld N=%lld cin=%d cout=%d K=%d s=%d pad=%d dil=%d"
-                          " Tout=%lld ldxp=%lld\n", ni, pt_tdefs[nd->out[0]].origin, (long long) T,
+                          " Tout=%lld ldxp=%lld\n", idx, pt_tdefs[nd->out[0]].origin, (long long) T,
                   (long long) N, cin, cout, K, stride, pad, dil, (long long) Tout,
                   (long long) ldxp);
         /* Fuse the elementwise nodes that immediately follow this conv into its epilogue.  A node
