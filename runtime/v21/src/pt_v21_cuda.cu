@@ -736,6 +736,77 @@ __global__ void pt_convT_kernel_ph(const float *__restrict__ x, int64_t ldx, int
     yb[(int64_t) (co0 + 3) * ldy + oi] = acc.w;
 }
 
+
+/* GEMM-tiled phase-major conv-transpose: the same tiling as pt_conv_kernel_ig, applied to one
+ * phase r (blockIdx.z = batch*s + r), where output q of the phase is sum_t sum_ci
+ * W[r][t][ci] x[ci][q - t]. Each thread walks idx = t*cin + ci ascending onto its bias, the chain
+ * of pt_convT_kernel_ph: bit-identical. Out-of-range taps contribute exact zeros. */
+__global__ void __launch_bounds__(256) pt_convT_kernel_ig(
+    const float *__restrict__ x, int64_t ldx, int cin, int64_t tin, float *__restrict__ y,
+    int64_t ldy, int64_t Lout, int cout, int s, int pad, int ntap, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int64_t q0) {
+  __shared__ float4 Ws[IG_RK][16];
+  __shared__ float4 Xs[IG_RK][16];
+  const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+  const int nblk = (cout + 3) / 4;
+  const int r = (int) (blockIdx.z % s);
+  const int64_t b = (int64_t) (blockIdx.z / s);
+  const int g = blockIdx.y * 16 + ty;
+  const int64_t qb = q0 + (int64_t) blockIdx.x * 64;
+  const int kc = ntap * cin;
+  const float *xb = x + b * bsx;
+  const float4 *w4 = (const float4 *) wp + (int64_t) r * nblk * kc;
+  int co0 = g * 4;
+  float4 bz = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                          bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                          bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                          bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  float4 a0 = bz, a1 = bz, a2 = bz, a3 = bz;
+  const int lr = tid >> 4, lq = tid & 15;
+  for (int i0 = 0; i0 < kc; i0 += IG_RK) {
+    int i = i0 + lr;
+    int lg = blockIdx.y * 16 + lq;
+    Ws[lr][lq] = (i < kc && lg < nblk) ? w4[(int64_t) lg * kc + i] : make_float4(0.f, 0.f, 0.f, 0.f);
+    float4 xv = make_float4(0.f, 0.f, 0.f, 0.f);
+    if (i < kc) {
+      int t = i / cin, ci = i - t * cin;
+      const float *row = xb + (int64_t) ci * ldx;
+      int64_t qc = qb + lq * 4 - t;
+      if (qc + 0 >= 0 && qc + 0 < tin) xv.x = row[qc + 0];
+      if (qc + 1 >= 0 && qc + 1 < tin) xv.y = row[qc + 1];
+      if (qc + 2 >= 0 && qc + 2 < tin) xv.z = row[qc + 2];
+      if (qc + 3 >= 0 && qc + 3 < tin) xv.w = row[qc + 3];
+    }
+    Xs[lr][lq] = xv;
+    __syncthreads();
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][ty];
+      float4 v = Xs[rr][tx];
+      a0.x += w.x * v.x; a0.y += w.y * v.x; a0.z += w.z * v.x; a0.w += w.w * v.x;
+      a1.x += w.x * v.y; a1.y += w.y * v.y; a1.z += w.z * v.y; a1.w += w.w * v.y;
+      a2.x += w.x * v.z; a2.y += w.y * v.z; a2.z += w.z * v.z; a2.w += w.w * v.z;
+      a3.x += w.x * v.w; a3.y += w.y * v.w; a3.z += w.z * v.w; a3.w += w.w * v.w;
+    }
+    __syncthreads();
+  }
+  if (g >= nblk)
+    return;
+  float4 *acc[4] = {&a0, &a1, &a2, &a3};
+  float *yb = y + b * bsy;
+  for (int j = 0; j < 4; j++) {
+    int64_t q = qb + tx * 4 + j;
+    int64_t oi = q * s + r - pad;
+    if (oi < 0 || oi >= Lout)
+      continue;
+    float4 a = *acc[j];
+    if (co0 + 0 < cout) yb[(int64_t) (co0 + 0) * ldy + oi] = a.x;
+    if (co0 + 1 < cout) yb[(int64_t) (co0 + 1) * ldy + oi] = a.y;
+    if (co0 + 2 < cout) yb[(int64_t) (co0 + 2) * ldy + oi] = a.z;
+    if (co0 + 3 < cout) yb[(int64_t) (co0 + 3) * ldy + oi] = a.w;
+  }
+}
+
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
                  int64_t batch, int wtab, int btab) {
@@ -794,7 +865,20 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
   int wsm = one > 0 && wbuf_bytes <= gate && getenv("PT_V21_CONVT_WSM") == NULL;
   dim3 grid((unsigned) ((Lout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   int ph = getenv("PT_V21_CONVT_PH") ? atoi(getenv("PT_V21_CONVT_PH")) : 1;
-  if (wsm && ph) {
+  static int tig = -1;
+  if (tig < 0) tig = getenv("PT_V21_CONVT_IG") ? atoi(getenv("PT_V21_CONVT_IG")) : 1;
+  if (tig) {
+    /* q runs over every q whose output index can land in [0, Lout) for some phase */
+    int64_t qlo = (pad - (s - 1) + s - 1) / s;   /* ceil((pad - (s-1)) / s), clamp below */
+    if (pad - (s - 1) <= 0) qlo = 0;
+    int64_t qhi = (Lout - 1 + pad) / s;          /* inclusive */
+    int64_t nq = qhi - qlo + 1;
+    dim3 gig((unsigned) ((nq + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16),
+             (unsigned) (batch * s));
+    pt_convT_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
+        dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
+        (int64_t) cin * ldx, (int64_t) cout4 * Lout, qlo);
+  } else if (wsm && ph) {
     /* outputs per phase: at most ceil(Lout/s) + 1 */
     int64_t nq = (Lout + pad) / s + 2;
     dim3 gph((unsigned) ((nq + threads - 1) / threads), (unsigned) (cout4 / 4),
