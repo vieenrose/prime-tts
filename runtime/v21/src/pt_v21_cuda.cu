@@ -191,6 +191,57 @@ static void arena_release(pt_ctx *c, void *mark) {
   c->g_arena_used = (size_t) ((char *) mark - (char *) c->g_arena);
 }
 
+
+/* ------------------------------------------------------- GPU clock warmup (nvhost_podgov)
+ * nvhost_podgov idles the GPU at 76.8 MHz and only ramps once the SMs carry sustained load -- there
+ * is no root on this box to pin clocks (jetson_clocks / min_freq are mode 644 root-only). The cost of
+ * that idle clock is visible in two places: the 111 MB resident-weight upload runs at only ~0.46 GB/s
+ * (230 ms) while an identical second upload immediately after runs 1.4x faster (0.66 GB/s), and the
+ * first process after a build measures 700-850 ms slower single-stream than any warm one. A short
+ * fixed amount of real arithmetic right after the context comes up makes the governor ramp *before*
+ * the upload and the first request, which is work the process owes anyway.
+ * Fixed iteration count (not a time target), so its own cost is bounded and observable. */
+__global__ void pt_warmup_kernel(int *sink, int iters) {
+  int v = sink[threadIdx.x];
+  for (int i = 0; i < iters; i++) {
+    v = v * 1664525 + 1013904223;   /* ALU chain: no memory traffic, no denormals */
+    v ^= v >> 13;
+  }
+  sink[threadIdx.x] = v;
+}
+
+static pthread_mutex_t g_warm_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Runs at most once per process; returns the wall cost of the warmup itself. */
+static double gpu_warm_once(void) {
+  static int done;
+  pthread_mutex_lock(&g_warm_lock);
+  if (done) {
+    pthread_mutex_unlock(&g_warm_lock);
+    return 0.0;
+  }
+  done = 1;
+  pthread_mutex_unlock(&g_warm_lock);
+
+  const char *e = getenv("PT_V21_WARM");
+  int iters = e ? atoi(e) : 64000;
+  if (iters <= 0)
+    return 0.0;
+  int *sink = NULL;
+  if (cudaMalloc((void **) &sink, 256 * sizeof(int)) != cudaSuccess) {
+    cudaGetLastError();
+    return 0.0;
+  }
+  cudaMemset(sink, 0, 256 * sizeof(int));
+  double t0 = gpu_now();
+  pt_warmup_kernel<<<32, 256>>>(sink, iters);
+  if (cudaDeviceSynchronize() != cudaSuccess)
+    cudaGetLastError();
+  double cost = gpu_now() - t0;
+  cudaFree(sink);
+  return cost;
+}
+
 int pt_v21_cuda_init(pt_ctx *c, int verbose) {
   if (verbose)
     fprintf(stderr, "pt_v21 cuda: device 0 (sm_53)\n");
@@ -205,6 +256,11 @@ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
     cudaGetLastError();   /* setting flags on an active context is a harmless error */
   }
   PTCHK(cudaFree(0)); /* force context creation */
+  double tw0 = gpu_now();
+  double twarm = gpu_warm_once();
+  if (verbose || getenv("PT_V21_WARMLOG"))
+    fprintf(stderr, "pt_v21 cuda: clock warmup %.1f ms\n", twarm);
+  (void) tw0;
   c->use_cuda = 1;
   if (cudaStreamCreateWithFlags((cudaStream_t *) &c->g_stream, cudaStreamNonBlocking)) {
     fprintf(stderr, "pt_v21 cuda: stream create failed\n");
@@ -215,8 +271,14 @@ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
     fprintf(stderr, "pt_v21 cuda: arena of %zu MiB failed\n", aw);
     return -1;
   }
-  if (weights_upload(c, verbose))
-    return -1;
+  {
+    double tu0 = gpu_now();
+    int ur = weights_upload(c, verbose);
+    if (verbose || getenv("PT_V21_WARMLOG"))
+      fprintf(stderr, "pt_v21 cuda: weight upload %.1f ms\n", gpu_now() - tu0);
+    if (ur)
+      return -1;
+  }
   if (verbose)
     fprintf(stderr, "pt_v21 cuda: resident weights + %zu MiB arena ready\n", aw);
   return 0;

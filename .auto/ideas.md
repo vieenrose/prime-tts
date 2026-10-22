@@ -38,6 +38,17 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
   that is why the official measure.sh N=4 run and warm paired runs disagree.
 - Diagnostics: `PT_V21_EKIND=2` prints per-node times; `PT_V21_DUMP_T=<node>` dumps raw fp32.
 
+## Killed by measurement #2 (run 74)
+- **Folding a single-consumer activation into its producer when the producer is a Slice.** The
+  activation windows (32 Tanh/Sigmoid pairs) are fed by a Slice whose output tensor is still
+  *unmaterialised* at the call site (n=0): the node's own op_bind_shapes pass is what computes its
+  dims, so a loop over `out[0]->n` at that point iterates zero times while the rest of the graph
+  still consumes real values (SNDR -27.8 dB). Separately, the fold does not even save work: SLICE
+  10.8 -> 12.1 ms, TANH/SIGMOID unchanged, because those Slices are small. Do not retry.
+- **Add->LeakyReLU fold** (same-shape fp32 add path): correct and bit-exact (LEAKYRELU 34.2 ->
+  16.8 ms) but ADD 29.0 -> 30.1, i.e. net ~0. Not available for the 12 residual Adds (their tensor
+  has 2 consumers) nor the 14 lrelus fed by Conv/ConvTranspose/Div (2 or 4 consumers).
+
 ## Killed by measurement (do not retry without new evidence)
 - **fp16 conv activations**: SNDR 43.73 dB, far below the gate.
 - 4 output columns per thread (16 accumulators): 39% slower.
@@ -47,6 +58,21 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
 - Small 32x32 tiles for short outputs: arithmetic intensity matters more than block count.
 - Padé-approximant / coarse-table tanh+sigmoid: SNDR 67.4 / 64.3 dB. The 65536-point interpolated
   table keeps 70.09 dB and is kept (TANH 62 -> 19 ms).
+
+## Measurement noise floor (run 73, important)
+The SAME binary draws 2428 / 2436 / 2449 / 2479 / 2502 / 2521 ms on n4_wall -- a ~4% spread on this
+box, worse than the 2-4% assumed earlier. A single draw cannot separate anything below ~100 ms.
+Use the matched alternating procedure (>= 3 base/patch pairs, compare means) for every keep decision;
+the "best" draw seen so far is the low end of the spread, not a record.
+
+## Host budget (run 73) -- nothing above 31 ms/stream
+ADD 30.9 (107 calls, incl. the 12 large residual adds), conv wrapper 26, TANH 19.1, LEAKYRELU 17.0,
+SIGMOID 13.4, MATMUL 12.4, SLICE 11.2 (214 calls), EINSUM 9.3 (2 calls, double-precision
+accumulation in the iSTFT basis contraction), SOFTMAX 7.5, MUL 6.9, PAD 6.2, EXP 4.8, DIV 4.8,
+SIN 4.7, TRANSPOSE 3.7, RESHAPE 3.6, WHERE 3.3, CONST 3.1 (1924 nodes!), LAYERNORM 2.8, COS 2.2.
+Largest remaining single mechanism: fold the pointwise activations into their producer's output loop
+(every one of the 16 Tanh and 16 Sigmoid nodes is fed by a Slice, so that is 32 Slice->act pairs =
+~30 ms/stream of pure duplicate memory traffic).
 
 ## Graph op dispatch (run 72)
 A warm `PT_V21_EKIND=2` profile is the right tool: it surfaces nodes whose *measured* time is out of
