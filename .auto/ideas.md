@@ -36,3 +36,25 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
   and cache by size class so the bump pointer never fragments.
 - **Launch coalescing for tiny ops**: 26 dynamic matmuls + 50 matmul calls are latency-bound; batch
   same-shape ones into one grid.
+
+## Learned this session (do not relearn)
+- `__syncthreads()` must be reached by every thread in the block. A `continue` that can skip a
+  barrier is undefined behaviour and shows up as deterministic, sparse output corruption (this cost
+  a 6.6% faster convT kernel its first round: SNDR 6.47 dB on T20, bit-exact on the fallback nodes).
+- Staging weights cooperatively into shared memory is the big conv/convT lever: conv 2526 -> 1855 ms,
+  convT 359 -> 249 ms, both bit-identical. Staging the *input* tile as well (with per-chunk barriers)
+  was 2.7x SLOWER: barriers in the inner loop dominate on 2 SMs.
+- Host-side wins do not move the N=4 wall (GPU-bound); they show in n1_stream_ms. To move the primary
+  metric, attack GPU kernels.
+- Buffer pooling of activation tensors: no gain, costs ~200 MB (glibc already reuses the freed blocks).
+- Diagnostics: `PT_V21_EKIND=2` prints top-20 per-node GPU times; `PT_V21_DUMP_T=<node>` writes
+  /tmp/pt_dump_<node>.bin (raw fp32) for byte-exact A/B against the reference path.
+
+## Open ideas
+- Encoder convs (12 at ~42 ms each, output len ~81, cout=192, batch=4) waste 2/3 of every 256-thread
+  block: pick the launch block size from the problem shape (threads in {32,64,128,256}, maximize
+  fill*block-coverage). Bitwise safe - only the grid changes.
+- Encoder convs with cin=768: 4-channel weight slice is 36 KB (>16 KB gate) so they fall back to the
+  unsliced kernel. A 2-lane (float2) slice halves that to 18 KB and fits shared.
+- matmul: 50 calls, ~30-90 ms; same weight-staging idea.
+- Host: SLICE 205 ms in 214 calls (memcpy-bound, scalar), ADD 105, TANH 81 (libm per element), PAD 76.
