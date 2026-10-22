@@ -48,6 +48,21 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
 - Padé-approximant / coarse-table tanh+sigmoid: SNDR 67.4 / 64.3 dB. The 65536-point interpolated
   table keeps 70.09 dB and is kept (TANH 62 -> 19 ms).
 
+## Startup budget (measured with temporary timestamps, run 71)
+open/record pass 100 ms (one serialized pass; later contexts alias the shared payloads and wait),
+CUDA context 85 ms, device weight upload 230 ms for 111 MB. The upload is 0.46 GB/s only because the
+GPU is still at 76.8 MHz: an identical second upload immediately after runs at 0.66 GB/s. So it is the
+clock ramp, not the copy path. `cudaHostRegister` on the container mmap returns "operation not
+supported" on this driver (tried twice: file mmap and MAP_POPULATE anon mmap), and a pinned
+cudaMallocHost staging buffer bought only 240 -> 230 ms. Overlapping the 230 ms upload with the
+100 ms CPU record pass is the only remaining startup win (~4% of the primary) and it would put CUDA
+calls inside pt_v21_open, next to where run #55's race lived -- not worth the correctness risk.
+
+## Transfer budget during inference (measured, run 71)
+Conv activations move 67.5 MB out + 63.2 MB in per stream, but at the ramped clock H2D runs at
+~3 GB/s (the 63.2 MB shows up as the 21 ms `copy` split), so all PCIe traffic is only ~43 ms of the
+~380 ms GPU block. Transfers are NOT a lever; the GPU compute (34.9 GFLOP at ~44% of fp32 peak) is.
+
 ## Run 70 findings (measurement budget: what is left)
 MAC-weighted conv wave efficiency is already 0.921, so batching the four streams for wave
 quantisation buys at most ~8% of the GPU total. No conv has cout % 4 != 0 and none runs with

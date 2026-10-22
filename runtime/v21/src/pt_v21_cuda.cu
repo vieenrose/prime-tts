@@ -324,7 +324,7 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
                                    int dil, int stride, int pad, float *__restrict__ y, int64_t ldy,
                                    int64_t Tout, int cout, const float *__restrict__ wp,
                                    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1,
-                                   float ea0, float ea1) {
+                                   float ea0, float ea1, int64_t pad_in) {
   extern __shared__ float4 wsm[];   /* [k*cin + ci] -> this block's 4 channel lanes */
   const int NT = blockDim.x;
   int64_t t = (int64_t) blockIdx.x * NT + threadIdx.x;
@@ -343,15 +343,34 @@ __global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int
                            bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
                            bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
   const float *xb = x + b * bsx;
-  for (int k = 0; k < K; k++) {
-    const float *xs = xb + (int64_t) (k * dil) + t * stride;
-    for (int ci = 0; ci < cin; ci++) {
-      float4 w = wsm[(int64_t) k * cin + ci];
-      float xv = xs[(int64_t) ci * ldx];
-      acc.x += w.x * xv;
-      acc.y += w.y * xv;
-      acc.z += w.z * xv;
-      acc.w += w.w * xv;
+  if (pad_in >= 0) {
+    /* unpadded row of length ldx: the tap is the zero padding when it falls outside, and whether it
+     * does depends only on (k, t) -- so the test hoists out of the ci loop. A masked tap still
+     * performs the same `acc += w*0` add (exactly zero) that the reference kernel does, so the
+     * summation chain is unchanged. */
+    for (int k = 0; k < K; k++) {
+      int64_t s = (int64_t) t * stride + (int64_t) (k * dil) - pad_in;
+      int ok = (s >= 0 && s < ldx);
+      for (int ci = 0; ci < cin; ci++) {
+        float4 w = wsm[(int64_t) k * cin + ci];
+        float xv = ok ? xb[(int64_t) ci * ldx + s] : 0.0f;
+        acc.x += w.x * xv;
+        acc.y += w.y * xv;
+        acc.z += w.z * xv;
+        acc.w += w.w * xv;
+      }
+    }
+  } else {
+    for (int k = 0; k < K; k++) {
+      const float *xs = xb + (int64_t) (k * dil) + t * stride;
+      for (int ci = 0; ci < cin; ci++) {
+        float4 w = wsm[(int64_t) k * cin + ci];
+        float xv = xs[(int64_t) ci * ldx];
+        acc.x += w.x * xv;
+        acc.y += w.y * xv;
+        acc.z += w.z * xv;
+        acc.w += w.w * xv;
+      }
     }
   }
   if (epi0 || epi1) {
@@ -658,7 +677,12 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   tA = gpu_prof() ? gpu_now() : 0.0;
   static long ig_min = -2;
   if (ig_min == -2) ig_min = getenv("PT_V21_IG_MINT") ? atol(getenv("PT_V21_IG_MINT")) : 0;
-  if (ig_min >= 0 && Tout >= ig_min) {
+  /* The GEMM kernels tile channels in 16 groups of 4. Every wide conv in this model has a channel
+   * count that is an exact multiple of 64, so the tile is always full; a narrow conv (e.g. the final
+   * cout=1 output projection) would leave 15 of the 16 groups computing and discarding results, so
+   * it goes to the column-per-thread kernel instead, which has no channel padding. */
+  int wide_tile = (cout4 / 4) >= 16 || getenv("PT_V21_IG_ANY");
+  if (ig_min >= 0 && Tout >= ig_min && wide_tile) {
     static long ig8_min = -2;
     if (ig8_min == -2) ig8_min = getenv("PT_V21_IG8_MINT") ? atol(getenv("PT_V21_IG8_MINT")) : 0;
     if (ig8_min >= 0 && Tout >= ig8_min) {
@@ -675,7 +699,7 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   } else if (wsm) {
     pt_conv_kernel_wsm<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1);
+        (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
   } else {
     pt_conv_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, K, dil, stride,
                                                                       pad, dy, /*ldy=*/Tout,
