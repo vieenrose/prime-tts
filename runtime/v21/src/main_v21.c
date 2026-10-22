@@ -132,6 +132,9 @@ int main(int argc, char **argv) {
   printf("  conv=%ld convT=%ld matmul=%ld  conv %.1f ms  convT %.1f ms  matmul %.1f ms  total %.1f ms\n",
          pt_v21_stats_conv(c), pt_v21_stats_convT(c), pt_v21_stats_matmul(c),
          pt_v21_stats_ms(c, 0), pt_v21_stats_ms(c, 1), pt_v21_stats_ms(c, 2), pt_v21_stats_ms(c, 3));
+  if (use_cuda)
+    fprintf(stderr, "  gpu split: alloc %.1f ms  copy %.1f ms  kernel+sync %.1f ms  free %.1f ms\n",
+            pt_v21_stat_ms(c, 0), pt_v21_stat_ms(c, 1), pt_v21_stat_ms(c, 2), pt_v21_stat_ms(c, 3));
   if (out) {
     int64_t d3[3] = {1, 1, wn};
     pt_npy_save_f32_v21(out, wav, 3, d3);

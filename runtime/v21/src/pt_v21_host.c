@@ -340,6 +340,11 @@ const float *pt_v21_cont(pt_ctx *c, int idx) {
   if (idx < 0 || idx >= c->n_cont) return 0;
   return c->cont_f32[idx];
 }
+size_t pt_v21_cont_bytes(pt_ctx *c, int idx) {
+  if (idx < 0 || idx >= c->n_cont) return 0;
+  return (size_t) c->cont_n[idx] * 4u;   /* every container weight is read as fp32 */
+}
+
 int pt_v21_cont_itemsize(pt_ctx *c, int idx) {
   if (idx < 0 || idx >= c->n_cont) return 0;
   return c->cont_isz[idx];
@@ -1303,7 +1308,9 @@ static int op_nonzero(pt_ctx *c, const pt_tv *A, pt_tv *O) {
 /* ---------------- weight-bearing ops over the container's packed layouts ---------------- */
 int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                     int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                    const float *bias, int64_t batch) {
+                    const float *bias, int64_t batch, int wtab, int btab) {
+  (void) wtab;
+  (void) btab;
   c->n_conv++;
   /* n is the OUTPUT length (the caller computed it from the graph shapes); both paths use that
    * convention so a CUDA swap cannot change the graph's shapes */
@@ -1349,7 +1356,9 @@ int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *
 /* phase/tap conv_transpose1d over the packed [s*C4/4][ntap][Cin][4] layout, with the tail flush */
 int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
-                 int64_t batch) {
+                 int64_t batch, int wtab, int btab) {
+  (void) wtab;
+  (void) btab;
   c->n_convT++;
   int ntap = (K + s - 1) / s;
   int cout4 = (cout + 3) / 4 * 4;
@@ -1393,6 +1402,16 @@ int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_
   return 0;
 }
 
+double pt_v21_stat_ms(pt_ctx *c, int which) {
+  switch (which) {
+    case 0: return c->g_alloc_ms;
+    case 1: return c->g_copy_ms;
+    case 2: return c->g_kernel_ms;
+    case 3: return c->g_free_ms;
+    default: return 0.0;
+  }
+}
+
 int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, const float *B,
                   int64_t ldb, int64_t nn, float *C, int64_t ldc) {
   c->n_matmul++;
@@ -1421,13 +1440,14 @@ void pt_v21_cuda_shutdown(pt_ctx *c) { (void) c; }
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                const float *bias, int64_t batch) {
-  return pt_v21_conv_cpu(c, X, ldx, cin, Y, ldy, n, cout, K, stride, pad, dil, wp, bias, batch);
+                const float *bias, int64_t batch, int wtab, int btab) {
+  return pt_v21_conv_cpu(c, X, ldx, cin, Y, ldy, n, cout, K, stride, pad, dil, wp, bias, batch,
+                          wtab, btab);
 }
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
-                 int64_t batch) {
-  return pt_v21_convT_cpu(c, X, ldx, cin, tin, Y, ldy, cout, s, pad, K, wp, bias, batch);
+                 int64_t batch, int wtab, int btab) {
+  return pt_v21_convT_cpu(c, X, ldx, cin, tin, Y, ldy, cout, s, pad, K, wp, bias, batch, wtab, btab);
 }
 int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, const float *B,
                   int64_t ldb, int64_t nn, float *C, int64_t ldc) {
@@ -1748,7 +1768,7 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
                   (long long) N, cin, cout, K, stride, pad, dil, (long long) Tout,
                   (long long) ldxp);
         pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
-                    c->cont_f32[nd->w0], c->cont_f32[nd->w1], N);
+                    c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1);
         if (cout4 != cout) {
           for (int64_t b = 0; b < N; b++)
             memcpy((float *) out[0]->p + b * cout * Tout, yp + b * cout4 * Tout,
@@ -1772,12 +1792,12 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         double t0 = pt_v21_now();
         if (cout4 == cout) {
           pt_v21_convT(c, (const float *) X->p, Tin, cin, Tin, (float *) out[0]->p, Lout, cout, s,
-                       pad, K, c->cont_f32[nd->w0], c->cont_f32[nd->w1], N);
+                       pad, K, c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1);
         } else {
           size_t sb = (size_t) ((((size_t) N * cout4 * Lout) * 4 + 63) & ~(size_t) 63);
           float *sc = (float *) aligned_alloc(64, sb);
           pt_v21_convT(c, (const float *) X->p, Tin, cin, Tin, sc, Lout, cout, s, pad, K,
-                       c->cont_f32[nd->w0], c->cont_f32[nd->w1], N);
+                       c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1);
           for (int64_t b = 0; b < N; b++)
             memcpy((float *) out[0]->p + b * cout * Lout, sc + b * cout4 * Lout,
                    (size_t) (cout * Lout * 4));

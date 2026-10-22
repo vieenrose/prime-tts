@@ -33,9 +33,20 @@ build/pt_v21_nano: $(SRC) $(GEN) runtime/v21/src/pt_v21_cuda.cu $(HDR)
 	$(NVCC) $(CUF) -o $@ build/pt_v21_cuda.o build/pt_v21_host_cu.o build/pt_graph_cu.o \
 	  build/main_v21_cu.o -L$(CUDA)/lib64 -lcudart -lm
 
+# M3 multi-stream driver: N concurrent requests on one GPU (needs CUDA on the Nano)
+par: build/pt_v21_par
+
+build/pt_v21_par: $(SRC) runtime/v21/src/main_v21_par.c $(GEN) runtime/v21/src/pt_v21_cuda.cu $(HDR)
+	@mkdir -p build
+	$(CC) $(CFLAGS) $(INC) -DPT_V21_CUDA -c runtime/v21/src/pt_v21_host.c -o build/pt_v21_host_par.o
+	$(CC) $(CFLAGS) $(INC) -c runtime/v21/gen/pt_graph.c -o build/pt_graph_par.o
+	$(NVCC) $(CUF) $(INC) -c runtime/v21/src/pt_v21_cuda.cu -o build/pt_v21_cuda_par.o
+	$(NVCC) $(CUF) $(INC) -o $@ build/pt_v21_cuda_par.o build/pt_v21_host_par.o build/pt_graph_par.o \
+	  runtime/v21/src/main_v21_par.c -L$(CUDA)/lib64 -lcudart -lpthread -lm
+
 gen:
 	$(PY) tools/gen_v21_graph.py
 
 clean:
-	rm -f build/pt_v21_host build/pt_v21_nano build/*.o
-.PHONY: host nano gen clean
+	rm -f build/pt_v21_host build/pt_v21_nano build/pt_v21_par build/*.o
+.PHONY: host nano par gen clean

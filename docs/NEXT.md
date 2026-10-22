@@ -136,6 +136,32 @@ Two bugs worth remembering, both found by per-node bisection against the dump:
 * The `cout4 != cout` trim copies per batch at stride `cout4*len`, so the kernel must write the
   padded row layout. Writing packed `cout` rows left batches 1..3 of the iSTFT conv-transpose
   untouched: batch 0 exactly right, the rest zeros.
+## Task 3 - M3: 4 parallel real-time streams (in progress)
+
+Multi-stream driver `runtime/v21/src/main_v21_par.c` (`make par`): N threads, each with its own
+context (own mmap + host activations), its own non-blocking CUDA stream and its own 32 MB device
+arena; the GPU weights are uploaded once and shared read-only (ctab-indexed cache, refcounted).
+
+Measured on the Nano, case T81 (57856 samples = **3.62 s of audio at 16 kHz** - RTF is wall ms over
+audio ms, so a single stream at 4.5 s is RTF 1.25, not real time):
+
+| N | wall | audio | throughput | slowest stream | min SNDR |
+|---|---|---|---|---|---|
+| 1 | 5.18 s | 3.62 s | 0.70x | 4.52 s (RTF 1.25) | 70.08 dB |
+| 2 | 5.77 s | 7.23 s | 1.25x | 5.22 s (RTF 1.45) | 70.08 dB |
+| 4 | 9.92 s | 14.46 s | **1.46x** | 9.08 s (RTF 2.51) | 70.08 dB |
+
+Memory at N=4 with 32 MB arenas: system free 1715 -> 1714 MB (the container mmap is page-cache
+shared, so streams do not each pay 89 MB), `NvMapMemFree 493 MB`. Four real-time streams need
+throughput ~2.8x today's 1.46x, i.e. per-stream RTF <= 1 with four concurrent.
+
+Resident weights + arena removed the allocator entirely (alloc 222 -> 0 ms, free 65 -> 0 ms, copies
+153 -> 40 ms; T81 single-stream conv 2.99 -> 2.32 s, total 5.38 -> 4.44 s). The remaining split is
+GPU kernels 2.16 s of 4.44 s, so ~2.2 s is host graph work serialized against the GPU. Levers, in
+the order that costs least: run the host elementwise ops while the conv kernels are in flight; CUDA
+Graphs to kill ~180 launches of per-call overhead; batch the four streams' conv work into one launch
+per layer (the kernel grid gains a stream dimension, the weights are already shared).
+
 ## Facts to keep using (all measured; canonical lists live elsewhere — do not re-derive)
 
 Hardware + GEMM/issue rates: `bench/gpu/RESULTS.md`, `bench/cpu/RESULTS_ISSUE.md`. CPU concurrency

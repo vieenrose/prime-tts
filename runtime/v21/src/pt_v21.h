@@ -108,15 +108,30 @@ struct pt_ctx {
   int dev_mode;
   long n_conv, n_convT, n_matmul, n_alloc_fail;
   double t_conv, t_convT, t_matmul, t_total;
+  /* CUDA-side split of the conv/convT/matmul time: allocations, host<->device copies, kernel+sync.
+   * Measured with PT_V21_CUDAPROF=1; it is what tells us whether the GPU path is bound by launch,
+   * staging, the kernels themselves, or per-call cudaMalloc. */
+  double g_alloc_ms, g_copy_ms, g_kernel_ms, g_free_ms;
+  long g_calls;
+  void *g_weights;   /* ctab index -> device pointer, resident weights (M3) */
+  void *g_arena;     /* resident device arena base (M3) */
+  void *g_stream;    /* per-stream CUDA stream so concurrent requests actually overlap (M3) */
+  size_t g_arena_bytes, g_arena_used;
 };
 
+
 typedef struct pt_ctx pt_ctx;
+
+/* GPU phase split, 0 alloc 1 copy 2 kernel+sync 3 free (PT_V21_CUDAPROF=1 fills these) */
+double pt_v21_stat_ms(pt_ctx *c, int which);
 
 /* Open the runtime: mmap the container, resolve pt_graph_ctab names to payload pointers,
  * convert '#h' (fp16) payloads to fp32 once (27.3 MB decoder weights -> 54.5 MB host copy). */
 pt_ctx *pt_v21_open(const char *container);
 void pt_v21_close(pt_ctx *c);
 int pt_v21_n_cont(pt_ctx *c);
+const float *pt_v21_cont(pt_ctx *c, int idx);
+size_t pt_v21_cont_bytes(pt_ctx *c, int idx);
 const float *pt_v21_cont(pt_ctx *c, int ctab_idx);      /* fp32 payload (converted if '#h') */
 int pt_v21_cont_itemsize(pt_ctx *c, int ctab_idx);
 
@@ -143,20 +158,20 @@ void pt_v21_cuda_shutdown(pt_ctx *c);
  * X already points at the column output column 0's first tap reads (shifted by -pad). */
 int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                     int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                    const float *bias, int64_t batch);
+                    const float *bias, int64_t batch, int wtab, int btab);
 int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                      int64_t ldy, int cout, int s, int pad, int K, const float *wp,
-                     const float *bias, int64_t batch);
+                     const float *bias, int64_t batch, int wtab, int btab);
 int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda,
                       const float *B, int64_t ldb, int64_t nn, float *C, int64_t ldc);
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-               const float *bias, int64_t batch);
+               const float *bias, int64_t batch, int wtab, int btab);
 /* conv_transpose1d via the packed phase layout, INCLUDING the tail flush. */
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                 int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
-                int64_t batch);
+                int64_t batch, int wtab, int btab);
 int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, const float *B,
                   int64_t ldb, int64_t nn, float *C, int64_t ldc);
 

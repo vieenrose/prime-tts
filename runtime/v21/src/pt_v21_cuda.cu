@@ -11,6 +11,7 @@
  * 4-stream batching (M3) change the plumbing, not the kernels.
  */
 #include <cuda_runtime.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,15 +37,131 @@ static int gpu_on(const char *name) {
   return strstr(e, name) != NULL;
 }
 
+static double gpu_now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double) ts.tv_sec * 1000.0 + 1e-6 * (double) ts.tv_nsec;
+}
+static int gpu_prof(void) {
+  static int v = -1;
+  if (v < 0) v = getenv("PT_V21_CUDAPROF") ? 1 : 0;
+  return v;
+}
+
+
+/* ------------------------------------------------- resident weights + arena (M3)
+ * Weights are the same for every request and every stream, so they are uploaded once per process
+ * and shared: a sorted (host ptr -> device ptr) table over the container's fp32 payloads, looked
+ * up by bsearch on the pointer the graph hands us. Activations come from a bump arena so the
+ * steady state has no cudaMalloc/cudaFree at all (measured: 222 ms alloc + 65 ms free per T81 run,
+ * and the per-call weight copy is inside the 153 ms copy split). */
+static void **g_wdev;      /* ctab index -> device pointer, read-only across streams */
+static int g_wdev_n, g_wref;
+
+static int weights_upload(pt_ctx *c, int verbose) {
+  int n = pt_v21_n_cont(c);
+  if (++g_wref > 1)
+    return 0;   /* already uploaded: the weights are identical for every stream */
+  g_wdev = (void **) calloc((size_t) n, sizeof(void *));
+  if (!g_wdev) {
+    g_wref = 0;
+    return -1;
+  }
+  g_wdev_n = n;
+  size_t total = 0;
+  for (int i = 0; i < n; i++) {
+    const void *h = pt_v21_cont(c, i);
+    size_t nb = (size_t) pt_v21_cont_bytes(c, i);
+    if (!h || nb == 0)
+      continue;
+    if (cudaMalloc(&g_wdev[i], nb) != cudaSuccess ||
+        cudaMemcpy(g_wdev[i], h, nb, cudaMemcpyHostToDevice) != cudaSuccess) {
+      fprintf(stderr, "pt_v21 cuda: weight upload failed for ctab %d (%zu B)\n", i, nb);
+      g_wref = 0;
+      return -1;
+    }
+    total += nb;
+  }
+  if (verbose)
+    fprintf(stderr, "pt_v21 cuda: %d container records resident on the GPU (%.1f MiB)\n", n,
+            (double) total / 1048576.0);
+  return 0;
+}
+
+static void *weight_ctab(int idx) {
+  if (idx < 0 || idx >= g_wdev_n)
+    return NULL;
+  return g_wdev[idx];
+}
+
+static void weights_release(void) {
+  if (--g_wref <= 0) {
+    for (int i = 0; i < g_wdev_n; i++)
+      if (g_wdev[i])
+        cudaFree(g_wdev[i]);
+    free(g_wdev);
+    g_wdev = NULL;
+    g_wdev_n = 0;
+    g_wref = 0;
+  }
+}
+
+/* bump arena with a mark/release discipline: the graph issues conv kernels one at a time, so each
+ * call marks the top, allocates what it needs, and releases back to the mark */
+static int arena_init(pt_ctx *c, size_t bytes) {
+  if (cudaMalloc(&c->g_arena, bytes) != cudaSuccess)
+    return -1;
+  c->g_arena_bytes = bytes;
+  c->g_arena_used = 0;
+  return 0;
+}
+static void *arena_alloc(pt_ctx *c, size_t bytes) {
+  size_t off = (c->g_arena_used + 255) & ~(size_t) 255;
+  if (off + bytes > c->g_arena_bytes)
+    return NULL;
+  c->g_arena_used = off + bytes;
+  return (char *) c->g_arena + off;
+}
+static void *arena_mark(pt_ctx *c) { return (char *) c->g_arena + c->g_arena_used; }
+static void arena_release(pt_ctx *c, void *mark) {
+  c->g_arena_used = (size_t) ((char *) mark - (char *) c->g_arena);
+}
+
 int pt_v21_cuda_init(pt_ctx *c, int verbose) {
   if (verbose)
     fprintf(stderr, "pt_v21 cuda: device 0 (sm_53)\n");
   PTCHK(cudaFree(0)); /* force context creation */
   c->use_cuda = 1;
+  if (cudaStreamCreateWithFlags((cudaStream_t *) &c->g_stream, cudaStreamNonBlocking)) {
+    fprintf(stderr, "pt_v21 cuda: stream create failed\n");
+    return -1;
+  }
+  size_t aw = getenv("PT_V21_ARENA_MB") ? (size_t) atoi(getenv("PT_V21_ARENA_MB")) : 64u;
+  if (arena_init(c, aw * 1048576u)) {
+    fprintf(stderr, "pt_v21 cuda: arena of %zu MiB failed\n", aw);
+    return -1;
+  }
+  if (weights_upload(c, verbose))
+    return -1;
+  if (verbose)
+    fprintf(stderr, "pt_v21 cuda: resident weights + %zu MiB arena ready\n", aw);
   return 0;
 }
 
-void pt_v21_cuda_shutdown(pt_ctx *c) { c->use_cuda = 0; }
+void pt_v21_cuda_shutdown(pt_ctx *c) {
+  if (c->g_stream) {
+    cudaStreamSynchronize((cudaStream_t) c->g_stream);
+    cudaStreamDestroy((cudaStream_t) c->g_stream);
+    c->g_stream = NULL;
+  }
+  weights_release();
+  if (c->g_arena) {
+    cudaFree(c->g_arena);
+    c->g_arena = NULL;
+    c->g_arena_bytes = c->g_arena_used = 0;
+  }
+  c->use_cuda = 0;
+}
 
 /* ------------------------------------------------------------------- conv1d
  * thread = (row block, output column) -> four channel outputs at one column.
@@ -94,38 +211,60 @@ __global__ void pt_conv_kernel(const float *__restrict__ x, int64_t ldx, int cin
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
-                const float *bias, int64_t batch) {
+                const float *bias, int64_t batch, int wtab, int btab) {
   if (!c->use_cuda || !gpu_on("conv"))
-    return pt_v21_conv_cpu(c, X, ldx, cin, Y, ldy, n, cout, K, stride, pad, dil, wp, bias, batch);
+    return pt_v21_conv_cpu(c, X, ldx, cin, Y, ldy, n, cout, K, stride, pad, dil, wp, bias, batch,
+                           wtab, btab);
   c->n_conv++;
   int cout4 = (cout + 3) / 4 * 4;
   int64_t Tout = n;   /* graph-computed output length, same convention as the CPU kernel */
-  float *dx, *dw, *dy, *db = NULL;
+  float *dx = NULL, *dw = NULL, *dy = NULL, *db = NULL;
+  int dw_own = 0, db_own = 0;
   size_t xb = (size_t) batch * cin * ldx * 4;
   /* the output buffer is the *padded* row layout [batch][cout4][Tout]: the host trims by copying
    * cout rows at a per-batch stride of cout4*Tout, so the kernel must use that stride too */
   size_t yb = (size_t) batch * cout4 * Tout * 4;
   size_t wb = (size_t) (cout4 / 4) * K * cin * 4 * 4;
-  PTCHK(cudaMalloc(&dx, xb));
-  PTCHK(cudaMalloc(&dw, wb));
-  PTCHK(cudaMalloc(&dy, yb));
+  void *mark = arena_mark(c);
+  double tA = gpu_prof() ? gpu_now() : 0.0;
+  dx = (float *) arena_alloc(c, xb);
+  dy = (float *) arena_alloc(c, yb);
+  if (gpu_prof()) c->g_alloc_ms += gpu_now() - tA;
+  if (!dx || !dy) PTCHK(cudaMalloc(&dx, xb));   /* arena full: fall back, still correct */
+  dw = (float *) weight_ctab(wtab);   /* resident weights, shared across streams */
+  if (!dw) {
+    PTCHK(cudaMalloc(&dw, wb));
+    PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
+    dw_own = 1;
+  }
+  tA = gpu_prof() ? gpu_now() : 0.0;
   PTCHK(cudaMemcpy(dx, X, xb, cudaMemcpyHostToDevice));
-  PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
+  if (gpu_prof()) c->g_copy_ms += gpu_now() - tA;
   if (bias) {
     PTCHK(cudaMalloc(&db, (size_t) cout * 4));
     PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
   }
   int threads = 256;
   dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
-  pt_conv_kernel<<<grid, threads>>>(dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout,
-                                    /*Tout=*/Tout, cout, dw, db, (int64_t) cin * ldx,
-                                    (int64_t) cout4 * Tout);
-  PTCHK(cudaMemcpy(Y, dy, yb, cudaMemcpyDeviceToHost));
-  cudaFree(dx);
-  cudaFree(dw);
-  cudaFree(dy);
-  if (db)
+  tA = gpu_prof() ? gpu_now() : 0.0;
+  pt_conv_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, K, dil, stride,
+                                                                    pad, dy, /*ldy=*/Tout,
+                                                                    /*Tout=*/Tout, cout, dw, db,
+                                                                    (int64_t) cin * ldx,
+                                                                    (int64_t) cout4 * Tout);
+  PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
+  PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
+  if (gpu_prof()) {
+    cudaDeviceSynchronize();
+    c->g_kernel_ms += gpu_now() - tA;
+  }
+  tA = gpu_prof() ? gpu_now() : 0.0;
+  if (dw_own)
+    cudaFree(dw);
+  if (db_own)
     cudaFree(db);
+  arena_release(c, mark);   /* weights are resident: only the activation scratch is released */
+  if (gpu_prof()) c->g_free_ms += gpu_now() - tA;
   return 0;
 }
 
@@ -186,37 +325,52 @@ __global__ void pt_convT_kernel(const float *__restrict__ x, int64_t ldx, int ci
 
 int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
-                 int64_t batch) {
+                 int64_t batch, int wtab, int btab) {
   if (!c->use_cuda || !gpu_on("convT"))
-    return pt_v21_convT_cpu(c, X, ldx, cin, tin, Y, ldy, cout, s, pad, K, wp, bias, batch);
+    return pt_v21_convT_cpu(c, X, ldx, cin, tin, Y, ldy, cout, s, pad, K, wp, bias, batch, wtab,
+                            btab);
   c->n_convT++;
   int ntap = (K + s - 1) / s;
   int cout4 = (cout + 3) / 4 * 4;
   int64_t Lout = (tin - 1) * s - 2 * pad + K;
-  float *dx, *dw, *dy, *db = NULL;
+  float *dx = NULL, *dw = NULL, *dy = NULL, *db = NULL;
+  int dw_own = 0, db_own = 0;
   size_t xb = (size_t) batch * cin * ldx * 4;
   size_t yb = (size_t) batch * cout4 * Lout * 4;   /* padded rows, matching the host's trim stride */
   size_t wb = (size_t) s * (cout4 / 4) * ntap * cin * 4 * 4;
-  PTCHK(cudaMalloc(&dx, xb));
-  PTCHK(cudaMalloc(&dw, wb));
-  PTCHK(cudaMalloc(&dy, yb));
-  PTCHK(cudaMemcpy(dx, X, xb, cudaMemcpyHostToDevice));
-  PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
+  void *mark = arena_mark(c);
+  dx = (float *) arena_alloc(c, xb);
+  dy = (float *) arena_alloc(c, yb);
+  if (!dx || !dy) PTCHK(cudaMalloc(&dx, xb));
+  dw = (float *) weight_ctab(wtab);
+  if (!dw) {
+    PTCHK(cudaMalloc(&dw, wb));
+    PTCHK(cudaMemcpy(dw, wp, wb, cudaMemcpyHostToDevice));
+    dw_own = 1;
+  }
+  PTCHK(cudaMemcpyAsync(dx, X, xb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
   if (bias) {
-    PTCHK(cudaMalloc(&db, (size_t) cout * 4));
-    PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
+    db = (float *) weight_ctab(btab);
+    if (!db) {
+      PTCHK(cudaMalloc(&db, (size_t) cout * 4));
+      PTCHK(cudaMemcpy(db, bias, (size_t) cout * 4, cudaMemcpyHostToDevice));
+      db_own = 1;
+    }
   }
   int threads = 256;
   dim3 grid((unsigned) ((Lout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
-  pt_convT_kernel<<<grid, threads>>>(dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s,
-                                     pad, ntap, dw, db, (int64_t) cin * ldx,
-                                     (int64_t) cout4 * Lout);
-  PTCHK(cudaMemcpy(Y, dy, yb, cudaMemcpyDeviceToHost));
-  cudaFree(dx);
-  cudaFree(dw);
-  cudaFree(dy);
-  if (db)
+  pt_convT_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, tin, dy,
+                                                                     /*ldy=*/Lout, /*Lout=*/Lout,
+                                                                     cout, s, pad, ntap, dw, db,
+                                                                     (int64_t) cin * ldx,
+                                                                     (int64_t) cout4 * Lout);
+  PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
+  PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
+  if (dw_own)
+    cudaFree(dw);
+  if (db_own)
     cudaFree(db);
+  arena_release(c, mark);
   return 0;
 }
 
@@ -260,22 +414,29 @@ int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, 
   if (!c->use_cuda || !gpu_on("matmul"))
     return pt_v21_matmul_cpu(c, A, m, k, lda, B, ldb, nn, C, ldc);
   c->n_matmul++;
-  float *dA, *dB, *dC;
+  float *dA = NULL, *dB = NULL, *dC = NULL;
   size_t ab = (size_t) m * lda * 4;
   size_t bb = (size_t) k * ldb * 4;
   size_t cb = (size_t) m * ldc * 4;
-  PTCHK(cudaMalloc(&dA, ab));
-  PTCHK(cudaMalloc(&dB, bb));
-  PTCHK(cudaMalloc(&dC, cb));
-  PTCHK(cudaMemcpy(dA, A, ab, cudaMemcpyHostToDevice));
-  PTCHK(cudaMemcpy(dB, B, bb, cudaMemcpyHostToDevice));
+  void *mark = arena_mark(c);
+  dA = (float *) arena_alloc(c, ab);
+  dB = (float *) arena_alloc(c, bb);
+  dC = (float *) arena_alloc(c, cb);
+  if (!dA || !dB || !dC) {
+    cudaFree(dA); cudaFree(dB); cudaFree(dC);
+    PTCHK(cudaMalloc(&dA, ab));
+    PTCHK(cudaMalloc(&dB, bb));
+    PTCHK(cudaMalloc(&dC, cb));
+  }
+  PTCHK(cudaMemcpyAsync(dA, A, ab, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
+  PTCHK(cudaMemcpyAsync(dB, B, bb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream));
   int tx = 32, ty = 8;
   dim3 block(tx, ty);
   dim3 grid((unsigned) ((nn / 4 + tx - 1) / tx), (unsigned) ((m + ty - 1) / ty));
-  pt_matmul_kernel<<<grid, block>>>(dA, m, k, lda, dB, ldb, nn, dC, ldc);
-  PTCHK(cudaMemcpy(C, dC, cb, cudaMemcpyDeviceToHost));
-  cudaFree(dA);
-  cudaFree(dB);
-  cudaFree(dC);
+  pt_matmul_kernel<<<grid, block, 0, (cudaStream_t) c->g_stream>>>(dA, m, k, lda, dB, ldb, nn, dC,
+                                                                    ldc);
+  PTCHK(cudaMemcpyAsync(C, dC, cb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
+  PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
+  arena_release(c, mark);
   return 0;
 }
