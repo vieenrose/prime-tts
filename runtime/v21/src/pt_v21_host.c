@@ -17,6 +17,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 #define PT_MAGIC_V21 0x50544B31u   /* "PTK1", same magic as runtime/include/pt.h */
 
@@ -403,10 +406,44 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
     return 0;
   }
   if (!g && (op == PT_LEAKYRELU || op == PT_RELU || op == PT_NEG || op == PT_ABS)) {
-    /* Pure arithmetic elementwise: the double-precision switch below compiles to a scalar
-     * round-trip per element, and LEAKYRELU alone was 215 ms of a 3.3 s stream in 35 calls. A
-     * plain loop over fp32 vectorizes to NEON on the A57. Bit-exact: alpha*v is exact in double
-     * and its rounding to fp32 equals the fp32 product, and the sign tests are identical. */
+    /* Pure arithmetic elementwise. A plain fp32 loop does not auto-vectorize on gcc 8 (control
+     * flow), so use NEON intrinsics on aarch64 for a 4-wide branchless select; bit-exact: the
+     * same fp32 operations and sign tests, just four at a time. */
+    int64_t n2 = A->n;
+#if defined(__aarch64__)
+    int64_t i = 0;
+    if (op == PT_LEAKYRELU) {
+      float32x4_t va = vdupq_n_f32(alpha);
+      for (; i + 4 <= n2; i += 4) {
+        float32x4_t v = vld1q_f32(a + i);
+        uint32x4_t m = vcgeq_f32(v, vdupq_n_f32(0.0f));
+        float32x4_t r = vmulq_f32(v, va);
+        vst1q_f32(o + i, vbslq_f32(m, v, r));
+      }
+    } else if (op == PT_RELU) {
+      for (; i + 4 <= n2; i += 4) {
+        float32x4_t v = vld1q_f32(a + i);
+        uint32x4_t m = vcgtq_f32(v, vdupq_n_f32(0.0f));
+        vst1q_f32(o + i, vbslq_f32(m, v, vdupq_n_f32(0.0f)));
+      }
+    } else if (op == PT_NEG) {
+      for (; i + 4 <= n2; i += 4) {
+        float32x4_t v = vld1q_f32(a + i);
+        vst1q_f32(o + i, vnegq_f32(v));
+      }
+    } else {
+      for (; i + 4 <= n2; i += 4) {
+        float32x4_t v = vld1q_f32(a + i);
+        vst1q_f32(o + i, vabsq_f32(v));
+      }
+    }
+    for (; i < n2; i++) {
+      if (op == PT_LEAKYRELU) o[i] = a[i] >= 0.0f ? a[i] : alpha * a[i];
+      else if (op == PT_RELU) o[i] = a[i] > 0.0f ? a[i] : 0.0f;
+      else if (op == PT_NEG) o[i] = -a[i];
+      else o[i] = a[i] < 0.0f ? -a[i] : a[i];
+    }
+#else
     int64_t n2 = A->n;
     if (op == PT_LEAKYRELU) {
       for (int64_t i = 0; i < n2; i++) o[i] = a[i] >= 0.0f ? a[i] : alpha * a[i];
@@ -417,6 +454,7 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
     } else {
       for (int64_t i = 0; i < n2; i++) o[i] = a[i] < 0.0f ? -a[i] : a[i];
     }
+#endif
     return 0;
   }
   for (int64_t i = 0; i < n; i++) {
