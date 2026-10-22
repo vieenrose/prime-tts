@@ -68,3 +68,28 @@ Design consequences, from the numbers above:
    `cudaGraphInstantiate` at startup only) per T-bucket, not per request.
 4. The two ConvTranspose upsamplers are 18% of all compute; a space-to-depth (pixel-shuffle)
    formulation turns them into a GEMM with K = Cin*16 and removes the zero-fill waste.
+
+## Half2 GEMM measured (bench/gpu/hgemm.cu) — the number that decides 8 streams
+
+fp16 storage, K-paired `__hfma2` multiply **and** accumulate, 256 threads, 64x64 tile, K-tile 32.
+Build: `/usr/local/cuda/bin/nvcc -O3 -arch=sm_53 -o hgemm hgemm.cu && ./hgemm`
+peak `__hfma2` issue in this run: 133 GF/s (168 GF/s in an earlier run); 8-stream need: 95 GF/s.
+
+| shape MxNxK | half2 accumulate | fp32 accumulate |
+|---|---|---|
+| 81x256x1536 | 121.35 GF/s | 54.25 GF/s |
+| 81x512x1024 | 123.22 | 56.48 |
+| 324x512x1024 (=4 streams batched) | 150.76 | 69.29 |
+| 648x512x1024 (=8 streams batched) | **161.06** | 72.99 |
+| 1296x512x1024 | **168.24** | 71.60 |
+| 1024x1024x1024 | 171.46 | 73.75 |
+| 512x4000x512 | 165.39 | 74.34 |
+
+selfcheck 128^3 (fp16 storage, half2 accumulate): max 1.432e-3, rms 1.80e-4 vs fp32-accumulate
+reference on the same fp16 inputs -> accumulate over K needs chunked promotion into fp32.
+
+Read: batching the 8 streams into the M dimension is what unlocks the rate (81 rows: 121 GF/s;
+648 rows: 161 GF/s). fp32 accumulation costs 2.3x, so half2 accumulate with periodic promotion is
+the design. Consequence for v2.1 (11.9 GFLOP/audio-second, ~50/50 enc/dec weight split):
+encoder in split-fp16 HiLo (~80 GF/s) + decoder in half2 (~160 GF/s) => 0.112 s per audio-second
+=> **8 streams at aggregate RTF 0.90**. See docs/v21_plan.md.

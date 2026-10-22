@@ -28,6 +28,8 @@ pt_v1b8k_model *pt_v1b8k_load(const char *ptk_path);
 void pt_v1b8k_free(pt_v1b8k_model *m);
 int pt_v1b8k_sample_rate(const pt_v1b8k_model *m);   /* container model.meta: 8000 | 16000 */
 int pt_v1b8k_hop(const pt_v1b8k_model *m);           /* samples per mel frame = product of stage strides */
+int pt_v1b8k_pre_rows(const pt_v1b8k_model *m);      /* voc conv_pre output rows (= stage-0 ConvT Cin) */
+int pt_v1b8k_voc_stage(const pt_v1b8k_model *m, int s, int *cout, int *stride, int *kernel, int *rate);
 
 /* A stream owns all activation memory (one arena, sized from the limits). One synth at a time per stream.
  * chunk_frames: vocoder chunk size in mel frames (1 frame = 1/hop of a second, 16 ms in v1); first chunk is 3 frames. */

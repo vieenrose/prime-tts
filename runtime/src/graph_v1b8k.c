@@ -259,6 +259,18 @@ void pt_v1b8k_free(pt_v1b8k_model *m) {
 
 int pt_v1b8k_sample_rate(const pt_v1b8k_model *m) { return m->sample_rate; }   /* 8000 | 16000 */
 int pt_v1b8k_hop(const pt_v1b8k_model *m) { return m->hop; }                   /* samples per mel frame */
+int pt_v1b8k_pre_rows(const pt_v1b8k_model *m) { return m->pre.cout4; }        /* voc conv_pre output rows */
+
+/* Vocoder stage geometry (diagnostics / benchmarks): stage s has cout channels, expands by stride with a
+ * kernel 2*stride ConvTranspose (packed as stride phases x 2 taps) and outputs at rate samples per frame. */
+int pt_v1b8k_voc_stage(const pt_v1b8k_model *m, int s, int *cout, int *stride, int *kernel, int *rate) {
+  if (s < 0 || s > 3 || !m) return -1;
+  if (cout) *cout = ST_COUT[s];
+  if (stride) *stride = ST_STRIDE[s];
+  if (kernel) *kernel = ST_KERNEL[s];
+  if (rate) *rate = ST_RATE[s];
+  return 0;
+}
 
 /* ------------------------------------------------------------------ vocoder chunk plan */
 typedef struct {

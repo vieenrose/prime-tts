@@ -75,24 +75,38 @@ static double time_conv(int Cout, int Cin, int K, int dil, long n, int act, int 
   return 2.0 * Cout * Cin * K * n * reps / (t1 - t0) / 1e9;
 }
 
-static void bench_kernels(void) {
-  struct { const char *what; int Cout, Cin, K, dil; long n; int act; } L[] = {
-    {"voc stage0 resblock conv 48x48 K11 d5 +snake", 48, 48, 11, 5, 1200, PT_ACT_SNAKE},
-    {"voc stage0 resblock conv 48x48 K3 d1", 48, 48, 3, 1, 1200, PT_ACT_NONE},
-    {"voc stage1 resblock conv 24x24 K7 d3 +snake", 24, 24, 7, 3, 4400, PT_ACT_SNAKE},
-    {"voc stage2 resblock conv 12x12 K11 d1", 12, 12, 11, 1, 8400, PT_ACT_NONE},
-    {"voc stage3 resblock conv 6x6 K7 d3 +snake", 6, 6, 7, 3, 16500, PT_ACT_SNAKE},
-    {"voc ups0 (8 phases) 384x96 K2", 384, 96, 2, 1, 150, PT_ACT_NONE},
-    {"voc conv_pre 96x80 K7 +snake", 96, 80, 7, 1, 150, PT_ACT_SNAKE},
+static void bench_kernels(const pt_v1b8k_model *m) {
+  struct row { char what[72]; int Cout, Cin, K, dil; long n; int act; };
+  struct row L[24];
+  int n = 0;
+  /* Vocoder rows come from the container geometry: reference length 1000 mel frames, so stage s
+   * (output rate = samples per frame) has 1000*rate columns and its ConvT phase grid has 1000*rate/stride. */
+  int pre = pt_v1b8k_pre_rows(m), prev_cin = pre, frames = 1000;
+  L[n++] = (struct row){"", pre, 80, 7, 1, frames, PT_ACT_SNAKE};
+  snprintf(L[0].what, sizeof L[0].what, "voc conv_pre %dx80 K7 +snake", pre);
+  for (int s = 0; s < 4; s++) {
+    int c, st, k, rate;
+    pt_v1b8k_voc_stage(m, s, &c, &st, &k, &rate);
+    int c4 = (c + 3) / 4 * 4;
+    snprintf(L[n].what, sizeof L[n].what, "voc ups%d ConvT (%d phases x 2 taps) %dx%d K%d", s, st, st * c4, prev_cin, k);
+    L[n].Cout = st * c4; L[n].Cin = prev_cin; L[n].K = 2; L[n].dil = 1;
+    L[n].n = (long)frames * rate / st; L[n].act = PT_ACT_NONE;
+    n++;
+    snprintf(L[n].what, sizeof L[n].what, "voc stage%d resblock conv %dx%d K11 d5 +snake", s, c4, c4);
+    L[n].Cout = c4; L[n].Cin = c4; L[n].K = 11; L[n].dil = 5;
+    L[n].n = (long)frames * rate; L[n].act = PT_ACT_SNAKE;
+    n++;
+    prev_cin = c4;
+  }
+  static const struct row FIX[] = {
     {"dec ff0 504x168 (linear) +silu", 504, 168, 1, 1, 500, PT_ACT_SILU},
     {"dec ff3 168x504 (linear)", 168, 504, 1, 1, 500, PT_ACT_NONE},
     {"dec gru input proj 504x168", 504, 168, 1, 1, 500, PT_ACT_NONE},
     {"dec postnet 168x168 K5 +tanh", 168, 168, 5, 1, 500, PT_ACT_TANH},
     {"enc ff0 672x168 (linear, T=40)", 672, 168, 1, 1, 40, PT_ACT_SILU},
   };
-  int n = sizeof L / sizeof L[0];
-  printf("\n## kernels: conv path GFLOP/s (fp32, epilogue included)\n\n");
-  printf("_shape list is the v1b_8k vocoder/decoder layers (fixed table); for other variants use `single`/`mt`/`concN`_\n\n");
+  for (unsigned i = 0; i < sizeof FIX / sizeof FIX[0]; i++) L[n++] = FIX[i];
+  printf("\n## kernels: conv path GFLOP/s (fp32, epilogue included); vocoder rows are this model's geometry\n\n");
   printf("| layer shape | n cols | 4x16, 1 thr | 8x12, 1 thr, no packing | 8x12 + packing K=1 only, 1 thr | 8x12 + packing incl. K>1 (default), 4 thr | **8x12 + packing incl. K>1 (default), 1 thr** |\n|---|---|---|---|---|---|---|\n");
   for (int i = 0; i < n; i++) {
     pt_conv_set_kernel(0);
@@ -123,21 +137,21 @@ static void bench_kernels(void) {
   printf("\nmicro-kernel, operands L1-resident (nk=256): k4x16 %.2f GFLOP/s, k8x12 %.2f GFLOP/s "
          "(A57 peak 8 flop/cycle = 11.8 GFLOP/s at 1.479 GHz)\n", g4, g8);
   /* activations */
-  long m = 1 << 14;
-  float *v = rnd(m);
-  for (long i = 0; i < m; i++) v[i] *= 4;
+  long nel = 1 << 14;
+  float *v = rnd(nel);
+  for (long i = 0; i < nel; i++) v[i] *= 4;
   struct { const char *nm; int k; } acts[] = {{"snake", 0}, {"silu", 1}, {"tanh", 2}};
   printf("activations (16K elements, in L1): ");
   for (int k = 0; k < 3; k++) {
     reps = 0; t0 = pt_now();
     do {
-      if (k == 0) pt_snake_row(v, m, 0.9f, 1.1f);
-      else if (k == 1) pt_silu_row(v, m);
-      else pt_tanh_row(v, m);
+      if (k == 0) pt_snake_row(v, nel, 0.9f, 1.1f);
+      else if (k == 1) pt_silu_row(v, nel);
+      else pt_tanh_row(v, nel);
       reps++; t1 = pt_now();
       if (k == 1) for (long i = 0; i < 64; i++) v[i] = 1.0f;
     } while (t1 - t0 < 0.2);
-    printf("%s %.0f Melem/s  ", acts[k].nm, (double)m * reps / (t1 - t0) / 1e6);
+    printf("%s %.0f Melem/s  ", acts[k].nm, (double)nel * reps / (t1 - t0) / 1e6);
   }
   printf("\n");
   free(A); free(X); free(Y); free(bias); free(off); free(v);
@@ -231,7 +245,7 @@ int main(int argc, char **argv) {
   if (!m || load_requests(argv[2]) <= 0) { fprintf(stderr, "load failed\n"); return 1; }
   printf("# bench_cpu: PrimeTTS v1 (%d Hz, hop %d) on %ld cores, model load %.1f ms, %d requests\n", pt_v1b8k_sample_rate(m),
          pt_v1b8k_hop(m), sysconf(_SC_NPROCESSORS_ONLN), (pt_now() - tl) * 1e3, NR);
-  if (want[0]) bench_kernels();
+  if (want[0]) bench_kernels(m);
   if (want[1] || want[4]) bench_single(m, 1);
   if (want[2]) bench_single(m, 4);
   if (want[3]) {
