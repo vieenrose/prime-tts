@@ -47,3 +47,13 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
 - Small 32x32 tiles for short outputs: arithmetic intensity matters more than block count.
 - Padé-approximant / coarse-table tanh+sigmoid: SNDR 67.4 / 64.3 dB. The 65536-point interpolated
   table keeps 70.09 dB and is kept (TANH 62 -> 19 ms).
+
+## Run 70 findings (measurement budget: what is left)
+MAC-weighted conv wave efficiency is already 0.921, so batching the four streams for wave
+quantisation buys at most ~8% of the GPU total. No conv has cout % 4 != 0 and none runs with
+batch > 1, so there is no padded-channel or batch waste to remove. Against 4 x ~380 ms of GPU work
+(~1520 ms) the N=4 wall is ~1960 ms per stream, i.e. the aggregate is close to
+max(GPU total, host total) + startup: cutting host work alone no longer moves it much.
+FLOP share by kernel: K=11 30%, K=7 21%, K=3 15%, K=5 8%, dilated K=11 15%, dilated K=7 9%.
+Winograd F(2,3) on the K=3 convs is the only remaining GPU FLOP reduction (15% of MACs, ~2.25x
+fewer multiplies there -> ~8% of GPU work) but it changes numerics and must clear the per-node gate.

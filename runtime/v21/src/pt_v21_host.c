@@ -222,7 +222,7 @@ static int bin_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *B, pt_tv *O) {
   int isbool = (op == PT_EQUAL || op == PT_LESS || op == PT_GREATER || op == PT_GEQ || op == PT_LEQ ||
                op == PT_AND || op == PT_OR || op == PT_XOR);
   int dt = isbool ? DT_BOOL : (A->dt == DT_I64 && B->dt == DT_I64 ? DT_I64 : DT_F32);
-  if (tv_alloc(c, O, dt, d, ndim) < 0) return -1;
+  if (tv_alloc_nz(c, O, dt, d, ndim, 0) < 0) return -1;
   bcast ba, bb, be;
   bcast_prep(&ba, A, d, ndim);
   bcast_prep(&bb, B, d, ndim);
@@ -378,7 +378,7 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
   int64_t d[PT_V21_MAX_RANK];
   memcpy(d, A->d, sizeof(d));
   int dt = (A->dt == DT_I64) ? DT_I64 : (A->dt == DT_I32 ? DT_I32 : DT_F32);
-  if (tv_alloc(c, O, dt, d, A->ndim) < 0) return -1;
+  if (tv_alloc_nz(c, O, dt, d, A->ndim, 0) < 0) return -1;
   int64_t n = A->n;
   if (A->dt == DT_I64 || A->dt == DT_I32) {
     const int64_t *a = (const int64_t *) A->p;
@@ -1003,7 +1003,7 @@ static int op_transpose(pt_ctx *c, const pt_tv *A, const int *perm, pt_tv *O) {
   int nd = A->ndim;
   int64_t d[PT_V21_MAX_RANK];
   for (int i = 0; i < nd; i++) d[i] = A->d[perm[i]];
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;
   int64_t si[PT_V21_MAX_RANK], so[PT_V21_MAX_RANK];
   si[nd - 1] = 1;
   for (int i = nd - 2; i >= 0; i--) si[i] = si[i + 1] * A->d[i + 1];
@@ -1062,7 +1062,7 @@ static int op_concat(pt_ctx *c, int axis, pt_tv **ins, int n, pt_tv *O) {
   int64_t tot = 0;
   for (int i = 0; i < n; i++) tot += ins[i]->d[axis];
   d[axis] = tot;
-  if (tv_alloc(c, O, ins[0]->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, ins[0]->dt, d, nd, 0) < 0) return -1;
   int es = dt_sz(ins[0]->dt);
   int64_t outer = 1, inner = 1;
   for (int i = 0; i < axis; i++) outer *= d[i];
@@ -1089,7 +1089,7 @@ static int op_gather(pt_ctx *c, int axis, const void *table, const int64_t *tdim
   for (int i = axis + 1; i < tnd; i++) d[nd++] = tdims[i];
   for (int i = nd; i < PT_V21_MAX_RANK; i++) d[i] = 1;
   if (nd > PT_V21_MAX_RANK) return -1;
-  if (tv_alloc(c, O, tdt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, tdt, d, nd, 0) < 0) return -1;
   int es = dt_sz(tdt);
   int64_t pre = 1, post = 1;
   for (int i = 0; i < axis; i++) pre *= tdims[i];
@@ -1153,7 +1153,7 @@ static int op_slice(pt_ctx *c, const pt_tv *A, const int64_t *starts, const int6
     d[i] = sp[i] > 0 ? (en[i] - st[i] + sp[i] - 1) / sp[i] : (en[i] - st[i]) / sp[i];
   for (int i = 0; i < nd; i++)
     if (d[i] < 0) d[i] = 0;
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;
   int es = dt_sz(A->dt);
   int64_t si[PT_V21_MAX_RANK], so[PT_V21_MAX_RANK];
   si[nd - 1] = 1;
@@ -1276,7 +1276,7 @@ static int op_expand(pt_ctx *c, const pt_tv *A, const int64_t *shape, int nshape
   if (nd > PT_V21_MAX_RANK || nd < A->ndim) return -1;
   int64_t d[PT_V21_MAX_RANK];
   for (int i = 0; i < nd; i++) d[i] = shape[i];
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;
   int es = dt_sz(A->dt);
   /* A's dims line up with the output's LAST A->ndim dims (numpy broadcasting) */
   int off = nd - A->ndim;
@@ -1379,7 +1379,7 @@ static int op_cumsum(pt_ctx *c, const pt_tv *A, int axis, int exclusive, int rev
   if (axis < 0) axis += nd;
   int64_t d[PT_V21_MAX_RANK];
   memcpy(d, A->d, sizeof(d));
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;
   int64_t outer = 1, inner = 1;
   for (int i = 0; i < axis; i++) outer *= d[i];
   for (int i = axis + 1; i < nd; i++) inner *= d[i];
@@ -1413,7 +1413,7 @@ static int op_softmax(pt_ctx *c, const pt_tv *A, int axis, pt_tv *O) {
   if (axis < 0) axis += nd;
   int64_t d[PT_V21_MAX_RANK];
   memcpy(d, A->d, sizeof(d));
-  if (tv_alloc(c, O, DT_F32, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, DT_F32, d, nd, 0) < 0) return -1;
   int64_t outer = 1, inner = 1, L = d[axis];
   for (int i = 0; i < axis; i++) outer *= d[i];
   for (int i = axis + 1; i < nd; i++) inner *= d[i];
@@ -1618,7 +1618,7 @@ static int op_where(pt_ctx *c, const pt_tv *C, const pt_tv *X, const pt_tv *Y, p
   int nd;
   if (bcast_dims(C, X, Y, d, &nd) < 0) return -1;
   int dt = X->dt == DT_NONE ? Y->dt : X->dt;
-  if (tv_alloc(c, O, dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, dt, d, nd, 0) < 0) return -1;
   bcast ba, bb, be;
   bcast_prep(&ba, X, d, nd);
   bcast_prep(&bb, Y, d, nd);
@@ -1644,7 +1644,7 @@ static int op_cast(pt_ctx *c, const pt_tv *A, int to, pt_tv *O) {
   int64_t d[PT_V21_MAX_RANK];
   memcpy(d, A->d, sizeof(d));
   int dt = to == 1 ? DT_F32 : to == 7 ? DT_I64 : to == 6 ? DT_I64 : to == 9 ? DT_BOOL : to == 10 ? DT_F16 : DT_F32;
-  if (tv_alloc(c, O, dt, d, A->ndim) < 0) return -1;
+  if (tv_alloc_nz(c, O, dt, d, A->ndim, 0) < 0) return -1;
   for (int64_t i = 0; i < A->n; i++) {
     double v = 0.0;
     if (A->dt == DT_F32) v = (double) ((const float *) A->p)[i];
