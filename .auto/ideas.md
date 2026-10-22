@@ -164,6 +164,13 @@ reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only 
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
 
+## Dispatch audit (run 121): the plain conv kernel is intentionally retained
+All 124 T81 convs dispatch as: 122x ig8 (GEMM 4x8 tile), 2x wsm (narrow: cout=1 final
+projection + one more), 0x plain `pt_conv_kernel`. The plain kernel is dead in practice but is
+kept ON PURPOSE: it is the only fallback when bisection env vars disable the tiled paths
+(PT_V21_IG_MINT/IG8_MINT, tiny WSM_KB). Do not remove it as dead code; its value is as a
+bisection endpoint, and deleting it saves nothing at runtime.
+
 ## Killed by measurement #5 (run 81): PreferL1 cache config for the GEMM convs
 `cudaFuncSetCacheConfig(ig/ig8, PreferL1)`, env-gated, wsm/plain/convT/matmul untouched (wsm needs
 up to 48 KB shared). N=1 kernel+sync, alternating 3 pairs: 395.8/396.3/397.6 vs 401.9/396.9/402.6
