@@ -394,6 +394,14 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   static long wsm_gate = -1;
   if (wsm_gate < 0) wsm_gate = getenv("PT_V21_WSM_KB") ? atol(getenv("PT_V21_WSM_KB")) * 1024 : 49152;   /* 48 KB: measured -12% at N=4 vs the old 16 KB gate */
   int wsm = wsm_bytes > 0 && (long) wsm_bytes <= wsm_gate;
+  /* Shared memory, not threads, caps residency for fat slices: at >16 KB only one or two blocks fit
+   * per SM, so a 256-thread block leaves the SM with 8-16 warps. Bigger blocks for those slices
+   * keep the same shared footprint and put more warps in flight. Grid shape only: bit-identical. */
+  static int big_threads = -1;
+  if (big_threads < 0)
+    big_threads = getenv("PT_V21_BIG_THREADS") ? atoi(getenv("PT_V21_BIG_THREADS")) : 512;
+  if (wsm && wsm_bytes > 16384 && big_threads > 0)
+    threads = big_threads;
   dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   tA = gpu_prof() ? gpu_now() : 0.0;
   if (wsm) {
@@ -408,6 +416,8 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
                                                                       (int64_t) cout4 * Tout, epi0,
                                                                       epi1, ea0, ea1);
   }
+  /* a launch that fails (e.g. too many registers for the block size) must not pass silently */
+  PTCHK(cudaGetLastError());
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   if (gpu_prof()) {
