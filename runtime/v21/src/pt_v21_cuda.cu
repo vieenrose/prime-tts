@@ -209,6 +209,57 @@ __global__ void pt_conv_kernel(const float *__restrict__ x, int64_t ldx, int cin
     yb[(int64_t) (co + 3) * ldy + t] = acc.w;
 }
 
+/* Weight-staged conv: the weights for a block's 4 output channels are cooperatively loaded into
+ * shared memory once at block start, so a block reads its 12 KB weight slice from memory once
+ * instead of every thread re-reading it. The input is still read straight from global in the
+ * compute loop - consecutive threads read consecutive columns, so those loads are coalesced and no
+ * tile staging or __syncthreads is needed in the inner loop. Summation order and every fp32 product
+ * are identical to the reference kernel, so results are bit-identical.
+ */
+__global__ void pt_conv_kernel_wsm(const float *__restrict__ x, int64_t ldx, int cin, int K,
+                                   int dil, int stride, int pad, float *__restrict__ y, int64_t ldy,
+                                   int64_t Tout, int cout, const float *__restrict__ wp,
+                                   const float *__restrict__ bias, int64_t bsx, int64_t bsy) {
+  extern __shared__ float4 wsm[];   /* [k*cin + ci] -> this block's 4 channel lanes */
+  const int NT = blockDim.x;
+  int64_t t = (int64_t) blockIdx.x * NT + threadIdx.x;
+  int blk = (int) blockIdx.y;
+  int64_t b = (int64_t) blockIdx.z;
+  const int kc = K * cin;
+  const float4 *w4 = (const float4 *) wp + (int64_t) blk * kc;
+  for (int idx = threadIdx.x; idx < kc; idx += NT)
+    wsm[idx] = w4[idx];
+  __syncthreads();
+  if (t >= Tout)
+    return;
+  int co0 = blk * 4;
+  float4 acc = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                           bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                           bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                           bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  const float *xb = x + b * bsx;
+  for (int k = 0; k < K; k++) {
+    const float *xs = xb + (int64_t) (k * dil) + t * stride;
+    for (int ci = 0; ci < cin; ci++) {
+      float4 w = wsm[(int64_t) k * cin + ci];
+      float xv = xs[(int64_t) ci * ldx];
+      acc.x += w.x * xv;
+      acc.y += w.y * xv;
+      acc.z += w.z * xv;
+      acc.w += w.w * xv;
+    }
+  }
+  float *yb = y + b * bsy;
+  if (co0 + 0 < cout)
+    yb[(int64_t) (co0 + 0) * ldy + t] = acc.x;
+  if (co0 + 1 < cout)
+    yb[(int64_t) (co0 + 1) * ldy + t] = acc.y;
+  if (co0 + 2 < cout)
+    yb[(int64_t) (co0 + 2) * ldy + t] = acc.z;
+  if (co0 + 3 < cout)
+    yb[(int64_t) (co0 + 3) * ldy + t] = acc.w;
+}
+
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
                 const float *bias, int64_t batch, int wtab, int btab) {
@@ -252,13 +303,23 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     }
   }
   int threads = 256;
+  /* stage the weight slice in shared memory when it is small enough to leave room for a few blocks
+   * per SM (the Nano has 64 KB of shared per SM and 2 SMs) */
+  size_t wsm_bytes = (size_t) K * cin * sizeof(float4);
+  int wsm = wsm_bytes > 0 && wsm_bytes <= 16384;
   dim3 grid((unsigned) ((Tout + threads - 1) / threads), (unsigned) (cout4 / 4), (unsigned) batch);
   tA = gpu_prof() ? gpu_now() : 0.0;
-  pt_conv_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, K, dil, stride,
-                                                                    pad, dy, /*ldy=*/Tout,
-                                                                    /*Tout=*/Tout, cout, dw, db,
-                                                                    (int64_t) cin * ldx,
-                                                                    (int64_t) cout4 * Tout);
+  if (wsm) {
+    pt_conv_kernel_wsm<<<grid, threads, wsm_bytes, (cudaStream_t) c->g_stream>>>(
+        dx, ldx, cin, K, dil, stride, pad, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+        (int64_t) cin * ldx, (int64_t) cout4 * Tout);
+  } else {
+    pt_conv_kernel<<<grid, threads, 0, (cudaStream_t) c->g_stream>>>(dx, ldx, cin, K, dil, stride,
+                                                                      pad, dy, /*ldy=*/Tout,
+                                                                      /*Tout=*/Tout, cout, dw, db,
+                                                                      (int64_t) cin * ldx,
+                                                                      (int64_t) cout4 * Tout);
+  }
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   if (gpu_prof()) {
