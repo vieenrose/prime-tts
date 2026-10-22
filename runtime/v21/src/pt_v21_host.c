@@ -1232,6 +1232,49 @@ static int op_pad(pt_ctx *c, const pt_tv *A, const int64_t *pads, double cv, int
     }
     return 0;
   }
+  if (host_rows_on() && mode == 1 && nonneg) {
+    /* reflect padding without cropping: every output row is a whole source row with mirrored
+     * segments on both edges, so the middle is one memcpy and the two edge strips are short
+     * reversed copies. The reflection index is the same one the generic loop below computes
+     * (src < 0 ? -src : 2L - src - 2), only hoisted out of the per-element decode. Requires
+     * pad < L on every axis, otherwise a reflection could land outside the source and the generic
+     * path's zero fill applies. */
+    int fits = 1;
+    for (int q = 0; q < nd; q++)
+      if (lo[q] >= A->d[q] || pads[nd + q] >= A->d[q])
+        fits = 0;
+    if (fits) {
+      int64_t L = A->d[nd - 1];
+      int64_t nrows = O->n / d[nd - 1];
+      /* row strides of the OUTER axes: so[] counts the last axis too, so divide it out */
+      int64_t rso[PT_V21_MAX_RANK];
+      for (int q = 0; q < nd - 1; q++) rso[q] = so[q] / d[nd - 1];
+      char *op = (char *) O->p;
+      for (int64_t ro = 0; ro < nrows; ro++) {
+        int64_t r = ro, oa = 0;
+        for (int q = 0; q < nd - 1; q++) {
+          int64_t idx = r / rso[q];
+          r %= rso[q];
+          int64_t src = idx - lo[q];
+          if (src < 0) src = -src;
+          else if (src >= A->d[q]) src = 2 * A->d[q] - src - 2;
+          oa += src * si[q];
+        }
+        const char *row = (const char *) A->p + oa * es;
+        char *orow = op + ro * d[nd - 1] * es;
+        for (int64_t j = 0; j < lo[nd - 1]; j++) {          /* left mirror */
+          int64_t sj = lo[nd - 1] - j;
+          memcpy(orow + j * es, row + sj * es, (size_t) es);
+        }
+        memcpy(orow + lo[nd - 1] * es, row, (size_t) (L * es));
+        for (int64_t j = 0; j < pads[nd + nd - 1]; j++) {    /* right mirror */
+          int64_t sj = L - 2 - j;
+          memcpy(orow + (lo[nd - 1] + L + j) * es, row + sj * es, (size_t) es);
+        }
+      }
+      return 0;
+    }
+  }
   for (int64_t i = 0; i < O->n; i++) {
     int64_t r = i, oa = 0;
     int inside = 1;

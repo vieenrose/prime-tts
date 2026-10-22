@@ -48,6 +48,14 @@ Ordered by expected payoff per unit of risk. Measure the phase split before and 
 - Padé-approximant / coarse-table tanh+sigmoid: SNDR 67.4 / 64.3 dB. The 65536-point interpolated
   table keeps 70.09 dB and is kept (TANH 62 -> 19 ms).
 
+## Graph op dispatch (run 72)
+A warm `PT_V21_EKIND=2` profile is the right tool: it surfaces nodes whose *measured* time is out of
+line with their FLOPs. Node 4065 (the final cout=1, cin=4, K=63 output projection) was 11th at
+17.3 ms for 0.01 GMAC because the 16-channel-group GEMM tile computed and discarded 15/16 of every
+block. Generalising: always check `cout4/4 >= 16` before choosing a 16-group tile.
+Next out-of-line host node: `/dec/reflection_pad` 13.4 ms -- `op_pad`'s row fast path covers only
+constant mode, so reflect mode falls through to the per-element div/mod decode.
+
 ## Startup budget (measured with temporary timestamps, run 71)
 open/record pass 100 ms (one serialized pass; later contexts alias the shared payloads and wait),
 CUDA context 85 ms, device weight upload 230 ms for 111 MB. The upload is 0.46 GB/s only because the
