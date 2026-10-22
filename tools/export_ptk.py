@@ -15,8 +15,13 @@ Kernel-friendly layouts (see runtime/include/pt.h):
   "<mod>.dw"  depthwise weights [Cout][K] (output channel o reads input o // (Cout/Cin)).
   "<mod>.g"/"<mod>.b"  LayerNorm gamma / beta.
   "<mod>.a"/"<mod>.ia" Snake alpha = clip(exp(log_alpha), 1e-4, 100) and 1/alpha, padded with 1.
-  ConvTranspose (stride s, K = 2s) -> s phases of a 2-tap conv, stacked as Cout4*s rows
-              (phase r rows first); tap0 = W[:, :, r+s] (reads x[q-1]), tap1 = W[:, :, r] (reads x[q]).
+  ConvTranspose (stride s, K = 2s, pad = s/2) -> s phases of a 2-tap conv.  Rows are phase-major:
+              row (p * Cout4 + c) is phase p / output channel c, the 2 axis is the tap:
+              tap0 = W[:, :, p+s] (reads x[q-1]), tap1 = W[:, :, p] (reads x[q]); the packed tensor is
+              pack_conv of that [s*Cout4, Cin, 2] block, so a 4-row block holds 4 consecutive channels
+              of one phase.  After the conv, out[q*s + r - pad] = phase r / channel c at q (runtime
+              interleave).  tools/export_ptk.py::check_convT proves this layout reproduces the ONNX
+              weight + bias for every stage of both v1 variants.
   GRU         "frame_gru.wih.wp/.b": input projection of both directions (504 rows),
               "frame_gru.r" [2][252][84] recurrent, "frame_gru.rb" [2][252].
 
@@ -62,6 +67,30 @@ def pack_conv(W):
     return np.ascontiguousarray(Wp.reshape(C4 // 4, 4, Cin, K).transpose(0, 3, 2, 1))
 
 
+def unpack_conv(Wp):
+    """inverse of pack_conv: [Cout4/4][K][Cin][4] -> [Cout4][Cin][K] (transpose(0,3,2,1) is an involution)"""
+    b, K, Cin, _ = Wp.shape
+    return np.ascontiguousarray(Wp.transpose(0, 3, 2, 1)).reshape(b * 4, Cin, K)
+
+
+def unpack_convtranspose(Wp, Bph, s, Cout, Cin):
+    """packed s-phase 2-tap conv -> ONNX ConvTranspose W [Cin, Cout, 2s] and bias [Cout].
+    This is the exact inverse of the packing in Exporter.graph's ConvTranspose branch, and it is
+    also what the runtime does (conv over q, then out[q*s + r - pad] = phase r at q)."""
+    rows = Wp.shape[0] * 4
+    assert rows == s * r4(Cout), (rows, s, Cout)
+    Wph = unpack_conv(Wp)  # [s*Cout4][Cin][2]
+    W = np.zeros((Cin, Cout, 2 * s), np.float32)
+    for p in range(s):
+        sl = slice(p * r4(Cout), p * r4(Cout) + Cout)
+        W[:, :, p + s] = Wph[sl, :, 0].T
+        W[:, :, p] = Wph[sl, :, 1].T
+    B = Bph[:Cout]  # the bias is replicated into every phase block
+    for p in range(1, s):
+        assert np.array_equal(Bph[p * r4(Cout):p * r4(Cout) + Cout], B), p
+    return W, B
+
+
 def pad_vec(b, n, fill=0.0):
     out = np.full(n, fill, np.float32)
     out[: b.shape[0]] = b
@@ -72,6 +101,9 @@ class Exporter:
     def __init__(self):
         self.tensors = {}  # name -> np.float32 array
         self.layers = []
+        self.convT = []    # per ConvTranspose: original ONNX W/B + params, for check_convT()
+        self.pre_cout = None    # voc conv_pre Cout (== ups.0 Cin, the runtime's conv_pre row count)
+        self.stage_cout = None  # previous vocoder stage Cout (== next stage Cin)
 
     def add(self, name, arr):
         assert name not in self.tensors, name
@@ -130,6 +162,8 @@ class Exporter:
                 K = W.shape[2]
                 pad = a["pads"][0]
                 dil = a["dilations"][0]
+                if mod == "conv_pre":
+                    self.pre_cout = W.shape[0]
                 entry = dict(graph=tag, module=mod, op="conv1d", onnx=[n.input[1]] + ([n.input[2]] if len(n.input) > 2 else []),
                              W_shape=list(W.shape), group=grp, kernel=K, pad=pad, dilation=dil, stride=a["strides"][0],
                              epilogue=fused_after(n))
@@ -161,6 +195,10 @@ class Exporter:
                 assert K == 2 * s and pad * 2 == s, (K, s, pad)
                 Cin, Cout, _ = W.shape
                 C4 = r4(Cout)
+                # vocoder channel chain: stage 0 reads conv_pre's Cout, stage i reads stage i-1's Cout
+                idx = int(mod.split(".")[1]) if mod[:4] == "ups." else None
+                if idx is not None:
+                    assert Cin == (self.pre_cout if idx == 0 else self.stage_cout), (idx, Cin, self.pre_cout, self.stage_cout)
                 Wph = np.zeros((s * C4, Cin, 2), np.float32)
                 Bph = np.zeros(s * C4, np.float32)
                 for r in range(s):
@@ -169,6 +207,9 @@ class Exporter:
                     Bph[r * C4:r * C4 + Cout] = B
                 self.add(f"{tag}.{mod}.wp", pack_conv(Wph))
                 self.add(f"{tag}.{mod}.b", Bph)
+                self.convT.append(dict(name=f"{tag}.{mod}", s=s, K=K, pad=pad, Cin=Cin, Cout=Cout, W=W, B=B))
+                if idx is not None:
+                    self.stage_cout = Cout
                 self.layers.append(dict(graph=tag, module=mod, op="conv_transpose1d", onnx=[n.input[1], n.input[2]],
                                         W_shape=list(W.shape), stride=s, kernel=K, pad=pad,
                                         packed=[f"{tag}.{mod}.wp", f"{tag}.{mod}.b"], packed_shape=list(self.tensors[f"{tag}.{mod}.wp"].shape),
@@ -239,6 +280,22 @@ class Exporter:
             elif n.op_type == "Add" and n.output[0] == "mel" or (n.op_type == "Mul" and any(i in consts for i in n.input) and "postnet" in "".join(n.input)):
                 pass
 
+    def check_convT(self, tol=1e-6):
+        """HARD GATE (run before any Nano run): unpacking the packed s-phase / 2-tap ConvTranspose
+        tensors must reproduce the original ONNX weight and bias, for every stage.  The runtime's
+        phase interleave (out[q*s + r - pad] = phase r) is only correct if this holds."""
+        for e in self.convT:
+            wp, bp = f"{e['name']}.wp", f"{e['name']}.b"
+            Wp, Bph = self.tensors[wp], self.tensors[bp]
+            assert Wp.shape == (e["s"] * r4(e["Cout"]) // 4, 2, e["Cin"], 4), (Wp.shape, e)
+            assert Bph.shape == (e["s"] * r4(e["Cout"]),), Bph.shape
+            assert e["K"] == 2 * e["s"] and 2 * e["pad"] == e["s"], e
+            W, B = unpack_convtranspose(Wp, Bph, e["s"], e["Cout"], e["Cin"])
+            dw, db = float(np.max(np.abs(W - e["W"]))), float(np.max(np.abs(B - e["B"])))
+            assert dw <= tol and db <= tol, (e["name"], dw, db)
+            print(f"  convT gate {e['name']:12s} Cin={e['Cin']:3d} Cout={e['Cout']:3d} stride={e['s']} "
+                  f"K={e['K']} pad={e['pad']}  max|W-unpack|={dw:.1e} max|B-unpack|={db:.1e}  OK")
+
     def write(self, path):
         names = list(self.tensors)
         recs, off = [], 0
@@ -272,15 +329,25 @@ def main():
     ex.graph("enc", f"{args.model_dir}/acoustic_encoder.onnx")
     ex.graph("dec", f"{args.model_dir}/acoustic_decoder.onnx")
     ex.graph("voc", f"{args.model_dir}/vocoder.onnx")
+    meta = json.load(open(f"{args.model_dir}/meta.json"))
     # Vocoder geometry as data so the runtime is not locked to one variant: per stage
     # [stage_channels (ConvT Cin, = resblock channels), stride, pad, kernel].
     stages = sorted((l for l in ex.layers if l["graph"] == "voc" and l["module"].startswith("ups.")),
                     key=lambda l: int(l["module"].split(".")[1]))
     assert len(stages) == 4, stages
-    ex.add("voc.geom", np.array([[l["W_shape"][1], l["stride"], l["pad"], l["kernel"]] for l in stages],
-                                np.float32))
+    geom = [[l["W_shape"][1], l["stride"], l["pad"], l["kernel"]] for l in stages]
+    hop = 1
+    for g in geom:
+        hop *= g[1]
+    assert hop == meta["hop_size"], (geom, meta["hop_size"])   # samples per mel frame = product of strides
+    assert ex.pre_cout == 2 * geom[0][0], (ex.pre_cout, geom[0])  # conv_pre doubles the stage-0 channels
+    ex.add("voc.geom", np.array(geom, np.float32))
+    # model scalars the runtime must not assume: sample_rate, hop_size, abs_frame_bins, max_frames
+    ex.add("model.meta", np.array([meta["sample_rate"], meta["hop_size"], meta["abs_frame_bins"],
+                                   meta["max_frames"]], np.float32))
+    print(f"packing gate for {os.path.basename(args.model_dir)}:")
+    ex.check_convT()
     n, nb = ex.write(args.out)
-    meta = json.load(open(f"{args.model_dir}/meta.json"))
     nparam = sum(t.size for t in ex.tensors.values())
     doc = {
         "model": f"PrimeTTS {os.path.basename(args.model_dir)}",

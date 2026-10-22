@@ -21,9 +21,9 @@ int pt_conv_bind(pt_conv_w *c, const pt_weights *w, const char *wp_name, const c
   c->cout4 = (int)t->dim[0] * 4;
   c->K = (int)t->dim[1];
   c->cin = (int)t->dim[2];
-  c->cout = cout;
+  c->cout = cout > 0 ? cout : c->cout4;   /* 0 = every packed row is a real output channel */
   c->dil = dil;
-  if (cout > c->cout4 || cout <= c->cout4 - 4) { fprintf(stderr, "pt_conv_bind: %s cout %d vs %d\n", wp_name, cout, c->cout4); return -1; }
+  if (c->cout > c->cout4 || c->cout <= c->cout4 - 4) { fprintf(stderr, "pt_conv_bind: %s cout %d vs %d\n", wp_name, c->cout, c->cout4); return -1; }
   if ((long)c->K * c->cin > MAXNK) { fprintf(stderr, "pt_conv_bind: %s nk too big\n", wp_name); return -1; }
   return 0;
 }

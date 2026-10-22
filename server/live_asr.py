@@ -88,6 +88,7 @@ async def transcribe(
     *,
     model: str = MODEL,
     language_codes: list[str] | None = None,
+    staff_silent: bool = False,
     realtime: bool = True,
     tail_s: float = 8.0,
     timeout_s: float = 60.0,
@@ -109,6 +110,17 @@ async def transcribe(
         trans_cfg["language_codes"] = list(language_codes)
         res.language_codes_sent = list(language_codes)
     config = {"response_modalities": ["AUDIO"], "input_audio_transcription": trans_cfg}
+    if staff_silent:
+        # The staff-recommended workaround on discuss.ai.google.dev (post 7 of thread 113843):
+        # native-audio models need the AUDIO output channel open, so keep it open and tell the
+        # model to stay silent. Whether it actually stops generating (and paying for) audio is
+        # measured by the token details below.
+        config["speech_config"] = {"voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}}}
+        config["system_instruction"] = {"parts": [{"text": (
+            "You are a transcription service for a contact centre. Listen to the caller and DO NOT "
+            "SPEAK: produce no spoken reply of any kind. Your only output is the verbatim transcript "
+            "of the caller's speech, produced by input_audio_transcription.")}]}
+        res.notes.append("staff_silent config applied (speech_config Puck + silent system_instruction)")
 
     t_connect0 = time.monotonic()
     async with client.aio.live.connect(model=model, config=config) as session:
@@ -125,14 +137,27 @@ async def transcribe(
                 if realtime:
                     due = t0 + (i // chunk_bytes) * CHUNK_MS / 1000
                     await asyncio.sleep(max(0.0, due - time.monotonic()))
+                # send_realtime_input(media=...) is for text/image parts; realtime *audio*
+                # must go through audio= (media= audio is accepted by the SDK and silently
+                # ignored by the server: no interim_input_transcription, no usage).
                 await session.send_realtime_input(
-                    media=types.Blob(data=pcm[i:i + chunk_bytes], mime_type=f"audio/pcm;rate={sr}")
+                    audio=types.Blob(data=pcm[i:i + chunk_bytes], mime_type=f"audio/pcm;rate={sr}")
                 )
             res.t_last_chunk = time.monotonic()
             await session.send_realtime_input(audio_stream_end=True)
 
         async def receiver() -> None:
-            async for msg in session.receive():
+            # session.receive() blocks forever when the model goes silent (no turn events at all),
+            # which is exactly the staff-recommended silent-transcriber config. Bound every message
+            # wait by `quiet_s` after the mic stream ends so a turn can always be closed.
+            gen = session.receive()
+            quiet_s = max(8.0, tail_s)
+            while True:
+                try:
+                    msg = await asyncio.wait_for(gen.__anext__(), timeout=quiet_s)
+                except (asyncio.TimeoutError, StopAsyncIteration):
+                    res.notes.append(f"no server message for {quiet_s:.1f} s -> closing turn")
+                    return
                 now = time.monotonic()
                 sc = msg.server_content
                 if sc is not None:
@@ -187,7 +212,10 @@ def report(res: AsrResult) -> None:
     for it in res.interims:
         print(f"  {it['t_ms']:8.1f} ms vs last chunk  {it['text']!r}")
     print(f"last audio chunk -> first interim   : {res.ms(res.t_first_interim)} ms")
-    print(f"last audio chunk -> final transcript: {res.ms(res.t_final):.1f} ms")
+    if res.t_final is None:
+        print("no final transcript received (t_final=None)")
+    else:
+        print(f"last audio chunk -> final transcript: {res.ms(res.t_final):.1f} ms")
     print(f"last audio chunk -> turn_complete   : {res.ms(res.t_turn_complete)} ms")
     print(
         f"discarded spoken reply: {res.audio_out_bytes} audio bytes "
@@ -222,14 +250,20 @@ async def main() -> None:
     )
     ap.add_argument("--no-realtime", action="store_true", help="send all chunks as fast as possible")
     ap.add_argument("--tail-s", type=float, default=8.0)
+    ap.add_argument("--timeout-s", type=float, default=60.0)
+    ap.add_argument("--staff-silent", action="store_true",
+                    help="apply the staff-recommended silent-transcriber config (docs/cost.md probe)")
     args = ap.parse_args()
     codes = [args.language] if args.language else None
+    staff_silent = args.staff_silent
     res = await transcribe(
         args.wav,
         model=args.model,
         language_codes=codes,
+        staff_silent=args.staff_silent,
         realtime=not args.no_realtime,
         tail_s=args.tail_s,
+        timeout_s=args.timeout_s,
     )
     report(res)
 

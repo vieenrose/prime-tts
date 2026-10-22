@@ -175,7 +175,7 @@ def main():
                              audio_s=round(wav.shape[-1] / meta["sample_rate"], 3), dur_round_margin=round(margin, 4),
                              probe_vs_opt_wav_maxabs=None))
         print(f"{name:16s} T={ph.shape[1]:3d} F={F:4d} samples={wav.shape[-1]:6d} "
-              f"({wav.shape[-1]/8000:.2f}s)  dur-rounding margin={margin:.4f}")
+              f"({wav.shape[-1]/meta['sample_rate']:.2f}s)  dur-rounding margin={margin:.4f}")
     json.dump(dict(model_dir=MD, cases=manifest, files_per_case=sorted(save.keys())),
               open(os.path.join(args.out, "MANIFEST.json"), "w"), indent=1)
 

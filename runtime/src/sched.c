@@ -7,7 +7,7 @@
  *     (k_core + 1) / capacity_rt <= safety          (capacity_rt = 1 / RTF_single, measured)
  * and the total in flight stays <= max_streams.  Otherwise it waits (FIFO) for a completion.
  * Every PCM chunk is time-stamped: playback is assumed to start when the first chunk is ready, chunk k
- * is due at t_first + (samples before k) / 8000 and lateness = ready - due (<= 0: never starved).
+ * is due at t_first + (samples before k) / sample_rate and lateness = ready - due (<= 0: never starved).
  */
 #define _GNU_SOURCE
 #include "pt_v1b8k.h"
@@ -32,6 +32,7 @@ typedef struct {
 
 struct server {
   const pt_v1b8k_sched_cfg *cfg;
+  int sample_rate;
   pthread_mutex_t mu;
   pthread_cond_t cv;
   int per_core[64];
@@ -51,7 +52,7 @@ static int wrap_cb(void *u, const float *pcm, int n) {
     w->t_first = now;
     w->r->t_first_audio_s = now;
   }
-  double due = w->t_first + (double)w->samples / PT_V1B8K_SR;
+  double due = w->t_first + (double)w->samples / w->sv->sample_rate;
   double late = now - due;
   if (late > w->r->max_lateness_s) w->r->max_lateness_s = late;
   w->samples += n;
@@ -117,6 +118,7 @@ int pt_v1b8k_run_batch(const pt_v1b8k_model *m, const pt_v1b8k_sched_cfg *cfg, p
   server sv;
   memset(&sv, 0, sizeof sv);
   sv.cfg = cfg;
+  sv.sample_rate = pt_v1b8k_sample_rate(m);
   pthread_mutex_init(&sv.mu, 0);
   pthread_cond_init(&sv.cv, 0);
   int maxs = cfg->max_streams < 1 ? 1 : cfg->max_streams > PT_MAX_STREAM ? PT_MAX_STREAM : cfg->max_streams;

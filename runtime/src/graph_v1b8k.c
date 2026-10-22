@@ -22,10 +22,10 @@
 #define SLACK 64
 #define LN_EPS 9.999999747378752e-06f
 #define MELPAD 64     /* zero columns around the mel for the vocoder window */
-#define VSLACK 96     /* tile overshoot (16) + max tap span (50) + ConvT slack */
 
-static int ST_COUT[4], ST_STRIDE[4], ST_PAD[4];   /* filled from the "voc.geom" tensor in the .ptk */
-static const int ST_RATE[4] = {8, 32, 64, 128};
+static int ST_COUT[4], ST_STRIDE[4], ST_PAD[4], ST_KERNEL[4], ST_RATE[4]; /* from the .ptk "voc.geom" */
+static int V_HOP;     /* samples per mel frame = product of the stage strides (128 at 8 kHz, 256 at 16 kHz) */
+static int V_SLACK;   /* conv window overshoot: 16-column tile rounding + widest tap span in the graph */
 static const int RB_K[3] = {3, 7, 11};
 static const int RB_D[3] = {1, 3, 5};
 #define RB_REACH 60   /* max over resblocks: sum_m (d_m + 1) * (K - 1) / 2 for K = 11 */
@@ -44,7 +44,7 @@ typedef struct { ln_w ln; pt_conv_w l1, l3; } head_w;
 
 struct pt_v1b8k_model {
   pt_weights w;
-  int abs_bins, max_frames;
+  int sample_rate, hop, abs_bins, max_frames;   /* from the container's model.meta */
   /* encoder */
   const float *emb_ph, *emb_tone, *emb_lang, *emb_spk;
   pt_conv_w spk_proj;
@@ -151,24 +151,38 @@ static int bind_head(pt_v1b8k_model *m, head_w *h, const char *nm, int mid, int 
 }
 
 /* Vocoder stage geometry comes from the container, so one binary serves every v1 variant
- * (v1b_8k: channels 48/24/12/6, strides 8/4/2/2; v1b_16k: 80/40/20/10, strides 8/8/2/2). */
+ * (v1b_8k: channels 48/24/12/6, strides 8/4/2/2, hop 128; v1b_16k: 80/40/20/10, strides 8/8/2/2, hop 256).
+ * ST_RATE[s] = output rate of stage s in samples per mel frame = product of strides 0..s; the sample
+ * rate, hop, frame limits and window slack all follow from these numbers - nothing below may assume
+ * a particular variant. */
 static int voc_geom(pt_v1b8k_model *m) {
   const float *g = W(m, "voc.geom");
-  if (!g) return 1;
+  const float *meta = W(m, "model.meta");
+  if (!g || !meta) return 1;
+  int rate = 1, kmax = 6;   /* conv_post K7 -> span 6 */
   for (int s = 0; s < 4; s++) {
-    int c = (int)g[s * 4], st = (int)g[s * 4 + 1], pd = (int)g[s * 4 + 2];
-    if (c <= 0 || st <= 0 || pd < 0 || pd * 2 != st) return 1;
-    ST_COUT[s] = c; ST_STRIDE[s] = st; ST_PAD[s] = pd;
+    int c = (int)g[s * 4], st = (int)g[s * 4 + 1], pd = (int)g[s * 4 + 2], k = (int)g[s * 4 + 3];
+    if (c <= 0 || st <= 0 || pd < 0 || pd * 2 != st || k != 2 * st) return 1;   /* 2-tap-per-phase packing */
+    ST_COUT[s] = c; ST_STRIDE[s] = st; ST_PAD[s] = pd; ST_KERNEL[s] = k;
+    rate *= st;
+    if (k - 1 > kmax) kmax = k - 1;
+    ST_RATE[s] = rate;
   }
+  int resblock_span = (RB_K[2] - 1) * RB_D[2];   /* K11 d5 convs: the widest read span in the graph */
+  V_HOP = rate;
+  V_SLACK = 16 + (resblock_span > kmax ? resblock_span : kmax);
+  m->sample_rate = (int)meta[0];
+  m->hop = (int)meta[1];
+  m->abs_bins = (int)meta[2];
+  m->max_frames = (int)meta[3];
+  if (m->sample_rate <= 0 || m->hop != V_HOP || m->abs_bins <= 0 || m->max_frames <= 0) return 1;
   return 0;
 }
 
 pt_v1b8k_model *pt_v1b8k_load(const char *path) {
   pt_v1b8k_model *m = calloc(1, sizeof *m);
   if (!m || pt_weights_open(&m->w, path)) { free(m); return 0; }
-  if (voc_geom(m)) { fprintf(stderr, "v1b8k: missing/invalid voc.geom in %s\n", path); pt_weights_close(&m->w); free(m); return 0; }
-  m->abs_bins = 512;
-  m->max_frames = 1000;  /* model/v1b_8k/meta.json */
+  if (voc_geom(m)) { fprintf(stderr, "v1b8k: missing/invalid voc.geom or model.meta in %s\n", path); pt_weights_close(&m->w); free(m); return 0; }
   int e = 0;
   m->emb_ph = W(m, "enc.phone.emb");
   m->emb_tone = W(m, "enc.tone.emb");
@@ -205,7 +219,7 @@ pt_v1b8k_model *pt_v1b8k_load(const char *path) {
   e |= bindc(&m->pn0, m, H, 1, "dec.postnet.0");
   e |= bindc(&m->pn2, m, H, 1, "dec.postnet.2");
   e |= bindc(&m->pn4, m, 80, 1, "dec.postnet.4");
-  e |= bindc(&m->pre, m, 2 * (int)r4(ST_COUT[0]), 1, "voc.conv_pre");
+  e |= bindc(&m->pre, m, 0, 1, "voc.conv_pre");   /* cout from the packed tensor = conv_pre Cout */
   for (int s = 0; s < 4; s++) {
     /* phase-stacked ConvTranspose: cout = stride * Cout4 rows, all real (padding inside each phase) */
     e |= bindc(&m->ups[s], m, ST_STRIDE[s] * (int)r4(ST_COUT[s]), 1, "voc.ups.%d", s);
@@ -243,6 +257,9 @@ void pt_v1b8k_free(pt_v1b8k_model *m) {
   free(m);
 }
 
+int pt_v1b8k_sample_rate(const pt_v1b8k_model *m) { return m->sample_rate; }   /* 8000 | 16000 */
+int pt_v1b8k_hop(const pt_v1b8k_model *m) { return m->hop; }                   /* samples per mel frame */
+
 /* ------------------------------------------------------------------ vocoder chunk plan */
 typedef struct {
   long S0, S1;
@@ -252,8 +269,8 @@ typedef struct {
 } vplan;
 
 static void plan_chunk(vplan *p, long a, long b) {
-  p->S0 = a * PT_V1B8K_HOP;
-  p->S1 = b * PT_V1B8K_HOP;
+  p->S0 = a * V_HOP;
+  p->S1 = b * V_HOP;
   p->vlo[4] = p->S0 - 3;   /* conv_post K7 pad3 */
   p->vhi[4] = p->S1 + 3;
   for (int s = 3; s >= 0; s--) {
@@ -289,8 +306,8 @@ static float *ralloc(pt_arena *A, long rows, long ld, int alloc, int *err) {
 static void vwin_alloc(pt_arena *A, vwin *v, int C, long cols, int alloc, int *err) {
   vwin t;
   t.C = (int)r4(C);
-  t.ld = r16(cols + VSLACK);
-  t.cap = t.ld - VSLACK;
+  t.ld = r16(cols + V_SLACK);
+  t.cap = t.ld - V_SLACK;
   t.lo = t.hi = 0;
   t.base = ralloc(A, t.C, t.ld, alloc, err);
   if (alloc) *v = t;
@@ -355,6 +372,7 @@ void pt_v1b8k_ws_free(pt_v1b8k_ws *ws) {
 size_t pt_v1b8k_ws_bytes(const pt_v1b8k_ws *ws) { return ws->A.cap; }
 
 static size_t stream_plan(pt_v1b8k_stream *s, int alloc) {
+  const pt_v1b8k_model *m = s->m;
   pt_arena *A = &s->A;
   size_t before = A->used;
   int e = 0;
@@ -370,17 +388,17 @@ static size_t stream_plan(pt_v1b8k_stream *s, int alloc) {
   long need[6] = {0}, needS = 0;   /* floats per role: U, T1, T2, XA, XB, PH */
   long wcols[4], phcols[4], scols[5];
   scols[0] = p.vhi[0] - p.vlo[0] + 8;
-  needS = 2 * r4(ST_COUT[0]) * r16(scols[0] + VSLACK);
+  needS = m->pre.cout4 * r16(scols[0] + V_SLACK);   /* conv_pre output rows = conv_pre Cout */
   for (int st = 0; st < 4; st++) {
     long C4 = r4(ST_COUT[st]);
     wcols[st] = p.uhi[st] - p.ulo[st] + 8;
     phcols[st] = p.qhi[st] - p.qlo[st] + 8;
     scols[st + 1] = p.vhi[st + 1] - p.vlo[st + 1] + 8;
-    long w = C4 * r16(wcols[st] + VSLACK);
+    long w = C4 * r16(wcols[st] + V_SLACK);
     for (int r = 0; r < 5; r++) if (w > need[r]) need[r] = w;
-    long ph = ST_STRIDE[st] * C4 * r16(phcols[st] + VSLACK);
+    long ph = ST_STRIDE[st] * C4 * r16(phcols[st] + V_SLACK);
     if (ph > need[5]) need[5] = ph;
-    long sm = C4 * r16(scols[st + 1] + VSLACK);
+    long sm = C4 * r16(scols[st + 1] + V_SLACK);
     if (sm > needS) needS = sm;
   }
   float *blk[6], *sblk[2];
@@ -392,20 +410,20 @@ static size_t stream_plan(pt_v1b8k_stream *s, int alloc) {
       int C4 = (int)r4(ST_COUT[st]);
       for (int r = 0; r < 5; r++) {
         vwin *v = &roles[r][st];
-        v->C = C4; v->ld = r16(wcols[st] + VSLACK); v->cap = v->ld - VSLACK; v->lo = v->hi = 0; v->base = blk[r];
+        v->C = C4; v->ld = r16(wcols[st] + V_SLACK); v->cap = v->ld - V_SLACK; v->lo = v->hi = 0; v->base = blk[r];
       }
       vwin *v = &s->ph[st];
-      v->C = ST_STRIDE[st] * C4; v->ld = r16(phcols[st] + VSLACK); v->cap = v->ld - VSLACK; v->lo = v->hi = 0; v->base = blk[5];
+      v->C = ST_STRIDE[st] * C4; v->ld = r16(phcols[st] + V_SLACK); v->cap = v->ld - V_SLACK; v->lo = v->hi = 0; v->base = blk[5];
       v = &s->sum[st];
-      v->C = C4; v->ld = r16(scols[st + 1] + VSLACK); v->cap = v->ld - VSLACK; v->lo = v->hi = 0; v->base = sblk[st & 1];
+      v->C = C4; v->ld = r16(scols[st + 1] + V_SLACK); v->cap = v->ld - V_SLACK; v->lo = v->hi = 0; v->base = sblk[st & 1];
     }
     vwin *v = &s->pre;
-    v->C = 2 * r4(ST_COUT[0]); v->ld = r16(scols[0] + VSLACK); v->cap = v->ld - VSLACK; v->lo = v->hi = 0; v->base = sblk[1];
+    v->C = m->pre.cout4; v->ld = r16(scols[0] + V_SLACK); v->cap = v->ld - V_SLACK; v->lo = v->hi = 0; v->base = sblk[1];
   }
   vwin_alloc(A, &s->wav, 1, p.S1 - p.S0 + 8, alloc, &e);
   /* histories (sizes = how far left the consumers reach into the previous chunk's columns) */
   for (int st = 0; st <= 4; st++) {
-    int C = st == 0 ? 96 : ST_COUT[st - 1];
+    int C = st == 0 ? m->pre.cout4 : ST_COUT[st - 1];
     hist_alloc(A, &s->hV[st], C, st == 4 ? 6 : 1, alloc, &e);
   }
   for (int st = 0; st < 4; st++) {
@@ -931,7 +949,7 @@ static int voc_chunk(pt_v1b8k_stream *s, const vplan *p, int F, int first, int f
   if (vset(&s->wav, p->S0, p->S1) || vconv(&m->post, 3, V, &s->wav, p->S0, p->S1, &et)) return -1;
   PROF(PR_VPOST, tp);
   s->vcols_comp += ncomp;
-  s->vcols_use += (p->S1 - p->S0) / PT_V1B8K_HOP;
+  s->vcols_use += (p->S1 - p->S0) / V_HOP;
   return 0;
 }
 
@@ -979,7 +997,7 @@ int pt_v1b8k_synth(pt_v1b8k_stream *s, const int32_t *phone, const int32_t *tone
   if (info) {
     info->T = T;
     info->F = (int)F;
-    info->samples = F * PT_V1B8K_HOP;
+    info->samples = F * V_HOP;
     info->t_frontend_s = t_mel - t0;
     info->t_first_chunk_s = t_first - t0;
     info->t_total_s = pt_now() - t0;

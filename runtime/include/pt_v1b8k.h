@@ -1,16 +1,15 @@
-/* pt_v1b8k.h - PrimeTTS v1b_8k (FastSpeech-style acoustic + Snake-HiFiGAN, 8 kHz) CPU runtime API. */
+/* pt_v1b8k.h - PrimeTTS v1 CPU runtime API (v1b_8k and v1b_16k: same encoder/decoder/vocoder topology,
+ * the stage geometry, hop size and sample rate come from the .ptk container). */
 #ifndef PT_V1B8K_H_
 #define PT_V1B8K_H_
 #include "pt.h"
-
-#define PT_V1B8K_SR 8000
-#define PT_V1B8K_HOP 128
 
 typedef struct pt_v1b8k_model pt_v1b8k_model;
 typedef struct pt_v1b8k_stream pt_v1b8k_stream;
 typedef struct pt_v1b8k_ws pt_v1b8k_ws;   /* encoder+decoder workspace (needed only until the mel is ready) */
 
-/* Called for every finished PCM chunk (float, [-1,1], 8 kHz mono). Return non-zero to cancel (barge-in). */
+/* Called for every finished PCM chunk (float, [-1,1], mono, at the model's sample rate).
+ * Return non-zero to cancel (barge-in). */
 typedef int (*pt_pcm_cb)(void *user, const float *pcm, int n);
 
 /* Optional debug tap: called with intermediate tensors (channel-major [C][ld], n valid columns). */
@@ -27,9 +26,11 @@ typedef struct {
 
 pt_v1b8k_model *pt_v1b8k_load(const char *ptk_path);
 void pt_v1b8k_free(pt_v1b8k_model *m);
+int pt_v1b8k_sample_rate(const pt_v1b8k_model *m);   /* container model.meta: 8000 | 16000 */
+int pt_v1b8k_hop(const pt_v1b8k_model *m);           /* samples per mel frame = product of stage strides */
 
 /* A stream owns all activation memory (one arena, sized from the limits). One synth at a time per stream.
- * chunk_frames: vocoder chunk size in mel frames (1 frame = 16 ms); first chunk is 3 frames (48 ms). */
+ * chunk_frames: vocoder chunk size in mel frames (1 frame = 1/hop of a second, 16 ms in v1); first chunk is 3 frames. */
 pt_v1b8k_stream *pt_v1b8k_stream_new(const pt_v1b8k_model *m, int max_phones, int max_frames, int chunk_frames);
 void pt_v1b8k_stream_free(pt_v1b8k_stream *s);
 /* Memory-lean variant for servers: the stream owns only mel + vocoder state (~1-3 MB); the encoder/decoder

@@ -92,6 +92,7 @@ static void bench_kernels(void) {
   };
   int n = sizeof L / sizeof L[0];
   printf("\n## kernels: conv path GFLOP/s (fp32, epilogue included)\n\n");
+  printf("_shape list is the v1b_8k vocoder/decoder layers (fixed table); for other variants use `single`/`mt`/`concN`_\n\n");
   printf("| layer shape | n cols | 4x16, 1 thr | 8x12, 1 thr, no packing | 8x12 + packing K=1 only, 1 thr | 8x12 + packing incl. K>1 (default), 4 thr | **8x12 + packing incl. K>1 (default), 1 thr** |\n|---|---|---|---|---|---|---|\n");
   for (int i = 0; i < n; i++) {
     pt_conv_set_kernel(0);
@@ -161,7 +162,7 @@ static void bench_single(const pt_v1b8k_model *m, int threads) {
       pt_v1b8k_synth(s, R[i].p, R[i].t, R[i].l, R[i].T, R[i].sid, null_cb, 0, &inf);
       if (rep == 1 || (rep > 1 && inf.t_total_s < best.t_total_s)) best = inf; /* rep 0 = warm-up */
     }
-    double au = best.samples / 8000.0, bf = 1e9;
+    double au = best.samples / (double)pt_v1b8k_sample_rate(m), bf = 1e9;
     for (int rep = 0; rep < 3; rep++) {
       pt_v1b8k_synth(s1, R[i].p, R[i].t, R[i].l, R[i].T, R[i].sid, null_cb, 0, &inf);
       if (inf.t_total_s < bf) bf = inf.t_total_s;
@@ -183,6 +184,7 @@ static void bench_single(const pt_v1b8k_model *m, int threads) {
 static void run_conc(const pt_v1b8k_model *m, int N, int per_slot, double capacity, double safety, int maxs,
                      int narr, double spread) {
   int n = narr > 0 ? narr : N * per_slot;
+  int sr = pt_v1b8k_sample_rate(m);
   pt_v1b8k_request *q = calloc(n, sizeof *q);
   int use[] = {0, 1, 2, 3, 4};  /* zh, en, mix, zh sid1, long (8.5 s) */
   double t0 = pt_now() + 0.05;
@@ -196,7 +198,7 @@ static void run_conc(const pt_v1b8k_model *m, int N, int per_slot, double capaci
   double audio = 0, tend = 0, rtf_sum = 0, rtf_max = 0, fc_sum = 0, fc_max = 0, late_max = -1e9, wait_max = 0;
   int ok = 0;
   for (int i = 0; i < n; i++) {
-    double au = q[i].info.samples / 8000.0;
+    double au = q[i].info.samples / (double)sr;
     double rtf = (q[i].t_done_s - q[i].t_admit_s) / au;
     double fc = q[i].t_first_audio_s - q[i].t_admit_s;
     audio += au;
@@ -227,8 +229,8 @@ int main(int argc, char **argv) {
   double tl = pt_now();
   pt_v1b8k_model *m = pt_v1b8k_load(argv[1]);
   if (!m || load_requests(argv[2]) <= 0) { fprintf(stderr, "load failed\n"); return 1; }
-  printf("# bench_cpu: PrimeTTS v1b_8k on %ld cores, model load %.1f ms, %d requests\n", sysconf(_SC_NPROCESSORS_ONLN),
-         (pt_now() - tl) * 1e3, NR);
+  printf("# bench_cpu: PrimeTTS v1 (%d Hz, hop %d) on %ld cores, model load %.1f ms, %d requests\n", pt_v1b8k_sample_rate(m),
+         pt_v1b8k_hop(m), sysconf(_SC_NPROCESSORS_ONLN), (pt_now() - tl) * 1e3, NR);
   if (want[0]) bench_kernels();
   if (want[1] || want[4]) bench_single(m, 1);
   if (want[2]) bench_single(m, 4);

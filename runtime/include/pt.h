@@ -109,6 +109,7 @@ typedef struct {
   long ldres;
 } pt_epi;
 
+/* cout 0 takes the real output-channel count from the packed tensor: the container is the source of truth. */
 int pt_conv_bind(pt_conv_w *c, const pt_weights *w, const char *wp_name, const char *b_name, int cout, int dil);
 /* Y[co][t] = epi( b[co] + sum_k sum_ci W[co][ci][k] * X[ci][t + k*dil] ),  t in [0, n).
  * X points at the input column that output column 0's first tap reads (i.e. already shifted by -pad).
