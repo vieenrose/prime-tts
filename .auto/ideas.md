@@ -328,6 +328,13 @@ project-scale items remain (see SESSION STATUS at top).
   60.4 MB (~70 ms net, declined multi-part + race risk), dispatch audit (plain kernel retained
   as bisection fallback), pesi health (2341) + pesi T120 N=4 (3219, 82 MB headroom), disk
   hygiene (all clean), T120/sid1 re-verification (identical SNDR, no drift).
+- Wall budget, refreshed run 133 (replaces run 85's version, falsified by run 88 on copies):
+  wall ~2335 = serialized startup ~390 (open/record 105 + cuda/warmup/upload 285)
+  + packed GPU kernels ~1600 (4 streams x ~400, SMs saturated) + exposed copies ~100
+  (~1.4 ms/MB effective) + SM packing gaps ~200 + close/SNDR tail ~45. Lever status per
+  component: startup CLOSED (run 108 ceilings); kernels at local optima (only Winograd K=3
+  ~130 ms, numerics-changing, needs gate + approval); copies + packing ~300 only via the
+  project-scale residency/scheduling bundle (needs operator approval); tail sub-bar.
 
 ## Startup endgame: exact ceilings (run 108) -- all remaining startup ideas closed
 - fp16 upload of the 39 fp16 records + same-table GPU convert (bit-exact by construction):
