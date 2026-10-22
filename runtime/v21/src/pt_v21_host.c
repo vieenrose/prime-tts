@@ -8,6 +8,7 @@
  * layout contract the CUDA runtime is built on (docs/v21_layers.md).
  */
 #include "pt_v21.h"
+#include <pthread.h>
 #include "pt_graph_tab.h"
 #include <math.h>
 #include <stdio.h>
@@ -354,6 +355,73 @@ static int half2float_bits(uint16_t h) {
 }
 
 
+
+/* ------------------------------------------- shared host-side container payloads
+ * Every stream needs the same container weights converted to fp32 (the decoder's 39 fp16 records
+ * are 13.6M elements = 54.5 MB each). Four streams on one box do not need four copies: the
+ * conversion is deterministic from the container bytes, so the first context builds it, the rest
+ * alias it, and the last one to close frees it. Guarded by a mutex because the multi-stream driver
+ * opens and closes contexts from different threads, and keyed by the container path so two
+ * different containers in one process never share a payload. */
+typedef struct {
+  float *p;
+  int ref;
+} pt_hrec;
+static pt_hrec *g_hcache;
+static size_t g_hcache_n;
+static char g_hcache_path[512];
+static pthread_mutex_t g_hlock = PTHREAD_MUTEX_INITIALIZER;
+
+static float *host_cont_shared(int k, const char *path, int64_t nel) {
+  float *out = NULL;
+  pthread_mutex_lock(&g_hlock);
+  if (!g_hcache_path[0])
+    snprintf(g_hcache_path, sizeof(g_hcache_path), "%s", path);
+  if (strcmp(g_hcache_path, path) != 0) {
+    pthread_mutex_unlock(&g_hlock);   /* a different container: never share */
+    return NULL;
+  }
+  if ((size_t) k >= g_hcache_n) {
+    size_t nn = (size_t) k + 64;
+    pt_hrec *nb = (pt_hrec *) realloc(g_hcache, nn * sizeof(pt_hrec));
+    if (nb) {
+      memset(nb + g_hcache_n, 0, (nn - g_hcache_n) * sizeof(pt_hrec));
+      g_hcache = nb;
+      g_hcache_n = nn;
+    }
+  }
+  if ((size_t) k < g_hcache_n) {
+    if (g_hcache[k].p && g_hcache[k].ref > 0) {
+      g_hcache[k].ref++;
+      out = g_hcache[k].p;
+    }
+  }
+  (void) nel;
+  pthread_mutex_unlock(&g_hlock);
+  return out;
+}
+
+static void host_cont_shared_claim(int k, float *p) {
+  pthread_mutex_lock(&g_hlock);
+  if ((size_t) k < g_hcache_n) {
+    g_hcache[k].p = p;
+    g_hcache[k].ref = 1;
+  }
+  pthread_mutex_unlock(&g_hlock);
+}
+
+static void host_cont_shared_put(int k, float *p, int owned) {
+  pthread_mutex_lock(&g_hlock);
+  if (owned && (size_t) k < g_hcache_n && g_hcache[k].p == p) {
+    if (--g_hcache[k].ref <= 0) {
+      free(p);
+      g_hcache[k].p = NULL;
+      g_hcache[k].ref = 0;
+    }
+  }
+  pthread_mutex_unlock(&g_hlock);
+}
+
 static float *v21_load_cont(pt_ctx *c, uint32_t i, const char *name, int64_t off, int64_t n,
                             int itemsize) {
   float *f = (float *) malloc((size_t) (n * 4 + 64));
@@ -504,6 +572,9 @@ pt_ctx *pt_v21_open(const char *container) {
   c->cont_isz = (int *) calloc((size_t) c->n_cont, sizeof(int));
   c->cont_n = (int64_t *) calloc((size_t) c->n_cont, sizeof(int64_t));
   c->cont_ndim = (int *) calloc((size_t) c->n_cont, sizeof(int));
+  c->cont_shared = (int *) calloc((size_t) c->n_cont, sizeof(int));
+  c->cont_path = (char *) calloc(strlen(container) + 1, 1);
+  if (c->cont_path) strcpy(c->cont_path, container);
   c->cont_dims = (int64_t *) calloc((size_t) c->n_cont * PT_V21_MAX_RANK, sizeof(int64_t));
   /* per-record payload width comes from the container's own dtype.table tensor (record order),
    * which is how the container tells a reader about the 39 fp16 decoder weights. */
@@ -549,7 +620,15 @@ pt_ctx *pt_v21_open(const char *container) {
           c->cont_n[k] = nel;
           c->cont_ndim[k] = nd;
           for (int z = 0; z < 6; z++) c->cont_dims[k * PT_V21_MAX_RANK + z] = rdims[z];
-          c->cont_f32[k] = v21_load_cont(c, i, nm, off, nel, isz);
+          c->cont_shared[k] = 0;
+          c->cont_f32[k] = host_cont_shared(k, container, nel);
+          if (!c->cont_f32[k]) {
+            c->cont_f32[k] = v21_load_cont(c, i, nm, off, nel, isz);
+            if (c->cont_f32[k]) {
+              c->cont_shared[k] = 1;
+              host_cont_shared_claim(k, c->cont_f32[k]);
+            }
+          }
           break;
         }
       }
@@ -573,11 +652,13 @@ double pt_v21_stats_ms(pt_ctx *c, int which) {
 void pt_v21_close(pt_ctx *c) {
   if (!c) return;
   if (c->map && c->map != MAP_FAILED) munmap(c->map, c->maplen);
-  for (int i = 0; i < c->n_cont; i++) free(c->cont_f32[i]);
+  for (int i = 0; i < c->n_cont; i++) host_cont_shared_put(i, c->cont_f32[i], c->cont_shared[i]);
   free(c->cont_f32);
   free(c->cont_isz);
   free(c->cont_n);
   free(c->cont_ndim);
+  free(c->cont_shared);
+  free(c->cont_path);
   free(c->cont_dims);
   free(c->V);
   free(c->wav);

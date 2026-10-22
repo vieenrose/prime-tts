@@ -97,6 +97,8 @@ struct pt_ctx {
   int *cont_isz;
   int64_t *cont_n;
   int *cont_ndim;
+  char *cont_path;      /* container file this context opened (sharing key) */
+  int *cont_shared;     /* 1 = this context owns the shared host payload at that ctab index */
   int64_t *cont_dims;      /* n_cont * PT_V21_MAX_RANK */
   int n_cont;
   pt_tv *V;                   /* PT_N_TENSOR */
