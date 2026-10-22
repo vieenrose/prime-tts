@@ -1,8 +1,14 @@
 # Ideas backlog (v2.1 Nano latency)
 
-## SESSION STATUS (run 117): converged -- see 'Convergence ledger' at the end for the full record
-- Best: **n4_wall 2288 ms** (cluster 2288-2362 over 20+ official draws, mean ~2335, stdev ~1.7%,
+## SESSION STATUS (run 125): converged -- see 'Convergence ledger' at the end for the full record
+- Best: **n4_wall 2288 ms** (cluster 2288-2375 over 30+ official draws, mean ~2335, stdev ~1.7%,
   zero drift, draws independent). Baseline was 9900 ms: **4.3x faster**.
+- Runs 118-125 (no code changes except run 120's 1-word CONVLOG label fix): box-parity
+  correction (old pesi speed gap was pre-warmup throttling, boxes are peers now), exact
+  residual traffic 60.4 MB/stream (~70 ms net best case, declined on multi-part + race risk),
+  conv dispatch audit (122 ig8 + 2 wsm, plain kernel intentionally retained as bisection
+  fallback), pesi health re-check (2341, headroom stable-low), disk hygiene (all clean),
+  T120/sid1 re-verification (identical SNDR, no drift).
 - Quality: per-node gate 0 over gate (unoptimized build) + SNDR 70.09 dB on all 5 cases, both
   boxes, both paths. Worst case sid1_T29/T120 at 67-68 dB (>= 60 gate).
 - What remains, all needing operator approval: (1) batch-4 lockstep driver; (2) full device
