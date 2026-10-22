@@ -317,13 +317,17 @@ the operator's 4-stream target. Integrity note: moving close()/SNDR out of the t
 pre-warming the GPU from a side process, would be timer-scope gaming -- explicitly rejected, the
 timer stays as the driver defines it.
 
-## Convergence ledger (runs 78-117, kept current): session best confirmed
-picard official draws, identical code: cluster 2288-2362 over 20+ draws, mean ~2335, stdev ~1.7%,
+## Convergence ledger (runs 78-127, kept current): session best confirmed
+picard official draws, identical code: cluster 2288-2375 over 30+ draws, mean ~2335, stdev ~1.7%,
 zero drift, draws independent (lag-1 -0.11). Best 2288 (run 87). All 5 golden cases bit-identical
 GPU vs CPU on both boxes (worst SNDR 67.45 dB sid1_T29); full per-node gate 0 over gate on
-unoptimized build (run 95); pesi 2398-2427 stable with headroom. Standing: 9.9 s -> ~2.33 s
-(4.3x) with quality preserved and proved. Session converged; only project-scale items remain
-(see SESSION STATUS at top).
+unoptimized build (run 95); pesi 2341-2427 stable with headroom (peer of picard since run 119).
+Standing: 9.9 s -> ~2.33 s (4.3x) with quality preserved and proved. Session converged; only
+project-scale items remain (see SESSION STATUS at top).
+- Runs 118-127: box-parity correction, CONVLOG label fix (1-word) + exact residual traffic
+  60.4 MB (~70 ms net, declined multi-part + race risk), dispatch audit (plain kernel retained
+  as bisection fallback), pesi health (2341) + pesi T120 N=4 (3219, 82 MB headroom), disk
+  hygiene (all clean), T120/sid1 re-verification (identical SNDR, no drift).
 
 ## Startup endgame: exact ceilings (run 108) -- all remaining startup ideas closed
 - fp16 upload of the 39 fp16 records + same-table GPU convert (bit-exact by construction):
