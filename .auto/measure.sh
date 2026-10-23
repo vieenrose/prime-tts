@@ -47,6 +47,10 @@ bld=$(ssh "$NANO" "cd $TREE && make -f runtime/v21/Makefile par nano 2>&1 | grep
 [ -z "$bld" ] || { echo "$bld"; fail "build failed on the Nano"; }
 ssh "$NANO" "test -x $TREE/build/pt_v21_par" || fail "pt_v21_par missing on the Nano"
 
+# ---- box-state covariate: at N=4 the wall is sensitive to background CPU load (~+64 ms per busy
+# core, session run 371), so record the load average with every draw for drift attribution.
+echo "BOXSTATE $(ssh "$NANO" 'uptime | sed "s/.*load average: //"; nproc')" 2>/dev/null
+
 # ---- N=4 (primary). Sample free RAM *and* the driver's peak RSS during the run: on the Nano the
 # GPU's allocations count against system RAM, so the process high-water mark is the number that
 # says whether four streams actually fit on the box.
