@@ -27,6 +27,22 @@
   with its own closure; the approval list is unchanged (batch-4 lockstep +390 ms measured, CUDA graphs
   ~1-2 ms launch, server-mode weights out of benchmark scope, Winograd 1.6x more ops).
 
+## Deployment-regime findings (phase 8, runs 367-371) -- report content, not benchmark levers
+- **Cold vs warm (run 367):** first N=4 request after 150 s idle 2232 ms mean vs sustained warm 2091 ms
+  mean = +141 ms (6.7%) cold penalty; the clock-ramp kernel removes ~73 ms of it (re-verified in run 369
+  with 4 cold pairs: ramp OFF 2317.5 vs ON 2244.8, 3/4 wins). A warm server-mode process pays the warm
+  number and the 3 ms adaptive ramp, not the cold number.
+- **Co-tenant CPU sensitivity (run 371, disposable spinners; fwd35_serve never touched):** 0 busy cores
+  2243, 1 busy core 2307 (+2.9%), 2 busy cores 2446 (+9.0%). SNDR 70.09 in all 9 runs. This CORRECTS
+  run 94: host work is hidden by stream desync only when cores are free. Per stream carries ~250 ms of
+  host work (conv wrapper staging + zero-pad memcpys + NEON elementwise), ~1000 ms at N=4 on 4 cores.
+  In production (TTS + LLM server on the same 4 A57) expect +3-9% TTS latency during LLM generation.
+  Consequence for the operator's scope list: host-op reductions (PAD reflect fast path 6.4 ms/stream on
+  T81 / 10.4 on T120; ADD 30.7; the run-74 Add->LeakyReLU fold; -mcpu=cortex-a57) are ~0 on the quiet
+  benchmark box but worth ~20-60 ms in the contended deployment -- they cannot be KEPT by the primary
+  metric, so they belong in the approval list, not the loop. CPU affinity pinning (killed quiet-box as a
+  2 ms tie, run 274) is worth re-testing in the contended regime under operator approval.
+
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
   `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
