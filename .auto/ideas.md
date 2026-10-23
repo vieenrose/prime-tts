@@ -1,5 +1,12 @@
 # Ideas backlog (v2.1 Nano latency)
 
+- **Keep taxonomy: CPU-side vs GPU-side (runs 417, 442, 454).** The startup bundle (-77 quiet
+  official / -64 quiet warm) compresses to -45 ms pooled over 10 pairs at ~2 busy cores: splitting
+  serialized startup work needs free cores. The convT ig8 keep (-13 picard / -20 pesi warm, -70
+  official) is GPU SM time and measures a +11 ms tie under 4 contention pairs (n=4, pair SE ~40 ms),
+  i.e. masked not reversed. No keep regresses in any regime; report each keep with its regime
+  condition.
+
 ## Contention-sensitivity map (runs 434-448) -- which regimes the co-tenant CPU cost hits
 Loaded vs quiet official numbers on the primary box (loaded = ~1-2 busy cores from the operator's
 jtop GPU monitors, load 1.0-1.9): N=2 T81 1486/1341 = **+10.8%** (the most sensitive regime: 21%
