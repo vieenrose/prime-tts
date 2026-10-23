@@ -545,3 +545,29 @@ staging copies it removes were hidden behind GPU work (run 85/88), while the 57 
 destroying the conv chain's async issue-ahead. => DEVICE RESIDENCY IS CLOSED BY MEASUREMENT (not by risk).
 Approval list is now 4 items: batch-4 lockstep, CUDA graphs, server-mode weights, Winograd F(2,3) K=3.
 Session best 2172 ms (run 305, default path).
+
+## Phase 5 closures (runs 305-314): every remaining project lever closed by measurement or arithmetic
+- **Device residency (PT_V21_DEVADD)**: implemented fully (device Add + fused epilogues, device
+  LeakyReLU, sub-arena allocator with last-use release, producer-direction eligibility, chain
+  terminators, generic host-reader safety sweep). BIT-EXACT on all 5 cases (N=1 and N=4) but
+  **+261 ms at N=4** (6/6 pairs, 2325 vs 2064). Copies were hidden behind GPU work; the added device
+  passes are not. Scaffold stays committed inert (default 0). Runs 304-305.
+- **Winograd F(2,3) on K=3**: killed by arithmetic, no silicon. These are 1-D convs: direct = 5
+  ops/output; F(2,3) = 3 input-transform adds + 2 mults + 3 output-transform adds = 8 ops/output
+  (1.6x MORE work). The 2.25x figure is the 2-D number (transforms amortize over rows). Run 306.
+- **Batch-4 lockstep driver**: killed by measurement before implementation. A per-node barrier probe
+  (PT_V21_BAR=1) costs **+390 ms** (4/4 pairs, 2462 vs 2072): lockstep forces streams that are
+  naturally desynchronized by 25-100 ms to align at every point, making each node max-over-streams.
+  The tail/packing gains batch-4 targets are exactly what natural multiplexing already harvests
+  (run 87: zero SM idle during inference). Run 314.
+- **Upload claim-order rebalance**: killed by mechanism -- one serialized copy engine means engine
+  completion (~139 ms) is partition-invariant. Run 311.
+- **CUDA graphs**: launch overhead ~1-2 ms, below bar (runs 87/108). **Server-mode weights**: out of
+  benchmark scope (timer-scope gaming, run 79 integrity note).
+- Deployment-quality (run 312): 12 consecutive N=4 runs -- cold draw 2293, then stable 2057-2091
+  (mean 2075), SNDR 70.09 every run, RAM flat (no leak), no thermal drift. Sustained-load regime is
+  ~165 ms faster than cold single-shot: the clock ramp + first-touch cost of a cold process.
+- Case coverage complete on BOTH boxes with the shipped binary (runs 308, 313): parity identical
+  everywhere; pesi 3-7% faster on 4/5 cases.
+- **The session is at the floor of this architecture.** Phase-5 cluster: 2284, 2273, 2172, 2242, 2290
+  (mean ~2252). Recommended: autoresearch-finalize with the two closure proofs and the soak evidence.
