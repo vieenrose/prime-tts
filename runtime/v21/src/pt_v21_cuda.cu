@@ -208,6 +208,26 @@ static int weights_upload_locked(pt_ctx *c, int verbose) {
  * as the host un_op), so results are bit-identical to the host path.
  * Liveness: allocations join the conv chain's arena mark and are released when the chain ends, so
  * nothing is freed while a reader can still see it. */
+__global__ void pt_devleaky_kernel(const float *__restrict__ a, float *__restrict__ y, long long n,
+                                  float alpha) {
+  long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+  long long st = (long long) gridDim.x * blockDim.x;
+  for (; i < n; i += st) {
+    float v = a[i];
+    y[i] = v >= 0.0f ? v : alpha * v;   /* the same fp32 math as the host un_op */
+  }
+}
+
+int pt_v21_devleaky_run(pt_ctx *c, const float *a, float *y, int64_t n, float alpha) {
+  long long blocks = (n + 255) / 256;
+  if (blocks > 4096)
+    blocks = 4096;
+  pt_devleaky_kernel<<<(unsigned) blocks, 256, 0, (cudaStream_t) c->g_stream>>>(a, y, n, alpha);
+  if (cudaGetLastError() != cudaSuccess)
+    return -1;
+  return 0;
+}
+
 __global__ void pt_devadd_kernel(const float *__restrict__ a, const float *__restrict__ b,
                                 float *__restrict__ y, long long n, int epi, float alpha) {
   long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
@@ -220,6 +240,149 @@ __global__ void pt_devadd_kernel(const float *__restrict__ a, const float *__res
   }
 }
 
+/* ------------------------------ device-residency sub-arena (PT_V21_DEVADD)
+ * The conv chain's bump arena releases wholesale at the chain end, which is correct only while every
+ * kept tensor dies with the chain. The residual Add tree shares intermediate tensors between two
+ * readers, so those tensors outlive any single chain and need a real allocator: best-fit over a free
+ * list with coalescing, one slab per stream, created on first use, blocks tracked by offset+size.
+ * Result tensors are released by the interpreter at their last use (tv_free); operand uploads are
+ * released at the chain end, where the stream is synchronized and the kernels that read them are
+ * provably done. */
+typedef struct { size_t off, size; } pt_devrng;
+typedef struct {
+  void *base;
+  size_t size;
+  size_t used;
+  int nalloc;
+  int nfree;
+  int npend;
+  int oom;
+  pt_devrng alloc[128];
+  pt_devrng free[128];
+  size_t pend[64];
+} pt_devres;
+
+void *pt_v21_dev_alloc(pt_ctx *c, size_t bytes) {
+  pt_devres *d = (pt_devres *) c->devres;
+  size_t nb = (bytes + 255) & ~(size_t) 255;
+  if (!d) {
+    d = (pt_devres *) calloc(1, sizeof *d);
+    if (!d)
+      return nullptr;
+    long mb = getenv("PT_V21_DEVRES_MB") ? atol(getenv("PT_V21_DEVRES_MB")) : 24;
+    d->size = (size_t) mb << 20;
+    if (cudaMalloc(&d->base, d->size) != cudaSuccess) {
+      cudaGetLastError();
+      free(d);
+      c->devres_oom = 1;
+      return nullptr;
+    }
+    c->devres = d;
+    c->dev_bytes_res = (double) d->size;
+  }
+  if (d->oom || d->nalloc >= 128)
+    return nullptr;
+  int best = -1;
+  for (int i = 0; i < d->nfree; i++)
+    if (d->free[i].size >= nb && (best < 0 || d->free[i].size < d->free[best].size))
+      best = i;
+  size_t off;
+  if (best >= 0) {
+    off = d->free[best].off;
+    size_t left = d->free[best].size - nb;
+    if (left >= 256) {
+      d->free[best].off += nb;
+      d->free[best].size = left;
+    } else {
+      d->free[best] = d->free[d->nfree - 1];
+      d->nfree--;
+    }
+  } else {
+    off = d->used;
+    d->used += nb;
+    if (d->used > d->size) {
+      d->oom = 1;
+      return nullptr;
+    }
+  }
+  d->alloc[d->nalloc].off = off;
+  d->alloc[d->nalloc].size = nb;
+  d->nalloc++;
+  c->dev_bytes_stray += nb;
+  return (char *) d->base + off;
+}
+
+void pt_v21_dev_free(pt_ctx *c, void *p) {
+  pt_devres *d = (pt_devres *) c->devres;
+  if (!d || !p)
+    return;
+  if ((char *) p < (char *) d->base)
+    return;   /* not ours (the conv chain's bump arena): its own discipline owns it */
+  size_t base = (size_t) ((char *) p - (char *) d->base);
+  if (base >= d->size)
+    return;
+  int hit = -1;
+  for (int i = 0; i < d->nalloc; i++)
+    if (d->alloc[i].off == base) {
+      hit = i;
+      break;
+    }
+  if (hit < 0 || d->nfree >= 128)
+    return;   /* not an allocation of ours, or the free table is full (leak, never corrupt) */
+  pt_devrng r = d->alloc[hit];
+  d->alloc[hit] = d->alloc[d->nalloc - 1];
+  d->nalloc--;
+  for (int i = 0; i < d->npend; i++)
+    if (d->pend[i] == base) {
+      d->pend[i] = d->pend[d->npend - 1];
+      d->npend--;
+      break;
+    }
+  d->free[d->nfree++] = r;
+  for (int i = 0; i < d->nfree; i++)
+    for (int j = i + 1; j < d->nfree; j++)
+      if (d->free[i].off + d->free[i].size == d->free[j].off) {
+        d->free[i].size += d->free[j].size;
+        d->free[j] = d->free[d->nfree - 1];
+        d->nfree--;
+        j--;
+      } else if (d->free[j].off + d->free[j].size == d->free[i].off) {
+        d->free[j].size += d->free[i].size;
+        d->free[i] = d->free[d->nfree - 1];
+        d->nfree--;
+        i--;
+      }
+  d->oom = 0;
+}
+
+/* Release the operand uploads queued since the last chain end. Called where the stream is
+ * synchronized, so the kernels that read them have completed. */
+void pt_v21_dev_reclaim(pt_ctx *c) {
+  pt_devres *d = (pt_devres *) c->devres;
+  if (!d)
+    return;
+  while (d->npend > 0) {
+    size_t off = d->pend[d->npend - 1];
+    int hit = -1;
+    for (int i = 0; i < d->nalloc; i++)
+      if (d->alloc[i].off == off) {
+        hit = i;
+        break;
+      }
+    if (hit < 0) {
+      d->npend--;
+      continue;
+    }
+    pt_devrng r = d->alloc[hit];
+    d->alloc[hit] = d->alloc[d->nalloc - 1];
+    d->nalloc--;
+    d->npend--;
+    if (d->nfree < 128)
+      d->free[d->nfree++] = r;
+  }
+  d->oom = 0;
+}
+
 void pt_v21_dev_sync_host(pt_ctx *c, void *host, const void *dev, int64_t n) {
   if (n <= 0)
     return;
@@ -228,36 +391,30 @@ void pt_v21_dev_sync_host(pt_ctx *c, void *host, const void *dev, int64_t n) {
 }
 
 float *pt_v21_dev_upload(pt_ctx *c, const void *h, int64_t n) {
-  size_t nb = ((size_t) n * 4 + 63) & ~(size_t) 63;
-  void *mark = arena_mark(c);
-  float *d = (float *) arena_alloc(c, nb);
+  size_t nb = (size_t) n * 4;
+  float *d = (float *) pt_v21_dev_alloc(c, nb);
   if (!d)
     return nullptr;
   if (cudaMemcpyAsync(d, h, nb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream) != cudaSuccess) {
     cudaGetLastError();
+    pt_v21_dev_free(c, d);
     return nullptr;   /* a failed upload: the caller falls back to the host path */
   }
-  if (!c->chain_mark)
-    c->chain_mark = mark;
+  pt_devres *dr = (pt_devres *) c->devres;
+  if (dr && dr->npend < 64)
+    dr->pend[dr->npend++] = (size_t) ((char *) d - (char *) dr->base);
   return d;
 }
 
-float *pt_v21_devadd(pt_ctx *c, const float *a, const float *b, int64_t n, int epi, float alpha) {
-  size_t nb = ((size_t) n * 4 + 63) & ~(size_t) 63;
-  void *mark = arena_mark(c);
-  float *y = (float *) arena_alloc(c, nb);
-  if (!y)
-    return nullptr;
+int pt_v21_devadd_run(pt_ctx *c, const float *a, const float *b, float *y, int64_t n, int epi,
+                      float alpha) {
   long long blocks = (n + 255) / 256;
   if (blocks > 4096)
     blocks = 4096;
   pt_devadd_kernel<<<(unsigned) blocks, 256, 0, (cudaStream_t) c->g_stream>>>(a, b, y, n, epi, alpha);
   if (cudaGetLastError() != cudaSuccess)
-    return nullptr;   /* launch failure: fall back to the host path */
-  if (!c->chain_mark)
-    c->chain_mark = mark;
-  c->dev_bytes_stray += nb;   /* device-side traffic counter, same bookkeeping as the conv path */
-  return y;
+    return -1;   /* launch failure: fall back to the host path */
+  return 0;
 }
 
 int pt_v21_conv_pads_in_kernel(pt_ctx *c) {
@@ -952,7 +1109,8 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   int keep = c->conv_keep;
   c->conv_out_dev = NULL;
   dx = din ? (float *) din : (float *) arena_alloc(c, xb);
-  dy = (float *) arena_alloc(c, yb);
+  /* a kept output that outlives the chain (the residual Add tree) comes from the residency sub-arena */
+  dy = (keep && c->conv_keep_res) ? (float *) pt_v21_dev_alloc(c, yb) : (float *) arena_alloc(c, yb);
   if (gpu_prof()) c->g_alloc_ms += gpu_now() - tA;
   if (!dx || !dy) {
     /* same as the conv path: a fallback allocation must be owned and freed, and dy must exist too */
@@ -1053,6 +1211,7 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
   }
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
+  pt_v21_dev_reclaim(c);   /* chain end: the operand uploads' kernels are provably done */
   if (gpu_prof()) {
     cudaDeviceSynchronize();
     c->g_kernel_ms += gpu_now() - tA;

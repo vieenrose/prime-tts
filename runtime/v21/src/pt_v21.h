@@ -124,6 +124,8 @@ struct pt_ctx {
   long host_bytes_live, host_bytes_peak;   /* bytes of live activation tensors, and the high-water mark */
   long host_alloc_count;
   double dev_bytes_weights, dev_bytes_arena, dev_bytes_stray;
+  double dev_bytes_res;           /* device-residency sub-arena size (PT_V21_DEVADD) */
+  int devres_oom;
   size_t arena_alloc_bytes;   /* arena high-water mark */
   char *skip;           /* PT_N_NODE: nodes folded into a producer kernel, not executed */
   int fuse;             /* epilogue fusion enabled for this context */
@@ -137,8 +139,10 @@ struct pt_ctx {
   int64_t conv_pad_in;
   const float *conv_in_dev;   /* device-resident conv input (chain), or NULL */
   int conv_keep;              /* 1 = keep this conv's output on the device for the next conv */
+  int conv_keep_res;          /* keep it in the residency sub-arena (multi-consumer tensor) */
   float *conv_out_dev;        /* set by the wrapper when the output was kept */
-  void *chain_mark;           /* arena mark held while a conv chain is in flight */   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
+  void *chain_mark;
+  void *devres;                 /* device-residency sub-arena state (PT_V21_DEVADD), NULL until first use */           /* arena mark held while a conv chain is in flight */   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
 };
 
 
@@ -198,11 +202,19 @@ int pt_v21_conv_pads_in_kernel(pt_ctx *c);
  * arena for the next conv. pt_v21_dev_upload brings one host operand onto the device. Both return
  * NULL when the arena is full (the caller falls back to the host path). epi=1 fuses the LeakyReLU
  * with the same fp32 math the host un_op() does. */
-float *pt_v21_devadd(pt_ctx *c, const float *a, const float *b, int64_t n, int epi, float alpha);
+int pt_v21_devadd_run(pt_ctx *c, const float *a, const float *b, float *y, int64_t n, int epi,
+                      float alpha);
+void pt_v21_dev_reclaim(pt_ctx *c);
+int pt_v21_devleaky_run(pt_ctx *c, const float *a, float *y, int64_t n, float alpha);
 float *pt_v21_dev_upload(pt_ctx *c, const void *h, int64_t n);
 /* Copy a device-resident tensor back to its host buffer (used when a device-Add link falls back to
  * the host path, so a chain-stale host buffer is never read). */
 void pt_v21_dev_sync_host(pt_ctx *c, void *host, const void *dev, int64_t n);
+/* Device-residency sub-arena (PT_V21_DEVADD): a per-stream slab with a real free list, because the
+ * conv chain's bump arena cannot serve tensors that outlive the chain (multi-consumer residuals).
+ * Blocks are released tensor by tensor at the graph's last-use point. */
+void *pt_v21_dev_alloc(pt_ctx *c, size_t bytes);
+void pt_v21_dev_free(pt_ctx *c, void *p);
 int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda,
                       const float *B, int64_t ldb, int64_t nn, float *C, int64_t ldc);
 

@@ -65,7 +65,15 @@ int g_trace = -1;
 /* How many nodes read each tensor, and the node index of the sole reader: the fusion decision
  * needs "this conv's output goes to exactly one elementwise node, and nothing else touches it". */
 static int g_n_cons[PT_N_TENSOR];
+/* every consumer of a tensor (up to PT_V21_MAX_CONS) and whether all of them are ops the device
+ * residency project can chain through (Add / a conv reading in[0]). Multi-consumer tensors are fine
+ * on the device -- readers do not conflict -- the constraint is liveness, which the interpreter
+ * already tracks (pt_graph_last_use), so the residency sub-arena releases at tv_free. */
+#define PT_V21_MAX_CONS 4
+static int g_cons_list[PT_N_TENSOR][PT_V21_MAX_CONS];
+static signed char g_cons_dev[PT_N_TENSOR];
 static int g_cons_node[PT_N_TENSOR];
+static int g_prod[PT_N_TENSOR];   /* producing node: the residency recursion walks producers */
 static int g_cons_built;
 static int g_dump_tensor = -1;
 void pt_v21_trace(int idx) { g_trace = idx; }
@@ -100,6 +108,13 @@ static void tv_free(pt_ctx *c, pt_tv *t) {
   if (t->alive && t->p) {
     free(t->p);
     c->host_bytes_live -= (long) t->n * dt_sz(t->dt);
+  }
+  if (t->dev_res) {
+    /* the interpreter frees a tensor exactly at its last use, which is exactly when its device
+     * buffer may be recycled (the residency sub-arena ignores pointers it does not own) */
+    pt_v21_dev_free(c, t->dev_p);
+    t->dev_res = 0;
+    t->dev_p = NULL;
   }
   t->p = 0;
   t->alive = 0;
@@ -1107,13 +1122,38 @@ pt_ctx *pt_v21_open(const char *container) {
     for (int i = 0; i < PT_N_TENSOR; i++) {
       g_n_cons[i] = 0;
       g_cons_node[i] = -1;
+      g_prod[i] = -1;
     }
+    for (int i = 0; i < PT_N_NODE; i++)
+      for (int j = 0; j < PT_V21_MAX_OUT; j++)
+        if (pt_ndefs[i].out[j] >= 0 && pt_ndefs[i].out[j] < PT_N_TENSOR)
+          g_prod[pt_ndefs[i].out[j]] = i;
     for (int i = 0; i < PT_N_NODE; i++)
       for (int j = 0; j < PT_V21_MAX_IN; j++)
         if (pt_ndefs[i].in[j] >= 0) {
-          g_n_cons[pt_ndefs[i].in[j]]++;
-          g_cons_node[pt_ndefs[i].in[j]] = i;
+          int t = pt_ndefs[i].in[j];
+          if (g_n_cons[t] < PT_V21_MAX_CONS)
+            g_cons_list[t][g_n_cons[t]] = i;
+          g_n_cons[t]++;
+          g_cons_node[t] = i;
         }
+    for (int t = 0; t < PT_N_TENSOR; t++) {
+      g_cons_dev[t] = 1;
+      if (g_n_cons[t] < 1 || g_n_cons[t] > PT_V21_MAX_CONS) {
+        g_cons_dev[t] = 0;
+        continue;
+      }
+      for (int k = 0; k < g_n_cons[t]; k++) {
+        const pt_node_def *cd = &pt_ndefs[g_cons_list[t][k]];
+        int dev_ok = (cd->op == PT_CONV && cd->in[0] == t) ||
+                     (cd->op == PT_ADD && (cd->in[0] == t || cd->in[1] == t)) ||
+                     (cd->op == PT_LEAKYRELU && cd->in[0] == t);
+        if (!dev_ok) {
+          g_cons_dev[t] = 0;
+          break;
+        }
+      }
+    }
     g_cons_built = 1;
   }
   pthread_mutex_unlock(&cons_lock);
@@ -2184,41 +2224,55 @@ static void dev_add_shape(pt_ctx *c, const pt_node_def *nd, int *ft_out, int *ep
 /* Is this Add link worth running on the device? Its result must reach a conv without ever being
  * read by a host op: the reader chain is [LeakyReLU] -> conv, or [LeakyReLU] -> another eligible Add
  * (the residual trees nest, so the chain recurses; depth is bounded because the graph is a DAG). */
-static int dev_add_chain(pt_ctx *c, int node, int depth) {
-  int dbg = getenv("PT_V21_DEVDBG") ? 1 : 0;
+/* ---------------- device residency eligibility (PT_V21_DEVADD)
+ * A tensor may stay on the device when (a) every reader is an op the residency code runs on the
+ * device (a conv consuming it as in[0], an Add, a LeakyReLU) and (b) its producer can publish it
+ * there: a conv keeps its output for free, an Add or LeakyReLU runs on the device when one of its
+ * operands is already resident (a host operand is uploaded, which is what the host path pays today).
+ * The check walks backward through producers and forward over readers one level, so it terminates on
+ * the graph's acyclicity. A result read by any other op is published on the host after the device
+ * kernel: one download replaces the two operand downloads of the host path. */
+static int dev_resident(pt_ctx *c, int t, int depth);
+
+static int dev_runnable(pt_ctx *c, int node, int depth) {
   if (depth > 16 || node < 0 || node >= PT_N_NODE)
     return 0;
   const pt_node_def *nd = &pt_ndefs[node];
-  if (nd->op != PT_ADD)
+  if (nd->op != PT_ADD && nd->op != PT_LEAKYRELU)
     return 0;
-  if (g_n_cons[nd->out[0]] != 1) {
-    if (dbg) fprintf(stderr, "CHAIN %d cons(out)=%d\n", node, g_n_cons[nd->out[0]]);
-    return 0;
-  }
-  int ft, epi;
-  float alpha;
-  dev_add_shape(c, nd, &ft, &epi, &alpha);
-  if (g_n_cons[ft] != 1) {
-    if (dbg) fprintf(stderr, "CHAIN %d cons(ft)=%d epi=%d\n", node, g_n_cons[ft], epi);
-    return 0;
-  }
-  int nn = g_cons_node[ft];
-  if (nn < 0 || c->skip[nn]) {
-    if (dbg) fprintf(stderr, "CHAIN %d consumer=%d skip=%d\n", node, nn, nn >= 0 ? c->skip[nn] : -1);
-    return 0;
-  }
-  if (pt_ndefs[nn].op == PT_CONV && pt_ndefs[nn].in[0] == ft)
-    return 1;
-  if (pt_ndefs[nn].op == PT_ADD)
-    return dev_add_chain(c, nn, depth + 1);
-  if (dbg) fprintf(stderr, "CHAIN %d next_op=%d\n", node, (int) pt_ndefs[nn].op);
+  for (int j = 0; j < PT_V21_MAX_IN; j++)
+    if (nd->in[j] >= 0 && dev_resident(c, nd->in[j], depth + 1))
+      return 1;
   return 0;
 }
 
-/* A chained tensor's host buffer is deliberately stale (its only reader was the next conv, on the
- * device). If a device-Add link cannot run, the host path becomes its reader, so the device values
- * must be copied back first -- the chain's stale-buffer discipline is never allowed to leak into a
- * host read. */
+static int dev_resident(pt_ctx *c, int t, int depth) {
+  if (depth > 16 || t < 0 || t >= PT_N_TENSOR)
+    return 0;
+  int cnt = g_n_cons[t];
+  if (cnt < 1 || cnt > PT_V21_MAX_CONS)
+    return 0;
+  for (int k = 0; k < cnt; k++) {
+    int cn = g_cons_list[t][k];
+    if (cn < 0 || cn >= PT_N_NODE || c->skip[cn])
+      return 0;
+    const pt_node_def *cd = &pt_ndefs[cn];
+    if (cd->op == PT_CONV && cd->in[0] == t)
+      continue;
+    if (cd->op != PT_ADD && cd->op != PT_LEAKYRELU)
+      return 0;
+  }
+  int pn = g_prod[t];
+  if (pn < 0 || c->skip[pn])
+    return 0;
+  if (pt_ndefs[pn].op == PT_CONV)
+    return 1;
+  if ((pt_ndefs[pn].op == PT_ADD || pt_ndefs[pn].op == PT_LEAKYRELU) &&
+      dev_runnable(c, pn, depth + 1))
+    return 1;
+  return 0;
+}
+
 static void dev_res_sync_host(pt_ctx *c, pt_tv *t) {
   if (!c->use_cuda || !t->dev_res || !t->p || t->n <= 0)
     return;
@@ -2243,7 +2297,7 @@ static int dev_add_link(pt_ctx *c, const pt_node_def *nd, pt_tv *A, pt_tv *B, pt
   int ft, epi;
   float alpha;
   dev_add_shape(c, nd, &ft, &epi, &alpha);
-  if (!dev_add_chain(c, ni, 0)) {
+  if (!dev_runnable(c, ni, 0)) {
     if (dbg) fprintf(stderr, "DEVDBG %d chain=0 cons(out)=%d next_op=%d\n", ni, g_n_cons[ft],
                      g_cons_node[ft] >= 0 ? (int) pt_ndefs[g_cons_node[ft]].op : -1);
     return 0;
@@ -2269,11 +2323,25 @@ static int dev_add_link(pt_ctx *c, const pt_node_def *nd, pt_tv *A, pt_tv *B, pt
       return 0;
     }
   }
-  float *y = pt_v21_devadd(c, ad, bd, n, epi, alpha);
-  if (!y) {
+  float *y = (float *) pt_v21_dev_alloc(c, (size_t) n * 4);
+  if (!y || pt_v21_devadd_run(c, ad, bd, y, n, epi, alpha)) {
+    if (y)
+      pt_v21_dev_free(c, y);
     dev_res_sync_host(c, A);
     dev_res_sync_host(c, B);
-    return 0;   /* arena full: recover the operands and let the host path run */
+    return 0;   /* sub-arena full or launch failure: recover the operands, run on the host */
+  }
+  if (!dev_resident(c, ft, 0)) {
+    /* chain terminator: run the Add on the device, publish the result on the host, release the block */
+    pt_v21_dev_sync_host(c, O->p, y, n);   /* the result's readers are host ops */
+    pt_v21_dev_free(c, y);
+    O->dev_res = 0;
+    O->dev_p = NULL;
+    dev_res_sync_host(c, A);
+    dev_res_sync_host(c, B);
+    if (getenv("PT_V21_CHAINLOG"))
+      fprintf(stderr, "devadd-term: out %d elems=%lld\n", nd->out[0], (long long) n);
+    return 1;
   }
   O->dev_res = 1;
   O->dev_p = y;   /* its host buffer is stale on purpose: its only reader is the next conv */
@@ -2582,7 +2650,35 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
       case PT_TANH: r = un_op(c, PT_TANH, in[0], 0, out[0], 0); break;
       case PT_SIGMOID: r = un_op(c, PT_SIGMOID, in[0], 0, out[0], 0); break;
       case PT_RELU: r = un_op(c, PT_RELU, in[0], 0, out[0], 0); break;
-      case PT_LEAKYRELU: r = un_op(c, PT_LEAKYRELU, in[0], 0, out[0], nd->f0); break;
+      case PT_LEAKYRELU: {
+        /* Device-resident LeakyReLU (PT_V21_DEVADD): the input is a resident conv/Add output and all
+         * readers of the result are chainable, so the node is one kernel pass with no copies. */
+        if (devadd_on() && c->use_cuda && in[0]->dev_res && in[0]->dt == DT_F32 && in[0]->n > 0 &&
+            dev_runnable(c, idx, 0)) {
+          int64_t n = in[0]->n;
+          float *dst = (float *) pt_v21_dev_alloc(c, (size_t) n * 4);
+          if (dst && tv_alloc_nz(c, out[0], DT_F32, in[0]->d, in[0]->ndim, 0) >= 0 &&
+              pt_v21_devleaky_run(c, (const float *) in[0]->dev_p, dst, n, nd->f0) == 0) {
+            if (dev_resident(c, nd->out[0], 0)) {
+              out[0]->dev_res = 1;
+              out[0]->dev_p = dst;   /* host buffer stale by design: only device readers remain */
+            } else {
+              pt_v21_dev_sync_host(c, out[0]->p, dst, n);   /* a host reader ends the chain */
+              pt_v21_dev_free(c, dst);
+            }
+            dev_res_sync_host(c, in[0]);   /* the consumed operand's host buffer is now stale */
+            r = 0;
+            if (getenv("PT_V21_CHAINLOG"))
+              fprintf(stderr, "devleaky: out %d elems=%lld\n", nd->out[0], (long long) n);
+            break;
+          }
+          if (dst)
+            pt_v21_dev_free(c, dst);
+          dev_res_sync_host(c, in[0]);   /* the host path becomes a reader: make it valid */
+        }
+        r = un_op(c, PT_LEAKYRELU, in[0], 0, out[0], nd->f0);
+        break;
+      }
       case PT_SOFTPLUS: r = un_op(c, PT_SOFTPLUS, in[0], 0, out[0], 0); break;
       case PT_ERF: r = un_op(c, PT_ERF, in[0], 0, out[0], 0); break;
       case PT_ABS: r = un_op(c, PT_ABS, in[0], 0, out[0], 0); break;
@@ -2832,13 +2928,21 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
           /* A device-Add consumer also qualifies, but ONLY when the link will really run on the
            * device: the same checks dev_add_link makes, so a kept (host-stale) buffer is never read
            * by the host path. */
+          if (getenv("PT_V21_DEVDBG") && cn >= 0 && (pt_ndefs[cn].op == PT_ADD || pt_ndefs[cn].op == PT_LEAKYRELU))
+            fprintf(stderr, "CS node %d fin_t=%d keep=%d unpadded=%d cout4=%d cout=%d cons(fin)=%d cn=%d/op%d chain=%d\n",
+                    idx, fin_t, keep, unpadded, cout4, cout, g_n_cons[fin_t], cn, (int) pt_ndefs[cn].op,
+                    dev_resident(c, fin_t, 0));
           if (!keep && devadd_on() && c->use_cuda && cn >= 0 && !c->skip[cn]
-              && pt_ndefs[cn].op == PT_ADD && (pt_ndefs[cn].in[0] == fin_t || pt_ndefs[cn].in[1] == fin_t)
-              && dev_add_chain(c, cn, 0))
+              && ((pt_ndefs[cn].op == PT_ADD && (pt_ndefs[cn].in[0] == fin_t || pt_ndefs[cn].in[1] == fin_t))
+                  || (pt_ndefs[cn].op == PT_LEAKYRELU && pt_ndefs[cn].in[0] == fin_t))
+              && dev_resident(c, fin_t, 0))
             keep = 1;
         }
         c->conv_in_dev = (unpadded && X->dev_res) ? (const float *) X->dev_p : NULL;
         c->conv_keep = keep;
+        /* A tensor consumed by the residual Add tree outlives a single chain, so it must come from
+         * the residency sub-arena (released at its last use), not the bump arena. */
+        c->conv_keep_res = keep && devadd_on() && g_n_cons[fin_t] > 1;
         pt_v21_conv(c, xp, ldxp, cin, yp, Tout, Tout /*graph shape*/, cout, K, stride, pad, dil,
                     c->cont_f32[nd->w0], c->cont_f32[nd->w1], N, nd->w0, nd->w1, epi[0], epi[1],
                     epa[0], epa[1]);
