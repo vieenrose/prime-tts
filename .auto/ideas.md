@@ -59,6 +59,19 @@
 - Pinning under contention (run 378): tie (+7 ms) -> no affinity work; the +203 ms of 2 busy cores is
   intrinsic host throughput (run 371: +2.9% at 1 busy core, +9.0% at 2).
 
+## Official-procedure keep-stack table (runs 390-391) -- the report's headline keep numbers
+Measured with the ENVS= bisection knob through the OFFICIAL procedure (cold process, primary box,
+2 order-alternating pairs each, SNDR 70.09 in every arm, checks green):
+- Startup de-serialization bundle (PT_V21_OPEN_PAR/UP_PAR/WARM_PRE/WARM_ADAPT all =0): OFF 2287 vs
+  ON 2210 = **-77 ms (3.4%), 2/2 pairs**; matches the warm pairs (-64 ms run 339) and the per-case
+  table (-75 to -141 ms).
+- convT ig8 (PT_V21_CONVT_IG8=0): OFF 2230 vs ON 2160 = **-70 ms (3.1%), 2/2 pairs**; warm pairs say
+  -13/-20 ms, and the SM-serialization model predicts ~15 ms at N=4, so quote "15-70 ms, sign certain".
+- Method: official per-draw noise is ~40 ms (stdev 1.7%), so official A/B needs >= 4 pairs to resolve
+  20-30 ms; the profile line in measure.sh is from the nanoprof run, which does not receive ENVS.
+- Harness now: NANO=, TMPFS=1 (pesi), CASE=, N4=, ARENA_MB=, ENVS= -- all verified green; the default
+  path is unchanged (verified by draws 386/389).
+
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
   `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
