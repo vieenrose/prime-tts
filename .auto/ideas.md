@@ -120,11 +120,11 @@ goldens and measured both trees the same day: **10390 ms (old) vs 2193 ms (shipp
 vs the warm band). Quality: SNDR 70.08 -> 70.09 dB, max|d| 2.247e-04 -> 2.258e-04 -- 35 optimizations
 moved the output by 5% of the existing deviation, far inside the 60 dB gate.
 
-- **Keep value is core-availability dependent (run 417):** the startup bundle is -77 ms (official,
-  quiet box) / -64 ms (warm, quiet) but only -18 ms at ~2 busy cores -- splitting serialized startup
-  CPU work needs free cores. Keeps never regress, so they stand; on a loaded box the deployment sees
-  the smaller gain. Contention law (run 371): +2.9% per busy core at N=4, reproduced exactly (+203 ms
-  at 2 cores).
+- **Keep value is core-availability dependent (runs 417, 442):** the startup bundle is -77 ms (official,
+  quiet box) / -64 ms (warm, quiet) and -45 ms pooled over 10 pairs at ~2 busy cores (7/10 wins;
+  batches -18 and -85 ms, pair spread ~90 ms at load). Splitting serialized startup CPU work needs
+  free cores. Keeps never regress, so they stand; on a loaded box the deployment sees the smaller
+  gain. Contention law (run 371): +2.9% per busy core at N=4, reproduced exactly (+203 ms at 2 cores).
 
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
