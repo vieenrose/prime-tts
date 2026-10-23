@@ -23,9 +23,9 @@ law (run 371). Production guidance: give the TTS process CPU priority at the con
   SE 6.1, range 2122-2301; warm soak mean 2092 quiet / ~2235 loaded; cold-after-idle ~2190-2230.
   Draws at load <0.5 average ~2176, at load ~1.0-1.2 average ~2247 (the contention law, run 371).
   End-to-end vs the session-start tree measured the same day: **4.74x** (10390 -> 2193).
-- **Keeps quantified on the official procedure with bisection endpoints:** startup bundle -84 ms
-  (3.8%, 4/4 pairs; -64 warm, -45 at ~2 busy cores); convT ig8 -70 ms official / -13..-20 ms warm
-  (2/2 pairs).
+- **Keeps quantified on the official procedure with bisection endpoints:** startup bundle -84 ms on
+  picard (3.8%, 4/4 pairs) and -125 ms on pesi (2/2 official, 5/5 total pairs); -64 warm, -45 at
+  ~2 busy cores. convT ig8 -70 ms official / -13..-20 ms warm (2/2 pairs), both boxes.
 - **Harness:** measure.sh now supports NANO=, TMPFS=1 (second box, disk-full-safe), CASE=, N4=,
   ARENA_MB=, ENVS= (bisection A/B in the official procedure); default path verified unchanged.
 - **Phase-8 case table, primary box (official cold draws, all checks PASS):** T20 1002, T40 1323,
