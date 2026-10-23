@@ -315,6 +315,129 @@ __global__ void ref_conv_pad(const float *__restrict__ x, const float *__restric
   y[(int64_t) co * Tout + n] = acc;
 }
 
+/* --- SAME algorithm as win_conv but TEMPLATED on K: the k-loop bound is a compile-time constant so
+ * the 18-value register window and the Ws indices stay constant-indexed. This is the
+ * variable-K-vs-constant-K hypothesis for win_conv's 39.5 ms vs direct_conv's 21.9 ms. */
+template <int TK>
+__global__ void __launch_bounds__(128) winT_conv(const float *__restrict__ x, int64_t ldx, int cin,
+                                                 int pad_in, float *__restrict__ y, int64_t ldy,
+                                                 int64_t Tout, int cout,
+                                                 const float *__restrict__ wp) {
+  __shared__ float Ws[16][8][TK];
+  const int tid = threadIdx.x;
+  const int co0 = blockIdx.y * 8;
+  const int64_t t0 = (int64_t) blockIdx.x * 128 + (tid >> 3) * 8;
+  const float4 *w4 = (const float4 *)wp;
+  const int cl = tid & 7;
+  float acc[8];
+#pragma unroll
+  for (int j = 0; j < 8; j++)
+    acc[j] = 0.f;
+  const int64_t base = (pad_in >= 0) ? (t0 - pad_in) : t0;
+  for (int cb = 0; cb < cin; cb += 16) {
+    for (int i = tid; i < 16 * 8 * TK; i += 128) {
+      int k = i % TK, c = (i / TK) & 7, ci = i / (TK * 8);
+      const float4 *w = w4 + (int64_t) ((co0 >> 2) + ((c & 4) ? 1 : 0)) * TK * cin + k * cin + (cb + ci);
+      Ws[ci][c][k] = (cb + ci < cin && co0 + c < cout) ? (&w->x)[c & 3] : 0.f;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int ci = 0; ci < 16; ci++) {
+      if (cb + ci >= cin)
+        break;
+      float xv[TK + 7];
+      const float *row = x + (int64_t) (cb + ci) * ldx;
+#pragma unroll
+      for (int j = 0; j < TK + 7; j++) {
+        int64_t sq = base + j;
+        xv[j] = (sq >= 0 && sq < ldx) ? row[sq] : 0.f;
+      }
+#pragma unroll
+      for (int k = 0; k < TK; k++) {
+        float wv = Ws[ci][cl][k];
+#pragma unroll
+        for (int i = 0; i < 8; i++)
+          acc[i] += wv * xv[i + k];
+      }
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    int64_t t = t0 + j;
+    if (t < Tout)
+      y[(int64_t) (co0 + cl) * ldy + t] = acc[j];
+  }
+}
+
+__device__ __forceinline__ float bench_epi(float v, int op, float a) {
+  if (op == 1) return v >= 0.0f ? v : a * v;
+  if (op == 2) return v > 0.0f ? v : 0.0f;
+  if (op == 3) return v * a;
+  if (op == 4) return v + a;
+  return v;
+}
+/* the runtime kernel verbatim */
+template <int TK>
+__global__ void __launch_bounds__(128) winR_conv(
+    const float *__restrict__ x, int64_t ldx, int cin, float *__restrict__ y, int64_t ldy,
+    int64_t Tout, int cout, const float *__restrict__ wp, const float *__restrict__ bias,
+    int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0, float ea1, int64_t pad_in) {
+  __shared__ float Ws[16][8][TK];
+  const int tid = threadIdx.x;
+  const int co0 = blockIdx.y * 8;
+  const int64_t b = blockIdx.z;
+  const int64_t t0 = (int64_t) blockIdx.x * 128 + (tid >> 3) * 8;
+  const float4 *w4 = (const float4 *) wp;
+  const float *xb = x + b * bsx;
+  const int kc = TK * cin;
+  const int cl = tid & 7;
+  float acc[8];
+#pragma unroll
+  for (int j = 0; j < 8; j++)
+    acc[j] = (bias && co0 + cl < cout) ? bias[co0 + cl] : 0.f;
+  const int64_t base = (pad_in >= 0) ? (t0 - pad_in) : t0;
+  for (int cb = 0; cb < cin; cb += 16) {
+    for (int i = tid; i < 16 * 8 * TK; i += 128) {
+      int k = i % TK, c = (i / TK) & 7, ci = i / (TK * 8);
+      const float4 *w = w4 + (int64_t) ((co0 >> 2) + ((c & 4) ? 1 : 0)) * kc + k * cin + (cb + ci);
+      Ws[ci][c][k] = (cb + ci < cin && co0 + c < cout) ? (&w->x)[c & 3] : 0.f;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int ci = 0; ci < 16; ci++) {
+      if (cb + ci >= cin)
+        break;
+      float xv[TK + 7];
+      const float *row = xb + (int64_t) (cb + ci) * ldx;
+#pragma unroll
+      for (int j = 0; j < TK + 7; j++) {
+        int64_t sq = base + j;
+        xv[j] = (sq >= 0 && sq < ldx) ? row[sq] : 0.f;
+      }
+#pragma unroll
+      for (int k = 0; k < TK; k++) {
+        float wv = Ws[ci][cl][k];
+#pragma unroll
+        for (int i = 0; i < 8; i++)
+          acc[i] += wv * xv[i + k];
+      }
+    }
+    __syncthreads();
+  }
+  float *yb = y + b * bsy;
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    int64_t t = t0 + j;
+    if (t >= Tout || co0 + cl >= cout)
+      continue;
+    float v = acc[j];
+    if (epi0 || epi1)
+      v = bench_epi(bench_epi(v, epi0, ea0), epi1, ea1);
+    yb[(int64_t) (co0 + cl) * ldy + t] = v;
+  }
+}
+
 static float frand(void) {
   return (float)((rand() % 2001) - 1000) / 1000.f;
 }
@@ -435,6 +558,59 @@ int main(int argc, char **argv) {
       double d = fabs(hy3[i] - hr[i]);
       if (d > mw) mw = d;
       if (fabs(hr[i]) > sg) sg = fabs(hr[i]);
+    }
+    if (K == 3 || K == 5 || K == 7 || K == 11) {
+      dim3 bw(128);
+      dim3 gw((unsigned)((T + 127) / 128), (unsigned)((cout + 7) / 8), 1);
+      CK(cudaMemset(dy, 0, sizeof(float) * cout * (T + FB_N)));
+#define LAUNCH_WINT                                                        \
+      do {                                                                 \
+        if (K == 11) winT_conv<11><<<gw, bw>>>(dx, T, cin, pad_in, dy, T, T, cout, dw); \
+        else if (K == 7) winT_conv<7><<<gw, bw>>>(dx, T, cin, pad_in, dy, T, T, cout, dw); \
+        else if (K == 5) winT_conv<5><<<gw, bw>>>(dx, T, cin, pad_in, dy, T, T, cout, dw); \
+        else winT_conv<3><<<gw, bw>>>(dx, T, cin, pad_in, dy, T, T, cout, dw); \
+      } while (0)
+      LAUNCH_WINT;
+      CK(cudaGetLastError());
+      for (int c = 0; c < cout; c++)
+        CK(cudaMemcpy(hy3 + c * T, dy + (long long)c * T, sizeof(float) * T, cudaMemcpyDeviceToHost));
+      double mwt = 0;
+      for (long long i = 0; i < cout * T; i++) {
+        double d = fabs(hy3[i] - hr[i]);
+        if (d > mwt) mwt = d;
+      }
+      cudaEventRecord(e0);
+      for (int i = 0; i < iters; i++) LAUNCH_WINT;
+      cudaEventRecord(e1);
+      cudaEventSynchronize(e1);
+      cudaEventElapsedTime(&ms, e0, e1);
+      printf("winT   %.3f ms  (%.1f GFLOP/s eff)   max|d| winT-vs-padref %.3e\n", ms / iters,
+             gflop_direct * 1000 * iters / ms, mwt);
+#undef LAUNCH_WINT
+    }
+    if (K == 11) {
+      dim3 bw2(128);
+      dim3 gw2((unsigned)((T + 127) / 128), (unsigned)((cout + 7) / 8), 1);
+      CK(cudaMemset(dy, 0, sizeof(float) * cout * (T + FB_N)));
+      winR_conv<11><<<gw2, bw2>>>(dx, T, cin, dy, T, T, cout, dw, (const float *)0, (int64_t)(cin * T),
+                                  (int64_t)(cout * T), 0, 0, 0.f, 0.f, (int64_t) pad_in);
+      CK(cudaGetLastError());
+      for (int c = 0; c < cout; c++)
+        CK(cudaMemcpy(hy3 + c * T, dy + (long long)c * T, sizeof(float) * T, cudaMemcpyDeviceToHost));
+      double mwr = 0;
+      for (long long i = 0; i < cout * T; i++) {
+        double d = fabs(hy3[i] - hr[i]);
+        if (d > mwr) mwr = d;
+      }
+      cudaEventRecord(e0);
+      for (int i = 0; i < iters; i++)
+        winR_conv<11><<<gw2, bw2>>>(dx, T, cin, dy, T, T, cout, dw, (const float *)0, (int64_t)(cin * T),
+                                    (int64_t)(cout * T), 0, 0, 0.f, 0.f, (int64_t) pad_in);
+      cudaEventRecord(e1);
+      cudaEventSynchronize(e1);
+      cudaEventElapsedTime(&ms, e0, e1);
+      printf("winR   %.3f ms  (%.1f GFLOP/s eff)   max|d| winR-vs-padref %.3e\n", ms / iters,
+             gflop_direct * 1000 * iters / ms, mwr);
     }
     cudaEventRecord(e0);
     for (int i = 0; i < iters; i++) {

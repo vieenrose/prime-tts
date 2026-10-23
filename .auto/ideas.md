@@ -590,3 +590,53 @@ Session best 2172 ms (run 305, default path).
   scheduling lockstep costs +390 ms (run 314), data placement costs +261 ms (run 305), algorithm
   variants at parity or worse (runs 316-317). The kernels are at their local optimum for this model.
 - Phase-5 cluster: 2284, 2273, 2172, 2242, 2290, 2169, 2242(probe), 2191 (mean ~2233).
+
+## PHASE 6 (runs 324+, 1009-iteration budget): one keep, and startup closed with a mechanism
+- **KEPT (run 325): convT ig8.** `pt_convT_kernel_ig8` = the conv kernel's 128-column tiling applied to
+  the convT phase formulation (8 q-values x 4 channels per thread, Xs[16][32], grid.x = ceil(nq/128)).
+  convT 37.1 -> 33.4 ms/stream, -13 ms over 7 clean N=4 matched pairs, **bit-exact** on all 5 cases
+  (same accumulation order per output), official draw 2155 = session best at the time.
+  `PT_V21_CONVT_IG8=0` = bisection endpoint. Validated by the full per-node gate: 4010 nodes, 0 over
+  gate, M2 PASS (run 327).
+- **The per-node gate recipe (run 327), write it down:** on the Nano, dump with `PT_V21_CHAIN=0
+  PT_V21_FUSE=0 ./build/pt_v21_nano --cuda --checkpoints /tmp/names.txt --ckdir /tmp/ck81 --out ...`
+  (names = one line per graph output from the ONNX, 4071 of them), then a SECOND plain run for the
+  driver's parity line, write it to `<ckdir>/_parity.txt`, rsync the dump dir to the host and run
+  `.venv/bin/python tests/v21_parity_c.py --from-dumps <dir>`. 247 MB of dumps, ~1 min per case.
+- **The 5th-thread prewarm is a tie (run 326)** and the mechanism is why: `pt_v21_open`'s prepare step
+  is guarded by `open_lock`, not by the CUDA context, so streams 1..N already start the record pass at
+  t~1 ms while stream 0 is inside `cudaFree(0)`. Startup is max(context 85, record pass ~71) + upload.
+- **ig16 (256-column conv tiles) KILLED in the kernel bench** (run 328): +10-31% on the conv total.
+  Xs[16][64] = 20 KB of shared halves blocks/SM (50% occupancy on a 2-SM part) and the weight
+  re-read saving is an order of magnitude smaller. Column tiling is now: ig 64 (old) -> ig8 128 (kept)
+  -> ig16 256 (killed).
+- **Templated-K window conv KILLED at N=4 (run 329) even though it is 1.9x FASTER in the isolated
+  bench** (19.4 vs 36.7 ms on node 3854, bit-exact): N=4 wall 2700 vs 2066 ms, 4/4 pairs. Mechanism:
+  the register-window design issues K+7 scalar global loads per thread per input channel, so it is
+  load-issue bound -- invisible on an idle GPU with warm L1, fatal when 4 streams share 2 SMs.
+  **BENCHMARK LESSON #2: a single-kernel bench cannot predict the N=4 regime for anything that changes
+  the instruction mix; only wall-time matched pairs can.** (Lesson #1 was grid over-coverage.)
+- **The `PT_V21_IG8_MINT` knob is closed (run 329)**: forcing the 64-column kernel for Tout < 256 is
+  +20 ms at N=4 on T81 (5/5 pairs) and neutral on T20. ig8 everywhere is correct.
+- **STARTUP IS CLOSED WITH A MECHANISM (runs 330-332).** Per-stream phase timings at N=4 (temporary
+  `PT_V21_PHASE`): open 71, `pt_v21_cuda_init` 216, run 1750, tail 3 -- so serialized startup is
+  **287 ms**, not the ~140 the phase-4 budget assumed. The upload's engine time is 139-170 ms at
+  **0.8 GB/s** while the same copy reaches 2.4 GB/s at max clock, and the clock trace
+  (768 -> 384 -> 691 -> 768 -> 844 -> 921 over ~0.6 s) shows why: the copies run at 384-768 MHz.
+  Three ways to attack it, all measured, all neutral-or-worse:
+  (a) hold the clock with a 100 ms SM kernel joined after the upload: **+45 ms, 6/6** (heat/power);
+  (b) zero-copy slab (cudaHostAlloc mapped, CPU fill at 3.75 GB/s = 19-30 ms instead of 139-170):
+  **+15 ms, 5/6** -- the copies were inadvertently PAYING FOR THE RAMP, so removing them moves the
+  ~600 ms ramp into the inference phase (+10 ms/stream of kernels at the lower clock);
+  (c) coalescing the copies (336 records over 4 streams 47.8 ms == one coalesced copy 47.4 ms at max
+  clock) and pinning the source (mmap/POPULATE, MADV_HUGEPAGE, cudaMallocHost, malloc all 2.0-2.4
+  GB/s at max clock; cudaHostRegister on an anonymous mmap = "operation not supported"): no lever.
+  **Consequence: the serialized 287 ms is bounded below by the governor's clock ramp. Any change that
+  removes GPU work from the startup window makes the wall worse, and any change that adds SM load to
+  hold the clock costs more in heat/power than it saves.**
+- **Benchmark artifacts kept:** `.auto/bench_fft.cu` (FFT / window / templated-K kernels),
+  `.auto/stage_test.cu`, `.auto/win_test.cu` (unit tests that localized two real bugs),
+  `.auto/peak_test.cu` (the box's real fp32 rate: 97.6 GFMA/s at max clock, and it needs ~500 blocks
+  before the clock ramps), `.auto/h2d_test*.cu` (upload-rate table), `.auto/zcopy_test.cu`.
+  These are standalone (never linked into the runtime).
+- Phase-6 cluster (official draws): 2203 (baseline), 2155 (convT ig8). Warm-pair cluster ~2065-2090.
