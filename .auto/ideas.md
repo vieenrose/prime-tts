@@ -19,6 +19,23 @@
   Two measurements bracket occupancy as irrelevant: conv_ig runs at 62.5% and is **+73 ms worse**
   (run 337); PreferL1 halved occupancy for only **+1.5%** (run 81). Register reduction (5 blocks needs
   <= 51 regs) is conv_ig's territory = measured-bad, and `-maxrregcount 48/56` already lost.
+- **The kernels are staging/barrier-latency bound, and the tile is NOT where the runtime's 3x lives**
+  (runs 352-355, `.auto/ig8_bench.cu` ablation + `.auto/ig8_v2_bench.cu` candidates):
+  per-node efficiency (N=1, T81, exact shapes from the probe dump) puts every dominant conv at
+  **21.6-24.3 GFMA/s** = 19% of the 1-SM peak, uniform across K=11/7/3 and cin=cout=128/256.
+  The same tile structure in a bench runs **43-69 GFMA/s**. Ablation of the tile: removing per-chunk
+  X staging +45%, W staging +49%, barriers +64%, and *halving* FMA-per-LDS made it **faster** (+72%)
+  -- which FALSIFIES run 352's LDS-bandwidth-ceiling theory (67% of peak): the tile is not LDS-bound.
+  Candidate fixes measured: register-pipelined staging +9% on the biggest node / -2..-3% elsewhere;
+  RK=32 chunks (half the barriers) -16..-26%. Kernel axis is therefore closed from **8 directions**.
+  **BENCHMARK LESSON #3: an isolated kernel's rate can be 2.5-3x better than the same kernel in the
+  runtime**; the difference is the per-node wrapper (host zero-pad scratch memcpy + H2D/D2H staging,
+  priced at ~1.4 ms/MB by run 88) and the mid-run clock (~700 of 921 MHz), not the tile. The only
+  lever that attacks wrapper traffic is device residency, closed by measurement (+261 ms, run 305).
+- **fp16 weight upload is closed by arithmetic** (run 349): the 39 fp16 container records are
+  26.0 MiB stored vs 52.0 MiB expanded (container parse: raw 84.9 MiB, fp32 110.9 MiB), so uploading
+  as-stored is bit-exact and saves 32.5 ms of copy-engine time -- against +10-20 ms of in-kernel
+  fp16->fp32 converts in the staging loop of every decoder conv. Net 0 to +20 ms in the refcount zone.
 - **Record pass / container aliasing is closed from 4 directions** (runs 326, 331, 332, 346): pointing
   the shared ctab at the read-only container mapping (PT_V21_ALIAS) is bit-exact on all 5 cases but
   +10.6 ms at N=4 (5 warm pairs) and peak RSS is FLAT (276 -> 275 MiB: MAP_PRIVATE file pages are
