@@ -12,6 +12,7 @@
  */
 #include <cuda_runtime.h>
 #include <pthread.h>
+#include <sched.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -72,46 +73,41 @@ static pthread_mutex_t g_wlock = PTHREAD_MUTEX_INITIALIZER;
 
 static int weights_upload_locked(pt_ctx *c, int verbose);
 
-static int weights_upload(pt_ctx *c, int verbose) {
-  pthread_mutex_lock(&g_wlock);
-  int r = weights_upload_locked(c, verbose);
-  pthread_mutex_unlock(&g_wlock);
-  return r;
-}
+/* One-time setup of the pooled device slab: offsets + pointers only, no copies. Split out so the
+ * parallel upload can run its copies outside g_wlock (the lock must be free while the other stream
+ * threads come in to copy their share). */
+static volatile int g_up_next, g_up_done, g_up_n, g_up_fail;
+static int g_setup;
+static size_t *g_up_offs;
 
-static int weights_upload_locked(pt_ctx *c, int verbose) {
+static int weights_setup_locked(pt_ctx *c, int verbose) {
+  if (g_setup)
+    return 0;
   int n = pt_v21_n_cont(c);
-  if (++g_wref > 1)
-    return 0;   /* already uploaded: the weights are identical for every stream */
+  /* Pool every record into one device allocation: 336 cudaMalloc calls cost ~280 ms of startup
+   * (measured) and serialize across streams. A single allocation with 256-byte sub-alignment keeps
+   * the same per-record pointers the ctab hands out, so kernels and refcounting are unchanged. */
   g_wdev = (void **) calloc((size_t) n, sizeof(void *));
-  if (!g_wdev) {
+  g_up_offs = (size_t *) calloc((size_t) n, sizeof(size_t));
+  if (!g_wdev || !g_up_offs) {
     g_wref = 0;
     return -1;
   }
   g_wdev_n = n;
-  /* Pool every record into one device allocation: 336 cudaMalloc calls cost ~280 ms of startup
-   * (measured) and serialize across streams. A single allocation with 256-byte sub-alignment keeps
-   * the same per-record pointers the ctab hands out, so kernels and refcounting are unchanged. */
-  size_t *offs = (size_t *) calloc((size_t) n, sizeof(size_t));
-  if (!offs) {
-    g_wref = 0;
-    return -1;
-  }
   size_t total = 0;
   for (int i = 0; i < n; i++) {
     const void *h = pt_v21_cont(c, i);
     size_t nb = (size_t) pt_v21_cont_bytes(c, i);
     if (!h || nb == 0) {
-      offs[i] = 0;
+      g_up_offs[i] = 0;
       continue;
     }
-    offs[i] = total;
+    g_up_offs[i] = total;
     total += (nb + 255) & ~(size_t) 255;
     g_wdev_bytes += nb;
   }
   if (cudaMalloc(&g_wbase, total ? total : 1) != cudaSuccess) {
     fprintf(stderr, "pt_v21 cuda: pooled weight allocation failed (%zu B)\n", total);
-    free(offs);
     g_wref = 0;
     return -1;
   }
@@ -120,18 +116,84 @@ static int weights_upload_locked(pt_ctx *c, int verbose) {
     size_t nb = (size_t) pt_v21_cont_bytes(c, i);
     if (!h || nb == 0)
       continue;
-    g_wdev[i] = (char *) g_wbase + offs[i];
+    g_wdev[i] = (char *) g_wbase + g_up_offs[i];
+  }
+  g_up_n = n;
+  g_up_next = 0;
+  g_up_done = 0;
+  g_up_fail = 0;
+  g_setup = 1;
+  (void) verbose;
+  return 0;
+}
+
+static int weights_upload(pt_ctx *c, int verbose) {
+  static int par = -1;
+  if (par < 0)
+    par = getenv("PT_V21_UP_PAR") ? atoi(getenv("PT_V21_UP_PAR")) : 1;
+  if (!par) {
+    pthread_mutex_lock(&g_wlock);
+    int r = weights_upload_locked(c, verbose);
+    pthread_mutex_unlock(&g_wlock);
+    return r;
+  }
+  /* The 110 MB weight upload is the largest single item of the serialized startup (~138-165 ms at
+   * the Nano's ~0.8 GB/s H2D). Default ON (PT_V21_UP_PAR=0 = serialized bisection endpoint): the
+   * copy is issued by one thread while the other three wait on g_wlock, so every stream's startup
+   * pays the whole upload. Every record is an independent range of the shared slab and the host
+   * payload is the same bytes in every context, so the copy is claimed the way the container record
+   * pass is: each stream thread copies the records it claims with cudaMemcpyAsync on its own CUDA
+   * stream, syncs its own stream, then waits for everyone's share. A late-arriving stream finds the
+   * copies done instead of queueing behind them. Numerics are untouched: identical bytes, identical
+   * destinations (proved bit-identical max|d| on all 5 golden cases, both arms). */
+  pthread_mutex_lock(&g_wlock);
+  g_wref++;
+  int r = weights_setup_locked(c, verbose);
+  int n = g_up_n;
+  pthread_mutex_unlock(&g_wlock);
+  if (r)
+    return r;
+  for (;;) {
+    int i = __sync_fetch_and_add(&g_up_next, 1);
+    if (i >= n)
+      break;
+    const void *h = pt_v21_cont(c, i);
+    size_t nb = (size_t) pt_v21_cont_bytes(c, i);
+    if (g_wdev[i] && h && nb)
+      cudaMemcpyAsync(g_wdev[i], h, nb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream);
+    __sync_fetch_and_add(&g_up_done, 1);
+  }
+  if (cudaStreamSynchronize((cudaStream_t) c->g_stream) != cudaSuccess)
+    __sync_bool_compare_and_swap(&g_up_fail, 0, 1);
+  while (__sync_add_and_fetch(&g_up_done, 0) < n)
+    sched_yield();
+  if (g_up_fail) {
+    fprintf(stderr, "pt_v21 cuda: parallel weight upload failed\n");
+    return -1;
+  }
+  return 0;
+}
+
+static int weights_upload_locked(pt_ctx *c, int verbose) {
+  int n = pt_v21_n_cont(c);
+  if (++g_wref > 1)
+    return 0;   /* already uploaded: the weights are identical for every stream */
+  if (weights_setup_locked(c, verbose))
+    return -1;
+  for (int i = 0; i < n; i++) {
+    const void *h = pt_v21_cont(c, i);
+    size_t nb = (size_t) pt_v21_cont_bytes(c, i);
+    if (!h || nb == 0 || !g_wdev[i])
+      continue;
     if (cudaMemcpy(g_wdev[i], h, nb, cudaMemcpyHostToDevice) != cudaSuccess) {
       fprintf(stderr, "pt_v21 cuda: weight upload failed for ctab %d (%zu B)\n", i, nb);
-      free(offs);
       g_wref = 0;
       return -1;
     }
   }
-  free(offs);
   if (verbose)
     fprintf(stderr, "pt_v21 cuda: %d container records resident on the GPU (%.1f MiB)\n", n,
-            (double) total / 1048576.0);
+            (double) g_wdev_bytes / 1048576.0);
   return 0;
 }
 
@@ -159,6 +221,9 @@ static void weights_release(void) {
     g_wbase = NULL;
     free(g_wdev);
     g_wdev = NULL;
+    free(g_up_offs);
+    g_up_offs = NULL;
+    g_setup = 0;
     g_wdev_n = 0;
     g_wref = 0;
   }
