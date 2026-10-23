@@ -1,20 +1,24 @@
 # Ideas backlog (v2.1 Nano latency)
 
-## SESSION STATUS (run 363, PHASE 8): converged -- 1 keep-class item reverted, and the wall budget is now fully accounted for
-- **Wall budget, phase-8 form (1 SM)**: T81 official 2124-2242 = startup 287 + 4 streams x ~440 ms of
-  SM-serialized work + tail ~45. Decomposition of one stream's `kernel+sync` 397.7 ms (N=1):
-  kernels ~250 (at the isolated clone rates) + wrapper ~43 (copies 21.6, zero-pad scratch memcpy ~10,
-  179 launch/sync ~12) + mid-run clock ~75 (the 384-921 MHz governor ramp: 69% of a run is at max)
-  + wave tails ~21 (8.5% MAC-weighted, run 78) = ~389. **Every term has a measured closure.**
+## SESSION STATUS (run 413, PHASE 8): converged -- wall fully accounted for; monitoring + deployment evidence complete
+- **Official cluster (primary box, shipped tree):** 31 N=4 T81 draws, mean **2193 ms**, stdev 2.0%,
+  SE 7.2, range 2124-2281; warm soak mean 2092 (10 runs, SNDR 70.09 10/10, RAM flat); cold-after-idle
+  ~2232. End-to-end vs the session-start tree measured the same day: **4.74x** (10390 -> 2193).
+- **Keeps quantified on the official procedure with bisection endpoints:** startup bundle -77 ms
+  (3.4%, 2/2 pairs); convT ig8 -70 ms official / -13..-20 ms warm (2/2 pairs).
+- **Harness:** measure.sh now supports NANO=, TMPFS=1 (second box, disk-full-safe), CASE=, N4=,
+  ARENA_MB=, ENVS= (bisection A/B in the official procedure); default path verified unchanged.
 - **Phase-8 case table, primary box (official cold draws, all checks PASS):** T20 1002, T40 1323,
-  T81 2124-2242 (warm 2095-2137), T120 2974, sid1_T29 1242. Second box (pesi, tmpfs build):
-  1074 / 1324 / 2187 / 2914 / 1168. SNDR identical on both boxes (69.70 / 69.93 / 70.09 / 67.90 /
-  67.45), max|d| identical, and the full per-node gate on the phase-8 tree: 4010 nodes, 0 over gate,
-  M2 PASS (run 359). Startup share of the wall: 29% (T20), 22% (T40), 23% (sid1_T29), 13% (T81),
-  10% (T120) -- the deployment (server mode) amortizes it entirely.
-- **N-scaling on the phase-8 binary:** N=1 1272 (stream 760), N=2 1310, N=4 2124, N=8 3827;
-  per-stream marginal cost 511 -> 459 -> 443 ms (backfill improves with N on the single SM).
-  Soak: 10 runs, cold 2184 then 2095-2137 (mean 2111), SNDR 70.09 10/10, RAM flat.
+  T81 2193 (31 draws; warm 2064-2123), T120 2974, sid1_T29 1242. Second box official (TMPFS=1):
+  1086 / 1402 / 2244 / 2957 / 1250 -- the box gap scales with the startup share (+8.4% T20 -> +0.6%
+  T120). SNDR identical on both boxes (69.70 / 69.93 / 70.09 / 67.90 / 67.45), max|d| identical, and
+  the full per-node gate on the phase-8 tree: 4010 nodes, 0 over gate, M2 PASS (run 359), and on the
+  pesi toolchain too with identical per-group worsts (run 373). Startup share of the wall: 29% (T20),
+  22% (T40), 23% (sid1_T29), 13% (T81), 10% (T120) -- the deployment (server mode) amortizes it.
+- **N-scaling on the phase-8 binary (official):** N=1 1252-1272 (stream ~640-760), N=2 1341, N=4 2193,
+  N=8 3806 (5-run soak). The 2nd stream is nearly free (+69 ms: it fills the SM's idle thread slots),
+  streams 3-4 cost ~426 ms each -- the 1-SM saturation signature. Occupancy is not the limiter at N=1
+  either (run 409: forcing 62.5%-occupancy conv is a tie at N=1).
 - **Inference-phase clock measured (run 358):** 69% of an N=4 run is at the 921.6 MHz max; the rest is
   the startup ramp + ~210 ms of 691 MHz podgov dips. Governor knobs are root-owned (no sudo), max_freq
   already reads the max, so there is no clock lever left in inference. Idle clock is 76.8 MHz.
@@ -22,10 +26,22 @@
   fp16 weight upload (arithmetic: 32.5 ms startup vs +10-20 ms in-kernel converts, run 349);
   occupancy/carveout (zero of 11 kernels changes blocks/SM, run 348); kernel chunk-width/register-
   pipelining variants (+9% on one shape, -2..-26% elsewhere, run 355); the LDS-ceiling theory of
-  run 352 falsified by its own ablation (the tile is staging/barrier bound).
+  run 352 falsified by its own ablation (the tile is staging/barrier bound); pinning under contention
+  (tie, run 378); N=1 occupancy (tie, run 409).
 - **Recommendation: autoresearch-finalize.** The wall is fully explained by measured components, each
   with its own closure; the approval list is unchanged (batch-4 lockstep +390 ms measured, CUDA graphs
-  ~1-2 ms launch, server-mode weights out of benchmark scope, Winograd 1.6x more ops).
+  ~1-2 ms launch, server-mode weights now quantified at +300-340 ms in the multi-process shape, run
+  398, Winograd 1.6x more ops).
+
+## Wall budget, phase-8 form (1 SM) -- every term has a measured closure
+T81 official 2193 = startup 287 + 4 streams x ~440 ms of SM-serialized work + tail ~45. Decomposition
+of one stream's `kernel+sync` 397.7 ms (N=1): kernels ~250 (at the isolated clone rates) + wrapper ~43
+(copies 21.6, zero-pad scratch memcpy ~10, 179 launch/sync ~12) + mid-run clock ~75 (the 384-921 MHz
+governor ramp; 69% of a run is at max, run 358) + wave tails ~21 (8.5% MAC-weighted, run 78) = ~389.
+Closures per term: kernels -- 9 measured directions (ig/ig8/ig16, window-direct, templated-K, FFT,
+Winograd arithmetic, block count, occupancy/carveout, chunk width, N=1 occupancy); wrapper -- device
+residency +261 ms (run 305); clock -- root-owned governor + 5 measured startup attempts; tails --
+hidden by cross-stream backfill (runs 78/87, zero SM idle in inference).
 
 ## Deployment-regime findings (phase 8, runs 367-371) -- report content, not benchmark levers
 - **Cold vs warm (run 367):** first N=4 request after 150 s idle 2232 ms mean vs sustained warm 2091 ms
