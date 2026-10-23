@@ -320,6 +320,35 @@ static int *g_warm_sink;
 static double g_warm_t0;
 static double g_warm_cost = -1.0;
 
+/* Load-aware ramp gate: the governor's idle clock is box-dependent (picard idles at 768 MHz, pesi at
+ * the 921 MHz max), and a process that arrives while the GPU is already at max owes no ramp at all.
+ * cur_freq/max_freq are world-readable devfreq sysfs, no root needed. Unknown sysfs -> ramp
+ * (conservative: an unmeasured box gets the ramp, which is what run 90's robustness finding wants). */
+static int gpu_clock_is_max(void) {
+  static int state = -1;   /* -1 unknown, 0 below max, 1 at max */
+  if (state >= 0)
+    return state;
+  const char *base = "/sys/devices/platform/host1x/57000000.gpu/devfreq/57000000.gpu/";
+  char path[128], buf[32];
+  long cur = -1, max = -1;
+  snprintf(path, sizeof path, "%scur_freq", base);
+  FILE *fc = fopen(path, "r");
+  if (fc && fgets(buf, sizeof buf, fc))
+    cur = atol(buf);
+  if (fc)
+    fclose(fc);
+  snprintf(path, sizeof path, "%smax_freq", base);
+  FILE *fm = fopen(path, "r");
+  if (fm && fgets(buf, sizeof buf, fm))
+    max = atol(buf);
+  if (fm)
+    fclose(fm);
+  if (cur <= 0 || max <= 0)
+    return -1;
+  state = cur >= max ? 1 : 0;
+  return state;
+}
+
 static void gpu_warm_launch(void) {
   static int ticket;
   pthread_mutex_lock(&g_warm_lock);
@@ -333,6 +362,18 @@ static void gpu_warm_launch(void) {
   int iters = e ? atoi(e) : 64000;
   if (iters <= 0)
     return;
+  if (getenv("PT_V21_WARM_ADAPT") ? atoi(getenv("PT_V21_WARM_ADAPT")) : 1) {
+    if (gpu_clock_is_max() == 1) {
+      /* Already at max: no ramp is owed. Keep a short maintenance burst instead of skipping entirely
+       * (run 90's failure mode: the governor drops the clock again while this thread runs its
+       * CPU-side record pass, and copies issued at the dropped clock cost far more than the burst).
+       * 8k iters is ~3 ms of SM work -- an insurance premium, not a ramp. */
+      if (iters > 8000)
+        iters = 8000;
+      if (getenv("PT_V21_WARMLOG"))
+        fprintf(stderr, "pt_v21 cuda: clock at max, maintenance burst only\n");
+    }
+  }
   if (cudaMalloc((void **) &g_warm_sink, 256 * sizeof(int)) != cudaSuccess) {
     cudaGetLastError();
     g_warm_sink = NULL;
