@@ -22,8 +22,9 @@ law (run 371). Production guidance: give the TTS process CPU priority at the con
 - **Official cluster (primary box, shipped tree):** 31 N=4 T81 draws, mean **2193 ms**, stdev 2.0%,
   SE 7.2, range 2124-2281; warm soak mean 2092 (10 runs, SNDR 70.09 10/10, RAM flat); cold-after-idle
   ~2232. End-to-end vs the session-start tree measured the same day: **4.74x** (10390 -> 2193).
-- **Keeps quantified on the official procedure with bisection endpoints:** startup bundle -77 ms
-  (3.4%, 2/2 pairs); convT ig8 -70 ms official / -13..-20 ms warm (2/2 pairs).
+- **Keeps quantified on the official procedure with bisection endpoints:** startup bundle -84 ms
+  (3.8%, 4/4 pairs; -64 warm, -45 at ~2 busy cores); convT ig8 -70 ms official / -13..-20 ms warm
+  (2/2 pairs).
 - **Harness:** measure.sh now supports NANO=, TMPFS=1 (second box, disk-full-safe), CASE=, N4=,
   ARENA_MB=, ENVS= (bisection A/B in the official procedure); default path verified unchanged.
 - **Phase-8 case table, primary box (official cold draws, all checks PASS):** T20 1002, T40 1323,
