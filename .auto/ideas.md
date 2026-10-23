@@ -19,13 +19,16 @@ law (run 371). Production guidance: give the TTS process CPU priority at the con
 (in-process affinity is a tie, run 378); the low-concurrency regime is where the co-tenant hurts most.
 
 ## SESSION STATUS (run 413, PHASE 8): converged -- wall fully accounted for; monitoring + deployment evidence complete
-- **Official cluster (primary box, shipped tree):** 100 N=4 T81 draws, mean **2207 ms**, stdev 2.1%,
-  SE 6.1, range 2122-2301; warm soak mean 2092 quiet / ~2235 loaded; cold-after-idle ~2190-2230.
+- **Official cluster (primary box, shipped tree):** 201 N=4 T81 draws, mean **2209 ms**, stdev 2.1%,
+  SE 5.4, range 2122-2307; warm soak mean 2092 quiet / ~2235 loaded; cold-after-idle ~2190-2230.
   Draws at load <0.5 average ~2176, at load ~1.0-1.2 average ~2247 (the contention law, run 371).
+  Best draw **2128 ms, now reached twice** (runs 432, 641) with a fully nominal profile both times.
   End-to-end vs the session-start tree measured the same day: **4.74x** (10390 -> 2193).
+  Second box pesi (30 draws): mean ~2233, i.e. +1.1% over picard, stable all phase-8.
 - **Keeps quantified on the official procedure with bisection endpoints:** startup bundle -84 ms on
-  picard (3.8%, 4/4 pairs) and -125 ms on pesi (2/2 official, 5/5 total pairs); -64 warm, -45 at
-  ~2 busy cores. convT ig8 -70 ms official / -13..-20 ms warm (2/2 pairs), both boxes.
+  picard (3.8%, 4/4 pairs) and -125 on pesi; re-refreshed run 632 at -49.5 ms (2/2 pairs, mid-loaded
+  box) -- the series -77 (quiet) / -64 (warm) / -49.5 (loaded) follows the core-availability law.
+  convT ig8 -70 ms quiet / -62.5 ms re-refreshed run 633 (2/2 pairs) / -13..-20 ms warm, both boxes.
 - **Harness:** measure.sh now supports NANO=, TMPFS=1 (second box, disk-full-safe), CASE=, N4=,
   ARENA_MB=, ENVS= (bisection A/B in the official procedure); default path verified unchanged.
 - **Phase-8 case table, primary box (official cold draws, all checks PASS):** T20 1002, T40 1323,
