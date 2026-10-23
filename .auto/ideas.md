@@ -101,6 +101,19 @@ bit-identical kernels on both toolchains) with a CPU/driver-side startup differe
 69.70 / 69.93 / 70.09 / 67.90 / 67.45 on both boxes; max|d| identical; per-node gate 0 over gate on
 both toolchains (runs 359/373).
 
+## Loaded-box case refresh + per-stream RTF (runs 432-437) -- the deployment-realtime table
+Box state matters: the primary box now carries ~1-2 busy cores (operator's jtop GPU monitors, load
+~1.0-1.9) and the contention law (run 371, +2.9%/busy core) shows up in every regime. Official
+primary-box numbers, loaded vs quiet: T20 1020/1002, T40 1363/1323, T81 2204/2176, T120 2967/2974,
+sid1_T29 1267/1242; SNDR identical in all ten draws (69.70 / 69.93 / 70.09 / 67.90 / 67.45). The
+GPU-dominated long case is insensitive to CPU contention (-0.2%); the short/mid cases shift 2-3%
+(and the T81 warm band shifts +6.8%: 2092 quiet -> 2234 loaded, run 428).
+Per-stream RTF from the driver's own L (T20 L=14848 = 0.928 s; T81 3.62 s; T120 5.24 s):
+**T20 1.10 cold / 1.00 warm at N=4** (the binding realtime case, because 287 ms of serialized
+startup is 28% of that request), T40 0.68, sid1_T29 0.75, T81 0.61, T120 0.57; single-stream N=1
+T20 0.355, T81 0.18. Consequence: server-mode weight/context amortization is worth ~-260 ms
+per request on T20-class utterances (1.10 -> ~0.78 RTF), the largest remaining deployment win.
+
 ## End-to-end speedup measured in ONE box state (run 403) -- the report's headline
 Rebuilt the session-start tree (20f4a82, run-1 baseline) in a Nano temp dir with today's container and
 goldens and measured both trees the same day: **10390 ms (old) vs 2193 ms (shipped) = 4.74x** (4.92x
