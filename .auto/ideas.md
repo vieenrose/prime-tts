@@ -193,6 +193,22 @@ reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only 
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
 
+## Phase-4 generality proof of the startup keeps (runs 288-289) + fp16-upload arithmetic kill
+Generality table (order-alternating pairs, keeps ON vs all three OFF, N=4, picard):
+- T20: 1027 vs 1102 = **-75 ms (7.3%)**, 5/8 wins, t=-2.1, SNDR 69.70 identical.
+- T81: -95 ms (4.2%) (the phase-3 confirmations).
+- T120: 2953 vs 3086 = **-133 ms (4.3%)**, **6/6 wins, t=-4.7**, SNDR 67.90 identical.
+Conclusion: the startup de-serialization wins are shape-general (startup is shape-independent, so the
+absolute gain is fixed-to-growing and the relative gain is largest at the short end = the operator's
+latency-critical regime). No overfitting to the T81 shape.
+**fp16 weight upload KILLED BY ARITHMETIC (run 287, revived legitimately then closed):** ship the 39
+fp16 records as stored (83.8 MB not 111 MB) and decode on device. The split-half trick removes the
+staging buffer the run-108 kill assumed was needed (copy the fp16 into the first half of the record's
+fp32-sized slab region, decode into the disjoint second half -> safe, parallel, same slab footprint),
+so the assumption changed. But the device decode moves 83.8 read + 167.6 write = 251 MB of device
+memory traffic ~= 21-31 ms at the Nano's ~8-12 GB/s, against a 27.2 MB copy saving of ~34 ms. Net ~0
+to +10 ms for a change in the #55 refcount zone. Closed for bandwidth arithmetic, not staging.
+
 ## KEPT in phase 3 (run 285): prewarm context + clock ramp before the record pass
 `pt_v21_cuda_prewarm()` (called by both drivers before `pt_v21_open` when `--cuda`): set the sync
 flags, `cudaFree(0)` (context, ~85 ms) and launch the clock-ramp kernel on its own non-blocking
