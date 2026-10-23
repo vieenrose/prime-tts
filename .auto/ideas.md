@@ -198,9 +198,11 @@ Generality table (order-alternating pairs, keeps ON vs all three OFF, N=4, picar
 - T20: 1027 vs 1102 = **-75 ms (7.3%)**, 5/8 wins, t=-2.1, SNDR 69.70 identical.
 - T81: -95 ms (4.2%) (the phase-3 confirmations).
 - T120: 2953 vs 3086 = **-133 ms (4.3%)**, **6/6 wins, t=-4.7**, SNDR 67.90 identical.
-Conclusion: the startup de-serialization wins are shape-general (startup is shape-independent, so the
-absolute gain is fixed-to-growing and the relative gain is largest at the short end = the operator's
-latency-critical regime). No overfitting to the T81 shape.
+- sid1_T29: 1236 vs 1368 = **-132 ms (10.7%)**, 6/6 wins, SNDR 67.45 identical.
+- T40: 1382 vs 1523 = **-141 ms (9.3%)**, 6/6 wins, SNDR 69.93 identical.
+Table total: 29/31 pair wins, zero SNDR / max|d| change in any arm. Largest RELATIVE gains are on the
+shortest requests (7-11%), the operator's latency-critical regime. Wall per case with keeps ON:
+T20 1027, T40 1382, T81 2232-2236, T120 2953, sid1_T29 1236.
 **fp16 weight upload KILLED BY ARITHMETIC (run 287, revived legitimately then closed):** ship the 39
 fp16 records as stored (83.8 MB not 111 MB) and decode on device. The split-half trick removes the
 staging buffer the run-108 kill assumed was needed (copy the fp16 into the first half of the record's
