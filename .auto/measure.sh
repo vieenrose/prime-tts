@@ -13,6 +13,21 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ARENA="${ARENA_MB:-8}"
 N4="${N4:-4}"
 CASE="${CASE:-tests/golden_v21/T81}"
+# TMPFS=1 -> build and run in /dev/shm (a box whose root disk is full: pesi). Artifacts (container,
+# goldens) are then read read-only from ~/primetts on disk; nothing is written to the root disk.
+# This keeps the SECOND deployment box measurable by the same script. Default (TMPFS=0) is the
+# primary box's layout, byte-for-byte the procedure the session baseline was established with.
+# NOTE: remote paths are written as $HOME/... text (escaped) so the REMOTE shell expands them;
+# rsync destinations are remote-home-relative, exactly as in the original script.
+TMPFS="${TMPFS:-0}"
+if [ "${TMPFS:-0}" = 1 ]; then
+  TREE=/dev/shm/pt
+  CONT='$HOME/primetts/build/v21.ptk'; CASEARG='$HOME/primetts/'"$CASE"
+  RSYNC_TREE="$NANO:/dev/shm/pt/runtime/"
+else
+  TREE='$HOME/primetts'; CONT=build/v21.ptk; CASEARG=$CASE
+  RSYNC_TREE="$NANO:primetts/runtime/"
+fi
 
 fail() { echo "measure: $1" >&2; exit 2; }
 
@@ -22,22 +37,23 @@ free_mb=$(ssh -o ConnectTimeout=8 "$NANO" 'free -m | sed -n 2p | tr -s " " | cut
 [ "$free_mb" -ge 60 ] || fail "Nano free RAM ${free_mb} MB < 60 MB guard"
 
 # ---- sync + build (build time is deliberately NOT part of the metric)
-rsync -a -q "$REPO/runtime/" "$NANO:primetts/runtime/" 2>/dev/null
-rsync -a -q "$REPO/build/v21.ptk" "$NANO:primetts/build/" 2>/dev/null
+rsync -a -q "$REPO/runtime/" "$RSYNC_TREE" 2>/dev/null
+[ "$TMPFS" = 1 ] || rsync -a -q "$REPO/build/v21.ptk" "$NANO:primetts/build/" 2>/dev/null
 # build both drivers: checks.sh gates quality with pt_v21_nano, the metric uses pt_v21_par
-bld=$(ssh "$NANO" 'cd ~/primetts && make -f runtime/v21/Makefile par nano 2>&1 | grep -E "error:" | head -6')
+bld=$(ssh "$NANO" "cd $TREE && make -f runtime/v21/Makefile par nano 2>&1 | grep -E 'error:' | head -6")
 [ -z "$bld" ] || { echo "$bld"; fail "build failed on the Nano"; }
-ssh "$NANO" 'test -x ~/primetts/build/pt_v21_par' || fail "pt_v21_par missing on the Nano"
+ssh "$NANO" "test -x $TREE/build/pt_v21_par" || fail "pt_v21_par missing on the Nano"
 
 # ---- N=4 (primary). Sample free RAM *and* the driver's peak RSS during the run: on the Nano the
 # GPU's allocations count against system RAM, so the process high-water mark is the number that
 # says whether four streams actually fit on the box.
-run4=$(ssh "$NANO" "NANO_ARENA=$ARENA NANO_CASE=$CASE NANO_N4=$N4 bash -s" <<'REMOTE'
-cd ~/primetts
+run4=$(ssh "$NANO" "NANO_ARENA=$ARENA NANO_CASE=$CASEARG NANO_N4=$N4 NANO_TREE=$TREE NANO_CONT=$CONT bash -s" <<'REMOTE'
+cd "$NANO_TREE"
+NANO_CASE=${NANO_CASE:-~/primetts/tests/golden_v21/T81}
 rm -f /tmp/ar_mem.txt /tmp/ar_freq.txt
 GF=/sys/devices/platform/host1x/57000000.gpu/devfreq/57000000.gpu/cur_freq
 CF=/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
-PT_V21_ARENA_MB="$NANO_ARENA" ./build/pt_v21_par --container build/v21.ptk   --case "$NANO_CASE" --cuda --parallel "$NANO_N4" > /tmp/ar_out.txt 2>&1 &
+PT_V21_ARENA_MB="$NANO_ARENA" ./build/pt_v21_par --container $NANO_CONT --case $NANO_CASE --cuda --parallel "$NANO_N4" > /tmp/ar_out.txt 2>&1 &
 pid=$!
 hwm=0
 nsamp=0
@@ -76,11 +92,11 @@ mincpufreq=$(echo "$run4" | sed -n 's/^MINCPUFREQ \([0-9][0-9]*\)$/\1/p' | head 
 [ -n "$sndr" ] || fail "no SNDR in N=4 output"
 
 # ---- N=1 single-stream latency
-run1=$(ssh "$NANO" "cd ~/primetts && PT_V21_ARENA_MB=$ARENA ./build/pt_v21_par --container build/v21.ptk --case $CASE --cuda --parallel 1 2>&1")
+run1=$(ssh "$NANO" "cd $TREE && PT_V21_ARENA_MB=$ARENA ./build/pt_v21_par --container $CONT --case $CASEARG --cuda --parallel 1 2>&1")
 s1=$(echo "$run1" | sed -n 's/.*slowest stream \([0-9][0-9]*\) ms.*/\1/p' | head -1)
 
 # ---- GPU phase split (where the time actually goes; the driver prints this under PT_V21_CUDAPROF)
-split=$(ssh "$NANO" "cd ~/primetts && PT_V21_CUDAPROF=1 PT_V21_EKIND=1 PT_V21_ARENA_MB=$ARENA ./build/pt_v21_nano --container build/v21.ptk --case $CASE --cuda 2>&1 | grep -E 'gpu split|host op kinds' | head -2")
+split=$(ssh "$NANO" "cd $TREE && PT_V21_CUDAPROF=1 PT_V21_EKIND=1 PT_V21_ARENA_MB=$ARENA ./build/pt_v21_nano --container $CONT --case $CASEARG --cuda 2>&1 | grep -E 'gpu split|host op kinds' | head -2")
 echo "$split"
 
 echo "METRIC n4_wall_ms=$wall"
