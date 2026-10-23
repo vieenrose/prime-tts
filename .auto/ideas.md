@@ -526,3 +526,22 @@ max(GPU total, host total) + startup: cutting host work alone no longer moves it
 FLOP share by kernel: K=11 30%, K=7 21%, K=3 15%, K=5 8%, dilated K=11 15%, dilated K=7 9%.
 Winograd F(2,3) on the K=3 convs is the only remaining GPU FLOP reduction (15% of MACs, ~2.25x
 fewer multiplies there -> ~8% of GPU work) but it changes numerics and must clear the per-node gate.
+
+## KEPT in phase 5 (runs 304-305): device-residency scaffold (inert) + the project CLOSED BY MEASUREMENT
+Implemented the full residual bundle: device Add kernel (fused LeakyReLU epilogue), device LeakyReLU kernel,
+per-stream residency sub-arena (best-fit free list + coalescing, blocks tracked by off+size, released at
+tv_free = last use, operand uploads reclaimed at chain-end syncs), eligibility rules
+(resident(tensor) = 1..4 readers all conv-in0/Add/LeakyReLU AND producer can publish it: conv = free base
+case, Add/Leaky = one resident operand; recursion walks producers so it terminates), conv-site keep
+extension, chain terminators (result read by host op -> device kernel + one D2H), a generic host-reader
+safety sweep (any host op reading a device-stale tensor restores its host copy first), and
+PT_V21_DEVADD_LIMIT link-cap bisection.
+NUMERICS: two bugs found and fixed (operand A uploaded from B's host copy -> Add computed B+B; host readers
+of stale tensors) -> unlimited DEVADD=1 is bit-exact on all 5 golden cases at N=1 and N=4 (SNDR 69.70 /
+69.93 / 70.09 / 67.90 / 67.45, max|d| 2.258e-04).
+PERFORMANCE: +261 ms at N=4 (6/6 order-alternating pairs, mean 2325 ON vs 2064 OFF). Mechanism: the
+staging copies it removes were hidden behind GPU work (run 85/88), while the 57 added device passes over
+~120 MB are real SM time on a saturated GPU, and every chain terminator ends in cudaStreamSynchronize,
+destroying the conv chain's async issue-ahead. => DEVICE RESIDENCY IS CLOSED BY MEASUREMENT (not by risk).
+Approval list is now 4 items: batch-4 lockstep, CUDA graphs, server-mode weights, Winograd F(2,3) K=3.
+Session best 2172 ms (run 305, default path).
