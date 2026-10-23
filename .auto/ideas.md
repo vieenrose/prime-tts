@@ -50,6 +50,15 @@
 - **Cross-toolchain node gate (run 373):** the pesi build (gcc 7.5 + CUDA 10.2) passes the full per-node
   gate with 0 over gate and per-group worsts IDENTICAL to picard's -- the two toolchains are bit-identical.
 
+## Deployment-regime evidence, phase 8 (runs 367-381) -- report section, benchmark-neutral
+- Fairness at N=4 (run 380): per-stream spread 44-61 ms (2.5-3.5%) -> no stream starved; last user's
+  latency = startup 287 + stream ~1780-1900 + tail 45.
+- Mixed-length load (run 381): 4 processes x {T20,T40,T81,T120} = 11.54 s audio in 2.23-2.27 s (5.2x
+  realtime), per-case SNDR/max|d| identical to standalone -> quality is load-independent; the gap to the
+  shared-weights driver (6.8x realtime) is per-process startup, i.e. the server-mode item's value.
+- Pinning under contention (run 378): tie (+7 ms) -> no affinity work; the +203 ms of 2 busy cores is
+  intrinsic host throughput (run 371: +2.9% at 1 busy core, +9.0% at 2).
+
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
   `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
