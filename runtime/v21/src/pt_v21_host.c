@@ -2157,6 +2157,142 @@ int pt_v21_conv_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *
 }
 
 
+static int devadd_on(void) {
+  static int on = -1;
+  if (on < 0)
+    on = getenv("PT_V21_DEVADD") ? atoi(getenv("PT_V21_DEVADD")) : 0;
+  return on;
+}
+
+/* Local shape of a device-Add link: the result flows out through at most one LeakyReLU, which the
+ * Add kernel fuses (the same fp32 math the host un_op does). */
+static void dev_add_shape(pt_ctx *c, const pt_node_def *nd, int *ft_out, int *epi_out, float *al_out) {
+  int t = nd->out[0];
+  *ft_out = t;
+  *epi_out = 0;
+  *al_out = 0.0f;
+  if (g_n_cons[t] != 1)
+    return;
+  int cn = g_cons_node[t];
+  if (cn < 0 || c->skip[cn] || pt_ndefs[cn].op != PT_LEAKYRELU || pt_ndefs[cn].in[0] != t)
+    return;
+  *ft_out = pt_ndefs[cn].out[0];
+  *epi_out = 1;
+  *al_out = pt_ndefs[cn].f0;
+}
+
+/* Is this Add link worth running on the device? Its result must reach a conv without ever being
+ * read by a host op: the reader chain is [LeakyReLU] -> conv, or [LeakyReLU] -> another eligible Add
+ * (the residual trees nest, so the chain recurses; depth is bounded because the graph is a DAG). */
+static int dev_add_chain(pt_ctx *c, int node, int depth) {
+  int dbg = getenv("PT_V21_DEVDBG") ? 1 : 0;
+  if (depth > 16 || node < 0 || node >= PT_N_NODE)
+    return 0;
+  const pt_node_def *nd = &pt_ndefs[node];
+  if (nd->op != PT_ADD)
+    return 0;
+  if (g_n_cons[nd->out[0]] != 1) {
+    if (dbg) fprintf(stderr, "CHAIN %d cons(out)=%d\n", node, g_n_cons[nd->out[0]]);
+    return 0;
+  }
+  int ft, epi;
+  float alpha;
+  dev_add_shape(c, nd, &ft, &epi, &alpha);
+  if (g_n_cons[ft] != 1) {
+    if (dbg) fprintf(stderr, "CHAIN %d cons(ft)=%d epi=%d\n", node, g_n_cons[ft], epi);
+    return 0;
+  }
+  int nn = g_cons_node[ft];
+  if (nn < 0 || c->skip[nn]) {
+    if (dbg) fprintf(stderr, "CHAIN %d consumer=%d skip=%d\n", node, nn, nn >= 0 ? c->skip[nn] : -1);
+    return 0;
+  }
+  if (pt_ndefs[nn].op == PT_CONV && pt_ndefs[nn].in[0] == ft)
+    return 1;
+  if (pt_ndefs[nn].op == PT_ADD)
+    return dev_add_chain(c, nn, depth + 1);
+  if (dbg) fprintf(stderr, "CHAIN %d next_op=%d\n", node, (int) pt_ndefs[nn].op);
+  return 0;
+}
+
+/* A chained tensor's host buffer is deliberately stale (its only reader was the next conv, on the
+ * device). If a device-Add link cannot run, the host path becomes its reader, so the device values
+ * must be copied back first -- the chain's stale-buffer discipline is never allowed to leak into a
+ * host read. */
+static void dev_res_sync_host(pt_ctx *c, pt_tv *t) {
+  if (!c->use_cuda || !t->dev_res || !t->p || t->n <= 0)
+    return;
+  pt_v21_dev_sync_host(c, t->p, t->dev_p, t->n);
+  t->dev_res = 0;
+  t->dev_p = NULL;
+}
+
+static int dev_add_link(pt_ctx *c, const pt_node_def *nd, pt_tv *A, pt_tv *B, pt_tv *O) {
+  int dbg = getenv("PT_V21_DEVDBG") ? 1 : 0;
+  int ni = (int) (nd - pt_ndefs);
+  if (!devadd_on() || !c->use_cuda)
+    return 0;
+  if (A->dt != DT_F32 || B->dt != DT_F32 || A->n <= 0 || A->n != B->n) {
+    if (dbg) fprintf(stderr, "DEVDBG %d dt/n A=%d n=%lld B=%d n=%lld\n", ni, A->dt, (long long) A->n, B->dt, (long long) B->n);
+    return 0;
+  }
+  if (!A->alive || !B->alive || (!A->dev_res && !B->dev_res)) {
+    if (dbg) fprintf(stderr, "DEVDBG %d alive a=%d b=%d devres a=%d b=%d\n", ni, A->alive, B->alive, A->dev_res, B->dev_res);
+    return 0;
+  }
+  int ft, epi;
+  float alpha;
+  dev_add_shape(c, nd, &ft, &epi, &alpha);
+  if (!dev_add_chain(c, ni, 0)) {
+    if (dbg) fprintf(stderr, "DEVDBG %d chain=0 cons(out)=%d next_op=%d\n", ni, g_n_cons[ft],
+                     g_cons_node[ft] >= 0 ? (int) pt_ndefs[g_cons_node[ft]].op : -1);
+    return 0;
+  }
+  int64_t n = A->n;
+  const float *ad = A->dev_res ? (const float *) A->dev_p : NULL;
+  const float *bd = B->dev_res ? (const float *) B->dev_p : NULL;
+  if (tv_alloc_nz(c, O, DT_F32, A->d, A->ndim, 0) < 0)   /* the operands share the graph shape */
+    return 0;
+  if (!ad) {
+    ad = pt_v21_dev_upload(c, B->p, n);
+    if (!ad) {
+      dev_res_sync_host(c, A);
+      dev_res_sync_host(c, B);
+      return 0;
+    }
+    bd = B->dev_res ? (const float *) B->dev_p : (const float *) A->dev_p;
+  } else if (!bd) {
+    bd = pt_v21_dev_upload(c, A->p, n);
+    if (!bd) {
+      dev_res_sync_host(c, A);
+      dev_res_sync_host(c, B);
+      return 0;
+    }
+  }
+  float *y = pt_v21_devadd(c, ad, bd, n, epi, alpha);
+  if (!y) {
+    dev_res_sync_host(c, A);
+    dev_res_sync_host(c, B);
+    return 0;   /* arena full: recover the operands and let the host path run */
+  }
+  O->dev_res = 1;
+  O->dev_p = y;   /* its host buffer is stale on purpose: its only reader is the next conv */
+  if (ft != nd->out[0]) {
+    /* the fused LeakyReLU is skipped and its tensor aliases this one, exactly as conv epilogue
+       fusion does: the host buffer is freed once, by the last tensor that owns it */
+    int cn = g_cons_node[nd->out[0]];
+    c->skip[cn] = 1;
+    c->V[ft] = c->V[nd->out[0]];
+    c->V[ft].dev = 2;
+    c->V[ft].alive = 1;
+    c->V[nd->out[0]].dev = 2;
+  }
+  if (getenv("PT_V21_CHAINLOG"))
+    fprintf(stderr, "devadd: out %d fused_epi=%d elems=%lld\n", nd->out[0], epi, (long long) n);
+  return 1;
+}
+
+
 /* phase/tap conv_transpose1d over the packed [s*C4/4][ntap][Cin][4] layout, with the tail flush */
 int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t tin, float *Y,
                  int64_t ldy, int cout, int s, int pad, int K, const float *wp, const float *bias,
@@ -2404,7 +2540,13 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         }
         break;
       }
-      case PT_ADD: r = bin_op(c, PT_ADD, in[0], in[1], out[0]); break;
+      case PT_ADD: {
+        if (dev_add_link(c, nd, in[0], in[1], out[0]))
+          r = 0;   /* done on the device */
+        else
+          r = bin_op(c, PT_ADD, in[0], in[1], out[0]);
+        break;
+      }
       case PT_SUB: r = bin_op(c, PT_SUB, in[0], in[1], out[0]); break;
       case PT_MUL: r = bin_op(c, PT_MUL, in[0], in[1], out[0]); break;
       case PT_DIV: r = bin_op(c, PT_DIV, in[0], in[1], out[0]); break;
@@ -2687,6 +2829,13 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         if (chain_on && unpadded && cout4 == cout && g_n_cons[fin_t] == 1) {
           int cn = g_cons_node[fin_t];
           keep = cn >= 0 && !c->skip[cn] && pt_ndefs[cn].op == PT_CONV && pt_ndefs[cn].in[0] == fin_t;
+          /* A device-Add consumer also qualifies, but ONLY when the link will really run on the
+           * device: the same checks dev_add_link makes, so a kept (host-stale) buffer is never read
+           * by the host path. */
+          if (!keep && devadd_on() && c->use_cuda && cn >= 0 && !c->skip[cn]
+              && pt_ndefs[cn].op == PT_ADD && (pt_ndefs[cn].in[0] == fin_t || pt_ndefs[cn].in[1] == fin_t)
+              && dev_add_chain(c, cn, 0))
+            keep = 1;
         }
         c->conv_in_dev = (unpadded && X->dev_res) ? (const float *) X->dev_p : NULL;
         c->conv_keep = keep;

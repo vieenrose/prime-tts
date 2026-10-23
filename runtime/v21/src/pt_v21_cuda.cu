@@ -72,6 +72,8 @@ static size_t g_wdev_bytes;
 static pthread_mutex_t g_wlock = PTHREAD_MUTEX_INITIALIZER;
 
 static int weights_upload_locked(pt_ctx *c, int verbose);
+static void *arena_alloc(pt_ctx *c, size_t bytes);
+static void *arena_mark(pt_ctx *c);
 
 /* One-time setup of the pooled device slab: offsets + pointers only, no copies. Split out so the
  * parallel upload can run its copies outside g_wlock (the lock must be free while the other stream
@@ -195,6 +197,67 @@ static int weights_upload_locked(pt_ctx *c, int verbose) {
     fprintf(stderr, "pt_v21 cuda: %d container records resident on the GPU (%.1f MiB)\n", n,
             (double) g_wdev_bytes / 1048576.0);
   return 0;
+}
+
+/* --------------------------------------------- device-resident residual Add (PT_V21_DEVADD)
+ * The decoder/iSTFT tail moves ~121 MB per stream through the 22 big Adds: each link copies its two
+ * operands D2H, adds on the host, then copies the result back H2D for the next conv. When the
+ * operands are already on the device (a chained conv output, an earlier device Add) and the result's
+ * only reader is the next conv, all three copies disappear: one kernel pass over the tensor, result
+ * left in the arena. The arithmetic is the same fp32 add (+ the fused LeakyReLU, the same fp32 math
+ * as the host un_op), so results are bit-identical to the host path.
+ * Liveness: allocations join the conv chain's arena mark and are released when the chain ends, so
+ * nothing is freed while a reader can still see it. */
+__global__ void pt_devadd_kernel(const float *__restrict__ a, const float *__restrict__ b,
+                                float *__restrict__ y, long long n, int epi, float alpha) {
+  long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x;
+  long long st = (long long) gridDim.x * blockDim.x;
+  for (; i < n; i += st) {
+    float v = a[i] + b[i];
+    if (epi == 1)
+      v = v >= 0.0f ? v : alpha * v;
+    y[i] = v;
+  }
+}
+
+void pt_v21_dev_sync_host(pt_ctx *c, void *host, const void *dev, int64_t n) {
+  if (n <= 0)
+    return;
+  cudaMemcpyAsync(host, dev, (size_t) n * 4, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream);
+  cudaStreamSynchronize((cudaStream_t) c->g_stream);
+}
+
+float *pt_v21_dev_upload(pt_ctx *c, const void *h, int64_t n) {
+  size_t nb = ((size_t) n * 4 + 63) & ~(size_t) 63;
+  void *mark = arena_mark(c);
+  float *d = (float *) arena_alloc(c, nb);
+  if (!d)
+    return nullptr;
+  if (cudaMemcpyAsync(d, h, nb, cudaMemcpyHostToDevice, (cudaStream_t) c->g_stream) != cudaSuccess) {
+    cudaGetLastError();
+    return nullptr;   /* a failed upload: the caller falls back to the host path */
+  }
+  if (!c->chain_mark)
+    c->chain_mark = mark;
+  return d;
+}
+
+float *pt_v21_devadd(pt_ctx *c, const float *a, const float *b, int64_t n, int epi, float alpha) {
+  size_t nb = ((size_t) n * 4 + 63) & ~(size_t) 63;
+  void *mark = arena_mark(c);
+  float *y = (float *) arena_alloc(c, nb);
+  if (!y)
+    return nullptr;
+  long long blocks = (n + 255) / 256;
+  if (blocks > 4096)
+    blocks = 4096;
+  pt_devadd_kernel<<<(unsigned) blocks, 256, 0, (cudaStream_t) c->g_stream>>>(a, b, y, n, epi, alpha);
+  if (cudaGetLastError() != cudaSuccess)
+    return nullptr;   /* launch failure: fall back to the host path */
+  if (!c->chain_mark)
+    c->chain_mark = mark;
+  c->dev_bytes_stray += nb;   /* device-side traffic counter, same bookkeeping as the conv path */
+  return y;
 }
 
 int pt_v21_conv_pads_in_kernel(pt_ctx *c) {

@@ -194,6 +194,15 @@ int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_
 double pt_v21_cuda_weights_mib(pt_ctx *c);
 /* 1 when the CUDA conv path takes unpadded inputs (the GEMM kernel pads in-kernel) */
 int pt_v21_conv_pads_in_kernel(pt_ctx *c);
+/* Device-resident residual Add (PT_V21_DEVADD): both operands device-resident, result stays in the
+ * arena for the next conv. pt_v21_dev_upload brings one host operand onto the device. Both return
+ * NULL when the arena is full (the caller falls back to the host path). epi=1 fuses the LeakyReLU
+ * with the same fp32 math the host un_op() does. */
+float *pt_v21_devadd(pt_ctx *c, const float *a, const float *b, int64_t n, int epi, float alpha);
+float *pt_v21_dev_upload(pt_ctx *c, const void *h, int64_t n);
+/* Copy a device-resident tensor back to its host buffer (used when a device-Add link falls back to
+ * the host path, so a chain-stale host buffer is never read). */
+void pt_v21_dev_sync_host(pt_ctx *c, void *host, const void *dev, int64_t n);
 int pt_v21_matmul_cpu(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda,
                       const float *B, int64_t ldb, int64_t nn, float *C, int64_t ldc);
 
