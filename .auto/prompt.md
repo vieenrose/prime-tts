@@ -107,7 +107,14 @@ Baseline (this commit): **N=4 wall 9.9 s**, N=1 4.5 s, SNDR 70.08 dB, min free ~
   itself (phase 2). Killed: overlapping the ramp with the upload (the low-clock copy penalty cancels
   the gain). Pattern: at N=4 a serialized shared-work phase costs the wall through the slowest
   stream's start, so splitting it wins even when the work is bandwidth-bound. Serialized startup is
-  now ~150 ms (was ~390).
+  now ~150 ms (was ~390 at the start of phase 2).
+- **Phase 4 (runs 287+): best official draw 2220 (session best 2173).** Kept: adaptive clock ramp
+  (sysfs cur/max gate + 8k maintenance burst, -24 ms pooled over 14 pairs, both boxes). Proves
+  completed: the three startup keeps are generality-tested on all 5 golden cases (T20 -75/7.3%,
+  T40 -141/9.3%, T81 -95/4.2%, T120 -133/4.3%, sid1_T29 -132/10.7%; 29/31 pair wins) and confirmed on
+  the second box pesi (-32 ms, 10/12 pairs). pesi is measurable again with a zero-disk-write tmpfs
+  build. Killed: skip device frees at close (+29 ms: Tegra cudaFree is lazy), fp16 upload (device
+  decode bandwidth cancels the copy saving), blocking sync (+118 ms, validates the yield default).
 - Known bug patterns, do not reintroduce: conv/convT lanes are **Cout channels** (all lanes multiply
   the same input column); the `cout4 != cout` trim copies per batch at stride `cout4*len`, so kernels
   write the padded row layout; bias has `cout` entries (per-lane bound); conv reads the zero-padded

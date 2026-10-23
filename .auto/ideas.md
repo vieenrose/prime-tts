@@ -193,6 +193,20 @@ reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only 
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
 
+## KEPT in phase 4 (run 300): adaptive clock ramp (sysfs cur/max gate)
+Reads the world-readable devfreq sysfs (`cur_freq`, `max_freq`, no root) at prewarm: if the GPU is
+already at max clock, the ramp kernel is cut from 64k to 8k iterations (~3 ms maintenance burst).
+**-25 ms on pesi (8 pairs, 7/8 wins, t=-2.5)** and **-22 ms on picard (6 pairs, t=-1.0)**; pooled 14
+pairs -24 ms, 10/14 wins. Official 2220, all 5 golden cases bit-identical (clocks-only change),
+checks PASS. `PT_V21_WARM_ADAPT=0` = bisection endpoint.
+Why run 90's kill of a shorter ramp does NOT apply: that kill measured 16k unconditionally, which
+fails to ramp the clock when the box is already slow. This gate shortens only when the box is
+measurably NOT slow, and never *skips* the ramp: run 90's real failure mode is the governor dropping
+the clock while the CPU-side record pass runs, so the 8k burst stays as insurance (~3 ms).
+Production value > benchmark value: a server-mode process under continuous load has cur_freq at max and
+pays 3 ms instead of 26 ms per request. Startup chain is now context 85 (ramp overlapped) + upload
+share ~40 -> ~130-150 ms serialized startup, from ~390 at the start of phase 2.
+
 ## pesi is measurable again: build and run in tmpfs (run 298) -- startup keeps confirmed on both boxes
 pesi's disk is 100% full (operator data: vc 1496 MB, b2 587 MB, exp 141 MB; nothing deleted), so
 rsync/build there fails. Workaround that touches NO disk: `mkdir -p /dev/shm/pt && rsync -a runtime/
