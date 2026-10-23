@@ -1444,6 +1444,99 @@ __global__ void pt_convT_kernel_ph(const float *__restrict__ x, int64_t ldx, int
 }
 
 
+/* 128-column version of the GEMM-tiled phase-major conv-transpose: the pt_conv_kernel_ig8 column
+ * tiling applied to the convT phase formulation (blockIdx.z = batch*s + r). Each thread owns 8
+ * consecutive q values of one 4-channel group (32 accumulators) and the block stages 128 q values.
+ * Per output the accumulation walks the kc reductions in the same ascending order as
+ * pt_conv_kernel_ig, so results are bit-identical to that kernel; the win is 2x the columns per
+ * block, i.e. half the index/loop overhead per element. */
+__global__ void __launch_bounds__(256) pt_convT_kernel_ig8(
+    const float *__restrict__ x, int64_t ldx, int cin, int64_t tin, float *__restrict__ y,
+    int64_t ldy, int64_t Lout, int cout, int s, int pad, int ntap, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int64_t q0) {
+  __shared__ float4 Ws[IG_RK][16];
+  __shared__ float4 Xs[IG_RK][32]; /* [r][column quad], 32 quads = 128 columns */
+  const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+  const int nblk = (cout + 3) / 4;
+  const int r = (int) (blockIdx.z % s);
+  const int64_t b = (int64_t) (blockIdx.z / s);
+  const int g = blockIdx.y * 16 + ty;
+  const int64_t qb = q0 + (int64_t) blockIdx.x * 128;
+  const int kc = ntap * cin;
+  const float *xb = x + b * bsx;
+  const float4 *w4 = (const float4 *) wp + (int64_t) r * nblk * kc;
+  int co0 = g * 4;
+  float4 bz = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                          bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                          bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                          bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  float4 a[8];
+#pragma unroll
+  for (int j = 0; j < 8; j++)
+    a[j] = bz;
+  const int lr = tid >> 4, lq = tid & 15;
+  for (int i0 = 0; i0 < kc; i0 += IG_RK) {
+    int i = i0 + lr;
+    int lg = blockIdx.y * 16 + lq;
+    Ws[lr][lq] = (i < kc && lg < nblk) ? w4[(int64_t) lg * kc + i] : make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+    for (int h = 0; h < 2; h++) {
+      int qq = lq + 16 * h; /* column quad 0..31 */
+      float4 xv = make_float4(0.f, 0.f, 0.f, 0.f);
+      if (i < kc) {
+        int t = i / cin, ci = i - t * cin;
+        const float *row = xb + (int64_t) ci * ldx;
+        int64_t qc = qb + qq * 4 - t;
+        if (qc + 0 >= 0 && qc + 0 < tin)
+          xv.x = row[qc + 0];
+        if (qc + 1 >= 0 && qc + 1 < tin)
+          xv.y = row[qc + 1];
+        if (qc + 2 >= 0 && qc + 2 < tin)
+          xv.z = row[qc + 2];
+        if (qc + 3 >= 0 && qc + 3 < tin)
+          xv.w = row[qc + 3];
+      }
+      Xs[lr][qq] = xv;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][ty];
+      float4 v0 = Xs[rr][tx];      /* columns 4*tx .. 4*tx+3 */
+      float4 v1 = Xs[rr][tx + 16]; /* columns 64+4*tx .. */
+      a[0].x += w.x * v0.x; a[0].y += w.y * v0.x; a[0].z += w.z * v0.x; a[0].w += w.w * v0.x;
+      a[1].x += w.x * v0.y; a[1].y += w.y * v0.y; a[1].z += w.z * v0.y; a[1].w += w.w * v0.y;
+      a[2].x += w.x * v0.z; a[2].y += w.y * v0.z; a[2].z += w.z * v0.z; a[2].w += w.w * v0.z;
+      a[3].x += w.x * v0.w; a[3].y += w.y * v0.w; a[3].z += w.z * v0.w; a[3].w += w.w * v0.w;
+      a[4].x += w.x * v1.x; a[4].y += w.y * v1.x; a[4].z += w.z * v1.x; a[4].w += w.w * v1.x;
+      a[5].x += w.x * v1.y; a[5].y += w.y * v1.y; a[5].z += w.z * v1.y; a[5].w += w.w * v1.y;
+      a[6].x += w.x * v1.z; a[6].y += w.y * v1.z; a[6].z += w.z * v1.z; a[6].w += w.w * v1.z;
+      a[7].x += w.x * v1.w; a[7].y += w.y * v1.w; a[7].z += w.z * v1.w; a[7].w += w.w * v1.w;
+    }
+    __syncthreads();
+  }
+  if (g >= nblk)
+    return;
+  float *yb = y + b * bsy;
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    int64_t q = qb + ((j < 4) ? tx * 4 + j : 64 + tx * 4 + (j - 4));
+    int64_t oi = q * s + r - pad;
+    if (oi < 0 || oi >= Lout)
+      continue;
+    float4 acc = a[j];
+    if (co0 + 0 < cout)
+      yb[(int64_t) (co0 + 0) * ldy + oi] = acc.x;
+    if (co0 + 1 < cout)
+      yb[(int64_t) (co0 + 1) * ldy + oi] = acc.y;
+    if (co0 + 2 < cout)
+      yb[(int64_t) (co0 + 2) * ldy + oi] = acc.z;
+    if (co0 + 3 < cout)
+      yb[(int64_t) (co0 + 3) * ldy + oi] = acc.w;
+  }
+}
+
+
 /* GEMM-tiled phase-major conv-transpose: the same tiling as pt_conv_kernel_ig, applied to one
  * phase r (blockIdx.z = batch*s + r), where output q of the phase is sum_t sum_ci
  * W[r][t][ci] x[ci][q - t]. Each thread walks idx = t*cin + ci ascending onto its bias, the chain
@@ -1580,11 +1673,25 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
     if (pad - (s - 1) <= 0) qlo = 0;
     int64_t qhi = (Lout - 1 + pad) / s;          /* inclusive */
     int64_t nq = qhi - qlo + 1;
+    /* 128-column convT tiles: bit-exact vs pt_conv_kernel_ig (same accumulation order per output),
+     * convT 37.1 -> 33.0 ms/stream, N=4 wall -13 ms over 7 clean matched pairs (5/7 wins).
+     * PT_V21_CONVT_IG8=0 is the bisection endpoint (64-column kernel). */
+    static int tig8 = -1;
+    if (tig8 < 0)
+      tig8 = getenv("PT_V21_CONVT_IG8") ? atoi(getenv("PT_V21_CONVT_IG8")) : 1;
+    if (tig8) {
+      dim3 g8t((unsigned) ((nq + 127) / 128), (unsigned) ((cout4 / 4 + 15) / 16),
+               (unsigned) (batch * s));
+      pt_convT_kernel_ig8<<<g8t, 256, 0, (cudaStream_t) c->g_stream>>>(
+          dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
+          (int64_t) cin * ldx, (int64_t) cout4 * Lout, qlo);
+    } else {
     dim3 gig((unsigned) ((nq + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16),
              (unsigned) (batch * s));
     pt_convT_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
         dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
         (int64_t) cin * ldx, (int64_t) cout4 * Lout, qlo);
+    }
   } else if (wsm && ph) {
     /* outputs per phase: at most ceil(Lout/s) + 1 */
     int64_t nq = (Lout + pad) / s + 2;
