@@ -1,5 +1,15 @@
 # Ideas backlog (v2.1 Nano latency)
 
+## Contention-sensitivity map (runs 434-448) -- which regimes the co-tenant CPU cost hits
+Loaded vs quiet official numbers on the primary box (loaded = ~1-2 busy cores from the operator's
+jtop GPU monitors, load 1.0-1.9): N=2 T81 1486/1341 = **+10.8%** (the most sensitive regime: 21%
+serialized startup, little GPU to hide it); T81 N=4 warm band 2234/2092 = +6.8%, official means
+2209/2176 = +1.3% (cold-draw variance masks it); T20 N=4 1020/1002 = +1.8%; T40 1363/1323 = +3.0%;
+T120 2967/2974 = -0.2% (GPU-dominated, immune). The shift scales with the CPU-side share of the
+regime, i.e. startup and host-op time, matching the startup-keep mechanism and the +2.9%/busy-core
+law (run 371). Production guidance: give the TTS process CPU priority at the container/cgroup level
+(in-process affinity is a tie, run 378); the low-concurrency regime is where the co-tenant hurts most.
+
 ## SESSION STATUS (run 413, PHASE 8): converged -- wall fully accounted for; monitoring + deployment evidence complete
 - **Official cluster (primary box, shipped tree):** 31 N=4 T81 draws, mean **2193 ms**, stdev 2.0%,
   SE 7.2, range 2124-2281; warm soak mean 2092 (10 runs, SNDR 70.09 10/10, RAM flat); cold-after-idle
