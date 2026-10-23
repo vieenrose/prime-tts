@@ -13,6 +13,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ARENA="${ARENA_MB:-8}"
 N4="${N4:-4}"
 CASE="${CASE:-tests/golden_v21/T81}"
+# ENVS="VAR=val ..." is prepended (via env) to the N=4 driver command, so a bisection knob can be
+# A/B'd through the OFFICIAL procedure, e.g. ENVS=PT_V21_WARM_ADAPT=0 ./.auto/measure.sh
+ENVS="${ENVS:-}"
 # TMPFS=1 -> build and run in /dev/shm (a box whose root disk is full: pesi). Artifacts (container,
 # goldens) are then read read-only from ~/primetts on disk; nothing is written to the root disk.
 # This keeps the SECOND deployment box measurable by the same script. Default (TMPFS=0) is the
@@ -47,13 +50,13 @@ ssh "$NANO" "test -x $TREE/build/pt_v21_par" || fail "pt_v21_par missing on the 
 # ---- N=4 (primary). Sample free RAM *and* the driver's peak RSS during the run: on the Nano the
 # GPU's allocations count against system RAM, so the process high-water mark is the number that
 # says whether four streams actually fit on the box.
-run4=$(ssh "$NANO" "NANO_ARENA=$ARENA NANO_CASE=$CASEARG NANO_N4=$N4 NANO_TREE=$TREE NANO_CONT=$CONT bash -s" <<'REMOTE'
+run4=$(ssh "$NANO" "NANO_ARENA=$ARENA NANO_CASE=$CASEARG NANO_N4=$N4 NANO_TREE=$TREE NANO_CONT=$CONT NANO_ENVS='$ENVS' bash -s" <<'REMOTE'
 cd "$NANO_TREE"
 NANO_CASE=${NANO_CASE:-~/primetts/tests/golden_v21/T81}
 rm -f /tmp/ar_mem.txt /tmp/ar_freq.txt
 GF=/sys/devices/platform/host1x/57000000.gpu/devfreq/57000000.gpu/cur_freq
 CF=/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq
-PT_V21_ARENA_MB="$NANO_ARENA" ./build/pt_v21_par --container $NANO_CONT --case $NANO_CASE --cuda --parallel "$NANO_N4" > /tmp/ar_out.txt 2>&1 &
+PT_V21_ARENA_MB="$NANO_ARENA" env $NANO_ENVS ./build/pt_v21_par --container $NANO_CONT --case $NANO_CASE --cuda --parallel "$NANO_N4" > /tmp/ar_out.txt 2>&1 &
 pid=$!
 hwm=0
 nsamp=0
