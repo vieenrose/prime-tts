@@ -12,7 +12,12 @@ NANO="${NANO:-picard@100.84.151.116}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 ARENA="${ARENA_MB:-8}"
 N4="${N4:-4}"
-CASE="${CASE:-tests/golden_v21/T81}"
+# CASE accepts a bare golden-case name (T20, T40, T81, T120, sid1_T29) or a full path.
+CASE_IN="${CASE:-T81}"
+case "$CASE_IN" in
+  */*) CASE="$CASE_IN" ;;
+  *)   CASE="tests/golden_v21/$CASE_IN" ;;
+esac
 # ENVS="VAR=val ..." is prepended (via env) to the N=4 driver command, so a bisection knob can be
 # A/B'd through the OFFICIAL procedure, e.g. ENVS=PT_V21_WARM_ADAPT=0 ./.auto/measure.sh
 ENVS="${ENVS:-}"
