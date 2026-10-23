@@ -193,6 +193,17 @@ reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only 
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
 
+## pesi is measurable again: build and run in tmpfs (run 298) -- startup keeps confirmed on both boxes
+pesi's disk is 100% full (operator data: vc 1496 MB, b2 587 MB, exp 141 MB; nothing deleted), so
+rsync/build there fails. Workaround that touches NO disk: `mkdir -p /dev/shm/pt && rsync -a runtime/
+pesi:/dev/shm/pt/runtime/ && cd /dev/shm/pt && make -f runtime/v21/Makefile par nano`, then run with
+`--container ~/primetts/build/v21.ptk --case ~/primetts/tests/golden_v21/<case>` (read-only from disk).
+/tmpfs is 1983 MB; the build costs 8 MB. pesi N=4 headroom is healthy again (min_free 232-260 MB, not
+the 66 MB of run 271); pesi GPU idles at 921 MHz vs picard's 768 MHz.
+RESULT: the three phase-3 startup keeps confirmed on pesi too -- 12 order-alternating pairs,
+2210 (ON) vs 2242 (OFF) = **-32 ms, 10/12 wins, t=-2.5**, SNDR 70.09 in every arm. Smaller than
+picard's -95 ms because pesi's startup is already cheaper (faster CPU/driver, higher idle clock).
+
 ## Phase-4 scaling + control probes (runs 292-294): the final code's shape/N envelope
 Scaling table (T81, picard, final code): N=1 stream ~630 ms, N=2 1375, N=4 ~2230 (best draw 2173),
 N=8 3932. Per-stream wall cost (wall - 225)/N = 575 / 501 / 473 ms: packing improves with N.
