@@ -571,3 +571,22 @@ Session best 2172 ms (run 305, default path).
   everywhere; pesi 3-7% faster on 4/5 cases.
 - **The session is at the floor of this architecture.** Phase-5 cluster: 2284, 2273, 2172, 2242, 2290
   (mean ~2252). Recommended: autoresearch-finalize with the two closure proofs and the soak evidence.
+
+## Phase 5 (runs 316-318): GPU kernel levers closed from three directions
+- **Window-direct conv (PT_V21_WIN)**: implemented, integrated, debugged, and reverted. Bench (identical
+  math, bit-exact vs a padded reference): 39.8 ms on cin=cout=256, K=11, T=904 vs ~45 ms for the ig8
+  kernel on the same node => **parity (+12%, below bar)**; in the runtime the win path cost +50% conv
+  time (944 vs 615 ms). Killed by measurement. Bench artifacts kept: `.auto/bench_fft.cu`,
+  `.auto/stage_test.cu`, `.auto/win_test.cu` (the last two localized the bug: the write index used the
+  output-loop counter as the channel, scattering one thread's 8 time accumulators over 8 channels).
+- **FFT overlap-add conv**: killed by measurement (221 ms = 10x slower than direct at 2.4 GFLOP/s,
+  despite the predicted 2.5x op reduction; 32-bin per-thread state spills).
+- **Winograd F(2,3)**: killed by arithmetic (1-D convs: 8 ops/output vs 5 direct = 1.6x MORE work).
+- **BENCHMARK LESSON (write it down)**: the "ig8 is 2.3x off achievable" reading came from a bench
+  kernel whose grid covered ~2.3x more output slots than the useful outputs (over-coverage = wasted
+  threads = inflated rate). Normalize grid coverage against the useful output count before believing
+  any kernel speed ratio.
+- GPU component status: saturated SMs (run 87), wave tails hidden by cross-stream backfill (run 78),
+  scheduling lockstep costs +390 ms (run 314), data placement costs +261 ms (run 305), algorithm
+  variants at parity or worse (runs 316-317). The kernels are at their local optimum for this model.
+- Phase-5 cluster: 2284, 2273, 2172, 2242, 2290, 2169, 2242(probe), 2191 (mean ~2233).
