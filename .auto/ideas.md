@@ -193,6 +193,17 @@ reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only 
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
 
+## Phase-4 scaling + control probes (runs 292-294): the final code's shape/N envelope
+Scaling table (T81, picard, final code): N=1 stream ~630 ms, N=2 1375, N=4 ~2230 (best draw 2173),
+N=8 3932. Per-stream wall cost (wall - 225)/N = 575 / 501 / 473 ms: packing improves with N.
+Startup-keep transfer by N: N=2 -176 ms (11.3%), N=4 -95 ms (4.2%), N=8 -30 ms (~0.8%) -- biggest
+relative effect at low N, exactly the operator's deployment regime.
+Control probe (run 293): PT_V21_SYNC=1 (blocking) = +118 ms vs the yield default, 6/6 pairs -> the
+defect-isolated default is validated, not accidental.
+Critical-path budget after all keeps: context 85 + upload 139 + inference ~1900 + tail ~45 = 2169 vs
+measured ~2230 -> ~60 ms of packing/variance left. The session is at the architectural floor of the
+current design; the only levers above that floor are the 5 project-scale items.
+
 ## Phase-4 generality proof of the startup keeps (runs 288-289) + fp16-upload arithmetic kill
 Generality table (order-alternating pairs, keeps ON vs all three OFF, N=4, picard):
 - T20: 1027 vs 1102 = **-75 ms (7.3%)**, 5/8 wins, t=-2.1, SNDR 69.70 identical.
