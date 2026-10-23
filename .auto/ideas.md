@@ -1,14 +1,18 @@
 # Ideas backlog (v2.1 Nano latency)
 
-## SESSION STATUS (run 274, PHASE 2 relaunched): converged -- see 'Convergence ledger' at the end
-- Phase 2 (run 273+): baseline re-set to the converged cluster (2314 official draw, cluster mean
-  ~2335). Phase-2 rule: deltas now compare to ~2335, so the confirmability bar is the same ~90 ms
-  single-draw / ~30 ms matched-pair. Phase-2 so far: affinity pinning killed (#274), arena tuning
-  killed (#272), pesi headroom alarm recorded (#271). Remaining untried single-experiment levers:
-  none with positive risk-adjusted EV. Spend loop on anti-overfitting robustness draws (N=8,
-  T20/T40/T120/sid1 at N=4, pesi, CPU path) + keep the 5-item approval list current.
-- Best: **n4_wall 2288 ms** (cluster 2288-2375 over 30+ official draws, mean ~2335, stdev ~1.7%,
-  zero drift, draws independent). Baseline was 9900 ms: **4.3x faster**.
+## SESSION STATUS (run 287, PHASE 4 relaunched): converged -- see 'Convergence ledger' at the end
+- Phase 4 (run 287+): baseline re-set to the startup-de-serialized cluster (official draws 2232, 2247
+  => compare to ~2240). Phase 3 kept three startup de-serialization items (-22 record pass, -50 upload
+  split, -25 ramp prewarm); serialized startup is now ~150 ms (was ~390). Phase-4 targets are the
+  GPU-bound components: packed kernels ~1600 ms, exposed copies ~100 ms, packing gaps ~200 ms.
+  Untried single-experiment levers: none with positive risk-adjusted EV. Spend loop on anti-overfitting
+  robustness draws (N=8, T20/T40/T120/sid1 at N=4, pesi when disk frees, CPU path) + keep the 5-item
+  operator-approval list current.
+- Best: **n4_wall 2232 ms**. Baseline was 9900 ms: **4.4x faster**.
+- Phase 2 (runs 273-281): affinity pinning killed (#274), arena tuning killed (#272), pesi headroom
+  alarm (#271), parallel record pass kept (#278). pesi is offline for measurement (disk 100% full,
+  operator data, nothing deleted).
+- Phase 1 numbers below (2314-2375 cluster) are superseded by the phase-3 keeps: expect ~2240 mean now.
 - Runs 118-125 (no code changes except run 120's 1-word CONVLOG label fix): box-parity
   correction (old pesi speed gap was pre-warmup throttling, boxes are peers now), exact
   residual traffic 60.4 MB/stream (~70 ms net best case, declined on multi-part + race risk),
