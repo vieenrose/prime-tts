@@ -43,6 +43,13 @@
   metric, so they belong in the approval list, not the loop. CPU affinity pinning (killed quiet-box as a
   2 ms tie, run 274) is worth re-testing in the contended regime under operator approval.
 
+- **N=8 soak (run 376):** 3771-3830 (mean 3806, 1.6% spread), SNDR 70.09 x5, MemAvailable flat 3262 MB
+  -> 30x realtime aggregate, i.e. 2x the target concurrency with no leak.
+- **T20 cold/warm (run 375):** 1020 cold / 927 warm (+93 ms, 10.1%) -- the cold penalty is ~100-140 ms
+  absolute on every case, so it is the largest FRACTION on the shortest (startup-dominated) requests.
+- **Cross-toolchain node gate (run 373):** the pesi build (gcc 7.5 + CUDA 10.2) passes the full per-node
+  gate with 0 over gate and per-group worsts IDENTICAL to picard's -- the two toolchains are bit-identical.
+
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
   `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
