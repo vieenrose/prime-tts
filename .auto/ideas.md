@@ -72,6 +72,19 @@ Measured with the ENVS= bisection knob through the OFFICIAL procedure (cold proc
 - Harness now: NANO=, TMPFS=1 (pesi), CASE=, N4=, ARENA_MB=, ENVS= -- all verified green; the default
   path is unchanged (verified by draws 386/389).
 
+## Two-box OFFICIAL case table, phase 8 (runs 360-396, all checks PASS, SNDR identical per case)
+| case | picard (primary) | pesi (TMPFS=1) | pesi gap | startup share |
+|---|---|---|---|---|
+| T20 | 1002 | 1086 | +8.4% | 29% |
+| T40 | 1323 | 1402 | +6.0% | 22% |
+| T81 | 2192 +/- 8 (21 draws) | 2232-2296 | +2.5% | 13% |
+| T120 | 2974 | 2957 | +0.6% | 10% |
+| sid1_T29 | 1242 | 1250 | +0.6% | 23% |
+The box gap scales with the startup share of the wall, confirming GPU-level parity (1 SM, 922 MHz,
+bit-identical kernels on both toolchains) with a CPU/driver-side startup difference. SNDR per case:
+69.70 / 69.93 / 70.09 / 67.90 / 67.45 on both boxes; max|d| identical; per-node gate 0 over gate on
+both toolchains (runs 359/373).
+
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
   `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
