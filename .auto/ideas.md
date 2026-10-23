@@ -9,7 +9,8 @@
 
 ## Contention-sensitivity map (runs 434-448) -- which regimes the co-tenant CPU cost hits
 Loaded vs quiet official numbers on the primary box (loaded = ~1-2 busy cores from the operator's
-jtop GPU monitors, load 1.0-1.9): N=2 T81 1486/1341 = **+10.8%** (the most sensitive regime: 21%
+jtop GPU monitors, load 1.0-1.9): N=1 1200/1262 = **-5%** (single stream is co-tenant-proof: one
+thread on 4 cores); N=2 T81 1486/1341 = **+10.8%** (the most sensitive regime: 21%
 serialized startup, little GPU to hide it); T81 N=4 warm band 2234/2092 = +6.8%, official means
 2209/2176 = +1.3% (cold-draw variance masks it); T20 N=4 1020/1002 = +1.8%; T40 1363/1323 = +3.0%;
 T120 2967/2974 = -0.2% (GPU-dominated, immune). The shift scales with the CPU-side share of the
