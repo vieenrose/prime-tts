@@ -113,6 +113,8 @@ static void tv_free(pt_ctx *c, pt_tv *t) {
     /* the interpreter frees a tensor exactly at its last use, which is exactly when its device
      * buffer may be recycled (the residency sub-arena ignores pointers it does not own) */
     pt_v21_dev_free(c, t->dev_p);
+    if (c->dev_live > 0)
+      c->dev_live--;
     t->dev_res = 0;
     t->dev_p = NULL;
   }
@@ -2204,6 +2206,18 @@ static int devadd_on(void) {
   return on;
 }
 
+/* Bisection cap: PT_V21_DEVADD_LIMIT stops the residency path after k device links per stream, so a
+ * numerics failure can be attributed to the k-th link. Unlimited when unset. */
+static int devadd_budget(pt_ctx *c) {
+  static int cap = -1;
+  if (cap < 0)
+    cap = getenv("PT_V21_DEVADD_LIMIT") ? atoi(getenv("PT_V21_DEVADD_LIMIT")) : 1000000;
+  if (c->devadd_used >= cap)
+    return 0;
+  c->devadd_used++;
+  return 1;
+}
+
 /* Local shape of a device-Add link: the result flows out through at most one LeakyReLU, which the
  * Add kernel fuses (the same fp32 math the host un_op does). */
 static void dev_add_shape(pt_ctx *c, const pt_node_def *nd, int *ft_out, int *epi_out, float *al_out) {
@@ -2288,6 +2302,8 @@ static int dev_add_link(pt_ctx *c, const pt_node_def *nd, pt_tv *A, pt_tv *B, pt
     return 0;
   if (A->dt != DT_F32 || B->dt != DT_F32 || A->n <= 0 || A->n != B->n) {
     if (dbg) fprintf(stderr, "DEVDBG %d dt/n A=%d n=%lld B=%d n=%lld\n", ni, A->dt, (long long) A->n, B->dt, (long long) B->n);
+    dev_res_sync_host(c, A);
+    dev_res_sync_host(c, B);
     return 0;
   }
   if (!A->alive || !B->alive || (!A->dev_res && !B->dev_res)) {
@@ -2297,7 +2313,9 @@ static int dev_add_link(pt_ctx *c, const pt_node_def *nd, pt_tv *A, pt_tv *B, pt
   int ft, epi;
   float alpha;
   dev_add_shape(c, nd, &ft, &epi, &alpha);
-  if (!dev_runnable(c, ni, 0)) {
+  if (!devadd_budget(c) || !dev_runnable(c, ni, 0)) {
+    dev_res_sync_host(c, A);
+    dev_res_sync_host(c, B);
     if (dbg) fprintf(stderr, "DEVDBG %d chain=0 cons(out)=%d next_op=%d\n", ni, g_n_cons[ft],
                      g_cons_node[ft] >= 0 ? (int) pt_ndefs[g_cons_node[ft]].op : -1);
     return 0;
@@ -2307,16 +2325,17 @@ static int dev_add_link(pt_ctx *c, const pt_node_def *nd, pt_tv *A, pt_tv *B, pt
   const float *bd = B->dev_res ? (const float *) B->dev_p : NULL;
   if (tv_alloc_nz(c, O, DT_F32, A->d, A->ndim, 0) < 0)   /* the operands share the graph shape */
     return 0;
+  /* each operand that is not resident is uploaded from its own host copy */
   if (!ad) {
-    ad = pt_v21_dev_upload(c, B->p, n);
+    ad = pt_v21_dev_upload(c, A->p, n);
     if (!ad) {
       dev_res_sync_host(c, A);
       dev_res_sync_host(c, B);
       return 0;
     }
-    bd = B->dev_res ? (const float *) B->dev_p : (const float *) A->dev_p;
-  } else if (!bd) {
-    bd = pt_v21_dev_upload(c, A->p, n);
+  }
+  if (!bd) {
+    bd = pt_v21_dev_upload(c, B->p, n);
     if (!bd) {
       dev_res_sync_host(c, A);
       dev_res_sync_host(c, B);
@@ -2344,6 +2363,7 @@ static int dev_add_link(pt_ctx *c, const pt_node_def *nd, pt_tv *A, pt_tv *B, pt
     return 1;
   }
   O->dev_res = 1;
+  c->dev_live++;
   O->dev_p = y;   /* its host buffer is stale on purpose: its only reader is the next conv */
   if (ft != nd->out[0]) {
     /* the fused LeakyReLU is skipped and its tensor aliases this one, exactly as conv epilogue
@@ -2591,6 +2611,14 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         ;   /* the shared per-node free below is skipped: this node owns nothing it allocated */
       continue;
     }
+    /* Host readers of device-resident tensors must see a valid host copy. The conv keeps its chained
+     * tensor's host copy current (the wrapper always downloads it), and the Add/LeakyReLU device paths
+     * sync their own operands on fallback, so the residency tensors that can be stale here are exactly
+     * the ones this sweep catches. */
+    if (c->dev_live && c->use_cuda)
+      for (int i = 0; i < PT_V21_MAX_IN; i++)
+        if (in[i] && in[i]->dev_res && nd->op != PT_CONV && nd->op != PT_ADD && nd->op != PT_LEAKYRELU)
+          dev_res_sync_host(c, in[i]);
     double tA = c->prof ? pt_v21_now() : 0.0;
     switch (nd->op) {
       case PT_CONST: {
@@ -2654,13 +2682,14 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         /* Device-resident LeakyReLU (PT_V21_DEVADD): the input is a resident conv/Add output and all
          * readers of the result are chainable, so the node is one kernel pass with no copies. */
         if (devadd_on() && c->use_cuda && in[0]->dev_res && in[0]->dt == DT_F32 && in[0]->n > 0 &&
-            dev_runnable(c, idx, 0)) {
+            devadd_budget(c) && dev_runnable(c, idx, 0)) {
           int64_t n = in[0]->n;
           float *dst = (float *) pt_v21_dev_alloc(c, (size_t) n * 4);
           if (dst && tv_alloc_nz(c, out[0], DT_F32, in[0]->d, in[0]->ndim, 0) >= 0 &&
               pt_v21_devleaky_run(c, (const float *) in[0]->dev_p, dst, n, nd->f0) == 0) {
             if (dev_resident(c, nd->out[0], 0)) {
               out[0]->dev_res = 1;
+              c->dev_live++;
               out[0]->dev_p = dst;   /* host buffer stale by design: only device readers remain */
             } else {
               pt_v21_dev_sync_host(c, out[0]->p, dst, n);   /* a host reader ends the chain */

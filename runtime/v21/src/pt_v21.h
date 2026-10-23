@@ -140,6 +140,8 @@ struct pt_ctx {
   const float *conv_in_dev;   /* device-resident conv input (chain), or NULL */
   int conv_keep;              /* 1 = keep this conv's output on the device for the next conv */
   int conv_keep_res;          /* keep it in the residency sub-arena (multi-consumer tensor) */
+  int devadd_used;            /* device links executed, for PT_V21_DEVADD_LIMIT bisection */
+  int dev_live;               /* tensors currently device-resident (host copies stale) */
   float *conv_out_dev;        /* set by the wrapper when the output was kept */
   void *chain_mark;
   void *devres;                 /* device-residency sub-arena state (PT_V21_DEVADD), NULL until first use */           /* arena mark held while a conv chain is in flight */   /* >= 0: conv input is unpadded, kernel pads by this much; -1: padded rows */
