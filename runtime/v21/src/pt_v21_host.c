@@ -616,13 +616,21 @@ static void host_cont_shared_claim(int k, float *p) {
   pthread_mutex_unlock(&g_hlock);
 }
 
+/* Container mapping bounds: an fp32 record that is aliased (PT_V21_ALIAS) points into the read-only
+ * container map, so the release path must not free it (it is not an arena pointer either). */
+static const char *g_map_base;
+static size_t g_map_len;
+
 static void host_cont_shared_put(int k, float *p, int owned) {
   pthread_mutex_lock(&g_hlock);
   if (owned && (size_t) k < g_hcache_n && g_hcache[k].p == p) {
     if (--g_hcache[k].ref <= 0) {
       /* arena-backed payloads stay mapped (the arena is per process, freed at exit); only a
        * fallback malloc'd record is released here */
-      if (!g_harena || (char *) p < g_harena || (char *) p >= g_harena + g_harena_bytes)
+      int in_arena = g_harena && (char *) p >= g_harena && (char *) p < g_harena + g_harena_bytes;
+      int in_map = g_map_base && (const char *) p >= g_map_base &&
+                   (const char *) p < g_map_base + g_map_len;
+      if (!in_arena && !in_map)
         free(p);
       g_hcache[k].p = NULL;
       g_hcache[k].ref = 0;
@@ -801,6 +809,18 @@ static void par_load(pt_ctx *c) {
       break;
     pt_recinfo *ri = &g_recs[i];
     if (ri->k >= 0 && ri->nel > 0) {
+      /* fp32 record aliasing (PT_V21_ALIAS): an fp32 record's payload is byte-identical to the
+       * container image, and the container mapping is read-only, page-cache hot and 64-B aligned, so
+       * materializing it is a pure memcpy of 84 MB with no transformation. Point the ctab at the
+       * mapping instead. numactl-style safety: the parity gate covers the read-only assumption on
+       * all 5 golden cases (a write into a container payload would corrupt every later run in the
+       * same process and show up as a parity failure immediately). */
+      static int alias = -1;
+      if (alias < 0)
+        alias = getenv("PT_V21_ALIAS") ? atoi(getenv("PT_V21_ALIAS")) : 0;
+      if (alias && ri->isz == 4 && ((ri->off & 63) == 0)) {
+        par_claim(ri->k, (float *) ((const char *) c->base + ri->off));
+      } else {
       pthread_mutex_lock(&g_arena_lock);
       float *f = harena_alloc((size_t) (ri->nel * 4 + 64));
       pthread_mutex_unlock(&g_arena_lock);
@@ -811,6 +831,7 @@ static void par_load(pt_ctx *c) {
         par_claim(ri->k, f);
       } else {
         c->n_alloc_fail++;
+      }
       }
     }
     __sync_fetch_and_add(&g_rec_done, 1);
@@ -981,6 +1002,8 @@ pt_ctx *pt_v21_open(const char *container) {
   c->maplen = (size_t) len;
   int fd = open(container, O_RDONLY);
   c->map = mmap(0, c->maplen, PROT_READ, MAP_PRIVATE, fd, 0);
+  g_map_base = (const char *) c->map;
+  g_map_len = (size_t) c->maplen;
   close(fd);
   if (c->map == MAP_FAILED) {
     fprintf(stderr, "pt_v21: mmap %s failed\n", container);
