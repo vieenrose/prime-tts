@@ -85,6 +85,12 @@ bit-identical kernels on both toolchains) with a CPU/driver-side startup differe
 69.70 / 69.93 / 70.09 / 67.90 / 67.45 on both boxes; max|d| identical; per-node gate 0 over gate on
 both toolchains (runs 359/373).
 
+## End-to-end speedup measured in ONE box state (run 403) -- the report's headline
+Rebuilt the session-start tree (20f4a82, run-1 baseline) in a Nano temp dir with today's container and
+goldens and measured both trees the same day: **10390 ms (old) vs 2193 ms (shipped) = 4.74x** (4.92x
+vs the warm band). Quality: SNDR 70.08 -> 70.09 dB, max|d| 2.247e-04 -> 2.258e-04 -- 35 optimizations
+moved the output by 5% of the existing deviation, far inside the 60 dB gate.
+
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
   `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
