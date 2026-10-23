@@ -33,6 +33,11 @@
 
 Ordered by expected payoff per unit of risk. Measure the phase split before and after each.
 
+- **Phase-2/3 REVIVAL NOTE (runs 278, 283): the "below the ~90 ms bar" kill argument is too
+  conservative.** Two startup items killed on that argument were kept at -22 and -50 ms using
+  order-alternating matched pairs (15-35 pairs for -22 ms, 4 pairs for -50 ms). Anything 20-50 ms
+  is testable; anything touching shared startup work is worth a matched-pair probe.
+
 - **CUDA Graphs per stream.** ~180 launches (124 conv + 5 convT + 50 matmul) each with per-call
   copy/launch/sync; capture the per-request launch sequence once per shape bucket and replay with
   `cudaGraphLaunch`. Needs stable device addresses (the arena gives that) and a fixed shape bucket
@@ -183,6 +188,34 @@ hidden STRUCTURALLY, not just empirically (this upgrades run 70's observation to
 reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only synchronized phases
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
+
+## Killed by measurement #11 (run 284, phase 3): overlapping the clock ramp with the upload
+Ran the 26 ms ramp kernel on its own non-blocking stream during the parallel weight upload (SM work
+vs copy-engine work): 4 order-alternating pairs, 2293 vs 2297 = tie (t=-0.2). Mechanism: overlapping
+only wins if the copies keep their ramped rate, but the ramped-rate share of the upload shrinks by
+exactly the overlap window -- the low-clock copy penalty cancels the saved ramp time. Ramping in
+front of the upload is the arithmetically correct order. Code reverted (simpler = better).
+Startup is now: context 85 ms (one-time, can't overlap: run 76's 5th-thread prewarm loses cores, and
+moving it in front of the record pass is arithmetically neutral for the slowest stream) + ramp 26 ms
+(enabler of fast copies) + record pass ~21 ms/stream share + upload ~40 ms/stream share.
+
+## KEPT in phase 3 (run 283): parallel device weight upload
+`PT_V21_UP_PAR=1` (default; `=0` = serialized bisection): all 4 stream threads claim container
+records with an atomic counter and copy their claims into the shared weight slab with
+`cudaMemcpyAsync` on their own CUDA streams, sync their own stream, then wait at a barrier. Setup
+(slab + offsets) stays under g_wlock; the copies run outside it (they must, or the barrier deadlocks).
+Result **-50 ms** (4 order-alternating pairs: 2292 vs 2342, 4/4 wins, t=-4.2); official draw **2260
+= new session best**; n1 638 neutral; SNDR 70.09, checks PASS; max|d| identical on all 5 cases.
+The copy engine does NOT get faster (upload work stays ~165 ms, ~0.8 GB/s): the win is the critical
+path -- stream 0 no longer queues behind a single copier (pays ~1/4 of the upload), the last-arriving
+stream pays ~0 (it finds the copies done, 19 ms reported).
+MECHANISM PATTERN (now twice proved, runs 278 + 283): at N=4, a serialized shared-work phase costs
+the wall through the slowest stream's start, so splitting it wins even when the work is bandwidth-
+bound and the total time is unchanged. Startup is now ~285 ms of the ~2260 ms wall (was ~390).
+Corollary: the remaining serialized items are the one-time CUDA context creation (~85 ms, cudaFree(0),
+unavoidable) and the 26 ms clock warmup. NEXT CANDIDATE: run the warmup kernel on a temporary stream
+so it overlaps the uploads (SM work vs copy-engine work do not contend): overlapped cost ~134 ms vs
+sequential 26+138 = 164, i.e. ~-30 ms, since copies issued during the ramp are partly at low clock.
 
 ## KEPT in phase 2 (run 278): parallel container record pass
 `PT_V21_OPEN_PAR=1` (now the default, PT_V21_OPEN_PAR=0 = serialized bisection endpoint) splits the
