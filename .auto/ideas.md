@@ -1,5 +1,36 @@
 # Ideas backlog (v2.1 Nano latency)
 
+## SESSION STATUS (run 343, PHASE 6): converged -- one keep, and every lever class closed with a mechanism
+- **KEPT in phase 6: convT ig8** (run 325). convT 37.1 -> 33.4 ms/stream, -13 ms on picard (7 pairs),
+  **-20 ms on pesi** (5 pairs), bit-exact on all 5 cases, full per-node gate 0 over gate (run 327).
+  Official best draw 2155.
+- **Phase-6 official cluster:** 2203 (baseline), 2155, 2194, 2318, 2228 -> mean 2219.6, stdev ~1.5%.
+  Warm paired cluster on the same binary: 2056-2102, mean ~2075. The gap is the cold-process clock ramp
+  plus first-touch cost (run 312's finding, unchanged).
+- **Startup is CLOSED WITH A MECHANISM** (runs 330-332): serialized startup is 287 ms (open 71 +
+  cuda_init 216, dominated by the 139-170 ms weight upload at 0.8 GB/s), and the upload runs at
+  384-768 MHz because the governor needs ~600 ms of SM load to reach 921 MHz. Three attacks, all
+  measured, all neutral-or-worse: SM-hold during the copy (+45 ms, 6/6), zero-copy mapped slab
+  (+15 ms, 5/6 -- the copies were paying for the ramp), coalescing/pinned sources (no lever).
+  **Any change that removes GPU work from the startup window makes the wall worse.**
+- **Kernels are CLOSED from six directions:** ig8 (kept) beats ig 64-column (+73 ms), ig16 256-column
+  (+10-31% in bench), register-window direct (+640 ms at N=4 despite being 1.9x faster in isolation),
+  FFT (10x slower), Winograd (1.6x more ops for 1-D), wsm/plain fallbacks. convT and conv both run at
+  21-35 GFMA/s against the box's ~97 GFMA/s pure-FMA peak, and the gap is the shared-memory/occupancy
+  regime, not a bug.
+- **Sync mode closed from all three directions:** yield (default) < spin (+89 ms, run 343) < blocking
+  (+118 ms, run 293).
+- **Re-verified on today's box state (run 339):** the three-item startup bundle is still worth
+  -64 ms (5/5 warm pairs, 2068 vs 2132); the parallel upload alone is now a tie, so its original
+  -50 ms was box-state dependent (it stays: harmless, and the bundle mechanism is what pays).
+- **Evidence complete:** 5 golden cases x 2 boxes parity identical (SNDR 70.09/69.70/69.93/67.90/67.45,
+  max|d| 2.258e-04/1.072e-04/3.813e-04/4.887e-04/1.726e-04); per-node gate 0 over gate; N=1/2/8
+  scaling; CPU-path cross-check (T20 6777 ms, T81 27016 ms, parity identical); picard soak 2056-2102
+  (10 runs, RAM flat 1455 MB); pesi soak 2099-2143 (8 runs, RAM 292-295 MB); integrity manifest clean.
+- **Recommendation: autoresearch-finalize.** Remaining approval list: CUDA graphs (~1-2 ms launch
+  overhead, below bar) and server-mode weights (out of benchmark scope). Everything else is closed
+  with data.
+
 ## SESSION STATUS (run 287, PHASE 4 relaunched): converged -- see 'Convergence ledger' at the end
 - Phase 4 (run 287+): baseline re-set to the startup-de-serialized cluster (official draws 2232, 2247
   => compare to ~2240). Phase 3 kept three startup de-serialization items (-22 record pass, -50 upload
