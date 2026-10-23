@@ -93,14 +93,21 @@ never touch `gemini-live-credential.txt`.
 
 ## What's Been Tried
 Baseline (this commit): **N=4 wall 9.9 s**, N=1 4.5 s, SNDR 70.08 dB, min free ~1714 MB.
-- **Phase 1 (runs 1-272): 9.9 s -> ~2.34 s (4.3x)**, quality proved. Full record in `.auto/ideas.md`
+- **Phase 1 (runs 1-272): 9.9 s -> ~2.34 s (4.3x)**, quality proved (best 2288 then). Full record in `.auto/ideas.md`
   (convergence ledger + kill sections). Key pieces: resident shared weights, per-stream arena and
   streams, NEON elementwise ops, fp16 LUT decode, GEMM-tiled conv (ig8), chained conv on device,
   activation tables, GPU clock warmup kernel (the single biggest win, -148 ms cold).
-- **Phase 2 (runs 273+, baseline re-set to 2314): parallel container record pass KEPT (-22 ms, 35
-  matched pairs, bit-exact on all 5 golden cases, `PT_V21_OPEN_PAR=0` = serialized bisection).**
-  Killed in phase 2: CPU affinity pinning (2 ms tie), arena-size tuning (no wall gain, +4 MB free).
-  pesi is offline for measurement: its disk is 100% full (operator data, nothing deleted).
+- **Phase 2 (runs 273-281): parallel container record pass KEPT (-22 ms, 35 matched pairs, bit-exact,
+  `PT_V21_OPEN_PAR=0` = serialized bisection).** Killed: CPU affinity pinning (2 ms tie), arena-size
+  tuning (no gain, +4 MB free). pesi is offline for measurement: its disk is 100% full (operator data,
+  nothing deleted).
+- **Phase 3 (runs 282+): startup de-serialization, three keeps -- official best now 2232 ms.**
+  (a) parallel device weight upload (-50 ms, 4/4 pairs, `PT_V21_UP_PAR`); (b) prewarm context +
+  clock ramp before the record pass (-25 ms, 17 pairs, `PT_V21_WARM_PRE`); (c) the record pass
+  itself (phase 2). Killed: overlapping the ramp with the upload (the low-clock copy penalty cancels
+  the gain). Pattern: at N=4 a serialized shared-work phase costs the wall through the slowest
+  stream's start, so splitting it wins even when the work is bandwidth-bound. Serialized startup is
+  now ~150 ms (was ~390).
 - Known bug patterns, do not reintroduce: conv/convT lanes are **Cout channels** (all lanes multiply
   the same input column); the `cout4 != cout` trim copies per batch at stride `cout4*len`, so kernels
   write the padded row layout; bias has `cout` entries (per-lane bound); conv reads the zero-padded

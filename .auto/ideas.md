@@ -189,6 +189,22 @@ reconciles run 63's -32 ms with run 68's ~0 as ~zero true effect + noise). Only 
 expose host/driver work: open, upload, close/SNDR tail. The remaining wall tail (~330 ms) is
 serialized startup + SNDR/close + residual packing gaps (~250 ms ceiling stands, project-scale).
 
+## KEPT in phase 3 (run 285): prewarm context + clock ramp before the record pass
+`pt_v21_cuda_prewarm()` (called by both drivers before `pt_v21_open` when `--cuda`): set the sync
+flags, `cudaFree(0)` (context, ~85 ms) and launch the clock-ramp kernel on its own non-blocking
+stream; `pt_v21_cuda_init` joins the ramp after the upload. The ramp (GPU SM work) now overlaps the
+container record pass (CPU/memory work). `PT_V21_WARM_PRE=0` = serialized bisection endpoint.
+**-25 ms** (17 order-alternating pairs: 2213 vs 2238, 11/17 wins, t~-2.0), official **2232 = new
+session best**, all 5 cases bit-identical (the ramp changes clocks only), checks PASS.
+Run 76's 5-thread prewarm died on core contention; this revives it correctly because the ramp adds
+NO thread (GPU work launched by the thread that already exists). Startup chain now: context 85 ms
+(overlapped by ramp 26 + record-pass share 21) -> upload share ~40 ms; serialized startup ~150 ms,
+down from ~390 at the start of phase 2.
+BUILD HAZARD (run 285): a python cleanup regex silently swallowed the ramp implementation and the
+build failed with "referenced but not defined", so the first measurements were taken on a STALE
+binary. After scripted edits to sources, always rebuild and confirm the build succeeded. -22 (278),
+-50 (283), -25 (285): de-serializing shared startup work is the session's highest-yield lever.
+
 ## Killed by measurement #11 (run 284, phase 3): overlapping the clock ramp with the upload
 Ran the 26 ms ramp kernel on its own non-blocking stream during the parallel weight upload (SM work
 vs copy-engine work): 4 order-alternating pairs, 2293 vs 2297 = tie (t=-0.2). Mechanism: overlapping
