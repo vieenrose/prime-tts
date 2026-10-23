@@ -1,5 +1,32 @@
 # Ideas backlog (v2.1 Nano latency)
 
+## SESSION STATUS (run 363, PHASE 8): converged -- 1 keep-class item reverted, and the wall budget is now fully accounted for
+- **Wall budget, phase-8 form (1 SM)**: T81 official 2124-2242 = startup 287 + 4 streams x ~440 ms of
+  SM-serialized work + tail ~45. Decomposition of one stream's `kernel+sync` 397.7 ms (N=1):
+  kernels ~250 (at the isolated clone rates) + wrapper ~43 (copies 21.6, zero-pad scratch memcpy ~10,
+  179 launch/sync ~12) + mid-run clock ~75 (the 384-921 MHz governor ramp: 69% of a run is at max)
+  + wave tails ~21 (8.5% MAC-weighted, run 78) = ~389. **Every term has a measured closure.**
+- **Phase-8 case table, primary box (official cold draws, all checks PASS):** T20 1002, T40 1323,
+  T81 2124-2242 (warm 2095-2137), T120 2974, sid1_T29 1242. Second box (pesi, tmpfs build):
+  1074 / 1324 / 2187 / 2914 / 1168. SNDR identical on both boxes (69.70 / 69.93 / 70.09 / 67.90 /
+  67.45), max|d| identical, and the full per-node gate on the phase-8 tree: 4010 nodes, 0 over gate,
+  M2 PASS (run 359). Startup share of the wall: 29% (T20), 22% (T40), 23% (sid1_T29), 13% (T81),
+  10% (T120) -- the deployment (server mode) amortizes it entirely.
+- **N-scaling on the phase-8 binary:** N=1 1272 (stream 760), N=2 1310, N=4 2124, N=8 3827;
+  per-stream marginal cost 511 -> 459 -> 443 ms (backfill improves with N on the single SM).
+  Soak: 10 runs, cold 2184 then 2095-2137 (mean 2111), SNDR 70.09 10/10, RAM flat.
+- **Inference-phase clock measured (run 358):** 69% of an N=4 run is at the 921.6 MHz max; the rest is
+  the startup ramp + ~210 ms of 691 MHz podgov dips. Governor knobs are root-owned (no sudo), max_freq
+  already reads the max, so there is no clock lever left in inference. Idle clock is 76.8 MHz.
+- **Phase-8 kills:** fp32 container aliasing (bit-exact, +10.6 ms, RSS flat -- reverted, run 346/347);
+  fp16 weight upload (arithmetic: 32.5 ms startup vs +10-20 ms in-kernel converts, run 349);
+  occupancy/carveout (zero of 11 kernels changes blocks/SM, run 348); kernel chunk-width/register-
+  pipelining variants (+9% on one shape, -2..-26% elsewhere, run 355); the LDS-ceiling theory of
+  run 352 falsified by its own ablation (the tile is staging/barrier bound).
+- **Recommendation: autoresearch-finalize.** The wall is fully explained by measured components, each
+  with its own closure; the approval list is unchanged (batch-4 lockstep +390 ms measured, CUDA graphs
+  ~1-2 ms launch, server-mode weights out of benchmark scope, Winograd 1.6x more ops).
+
 ## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
 - **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
   `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
