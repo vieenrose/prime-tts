@@ -1,5 +1,38 @@
 # Ideas backlog (v2.1 Nano latency)
 
+## SESSION STATUS (run 348, PHASE 8): converged -- and the hardware model is corrected (1 SM)
+- **THE BOX HAS ONE SM** (run 348, `cudaGetDeviceProperties` on BOTH Nanos: Tegra X1,
+  `multiProcessorCount = 1`, 2048 threads/SM, 64 KB shared/SM, 65536 regs/SM, 922 MHz, 256 KB L2).
+  Every earlier budget note said "4 streams share 2 SMs" (runs 79/87/328) -- that is wrong, and the
+  fix makes the arithmetic cleaner: fp32 peak = 1 x 128 lanes x 2 x 0.922 GHz = **235.9 GFLOP/s
+  (118 GFMA/s)**, and the measured pure-FMA peak (`.auto/peak_test.cu`, 97.6 GFMA/s) is 83% of THAT.
+  Wall model, 1-SM form: **startup ~287 + 4 streams' GPU work serialized on one SM (4 x ~405 = ~1620)
+  + tail ~45 ~= 1950-2200** (measured 2056-2318). Consequences: there is no second SM and no SM idle
+  to reclaim (runs 79/87 confirmed at higher resolution), so ONLY fewer GPU cycles (kernels, closed
+  from 7 directions) or less GPU work (device residency, closed at +261 ms) can move the wall.
+  Both deployment boxes are GPU-peers, so pesi's 3-7% edge is CPU/driver/memory, not GPU width.
+- **Occupancy is NOT the kernels' limiter** (run 348, `.auto/occ_probe.cu`, occupancy API on the real
+  kernels): ig8 = 64 regs + 12288 B static shared -> 4 blocks/SM = 1024/2048 threads (50%), and it is
+  **register**-limited, not shared-limited. `cudaFuncAttributePreferredSharedMemoryCarveout = 100`
+  changes blocks/SM for **zero of 11 kernels** (4->4 conv_ig8, 4->4 convT_ig8, 5->5 conv_ig/matmul_t,
+  1->1 wsm at 48 KB dynamic), so the untested direction of run 81's PreferL1 kill is closed with data.
+  Two measurements bracket occupancy as irrelevant: conv_ig runs at 62.5% and is **+73 ms worse**
+  (run 337); PreferL1 halved occupancy for only **+1.5%** (run 81). Register reduction (5 blocks needs
+  <= 51 regs) is conv_ig's territory = measured-bad, and `-maxrregcount 48/56` already lost.
+- **Record pass / container aliasing is closed from 4 directions** (runs 326, 331, 332, 346): pointing
+  the shared ctab at the read-only container mapping (PT_V21_ALIAS) is bit-exact on all 5 cases but
+  +10.6 ms at N=4 (5 warm pairs) and peak RSS is FLAT (276 -> 275 MiB: MAP_PRIVATE file pages are
+  page-cache pages, so the 84 MB moves bucket instead of shrinking). Reverted (run 347).
+  Side product kept as knowledge: `pt_v21_close` munmaps the container map while other streams' aliased
+  payloads point into it -- any future in-place container aliasing needs a live-context refcount.
+- **Phase-8 official draws so far:** 2128 (baseline), 2193 (post-revert, checks PASS) -- in the phase-7
+  cluster (mean 2219.6, warm ~2075). Kernel/scheduling axis closed from 7 directions (column tiling,
+  window-direct, templated-K, FFT, Winograd, block count, occupancy/carveout).
+- **Recommendation stands: autoresearch-finalize.** Approval list is unchanged (batch-4 lockstep, CUDA
+  graphs, server-mode weights, Winograd -- all closed by measurement/arithmetic except the last two
+  out-of-scope/below-bar ones), plus the new finalize-report content: the 1-SM correction, the
+  occupancy table, and the record-pass closure.
+
 ## SESSION STATUS (run 343, PHASE 6): converged -- one keep, and every lever class closed with a mechanism
 - **KEPT in phase 6: convT ig8** (run 325). convT 37.1 -> 33.4 ms/stream, -13 ms on picard (7 pairs),
   **-20 ms on pesi** (5 pairs), bit-exact on all 5 cases, full per-node gate 0 over gate (run 327).
