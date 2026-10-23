@@ -55,6 +55,8 @@ static void *job_run(void *arg) {
   pt_job *j = (pt_job *) arg;
   static const char *fn[] = {"x", "tone", "lang", "x_lengths", "sid", "noise_scale", "length_scale"};
   pt_v21_trace(-1);
+  if (j->use_cuda)
+    pt_v21_cuda_prewarm();   /* context + clock ramp in flight while this thread opens the container */
   pt_ctx *c = pt_v21_open(j->container);
   if (!c) {
     j->rc = 2;

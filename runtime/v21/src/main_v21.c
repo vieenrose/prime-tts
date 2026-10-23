@@ -52,6 +52,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
     else if (!strcmp(argv[i], "--cuda")) use_cuda = 1;
   }
+  if (use_cuda)
+    pt_v21_cuda_prewarm();   /* context + clock ramp overlap the container record pass */
   pt_ctx *c = pt_v21_open(container);
   if (!c) return 2;
   if (use_cuda && pt_v21_cuda_init(c, 1)) {

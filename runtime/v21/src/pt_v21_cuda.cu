@@ -307,6 +307,103 @@ static double gpu_warm_once(void) {
   return cost;
 }
 
+static int g_prewarm;
+static void gpu_warm_launch(void);
+static double gpu_warm_finish(void);
+
+/* The clock ramp: nvhost_podgov idles the GPU at 76.8 MHz and ramps only on sustained SM load, so a
+ * fixed ALU kernel is what reaches full clock without root (run 75: upload 226 -> 138 ms, matched N=4
+ * -148 ms). Launched on its own non-blocking stream so it can overlap the CPU-side container record
+ * pass; gpu_warm_finish joins it before any inference can start. */
+static cudaStream_t g_warm_stream;
+static int *g_warm_sink;
+static double g_warm_t0;
+static double g_warm_cost = -1.0;
+
+static void gpu_warm_launch(void) {
+  static int ticket;
+  pthread_mutex_lock(&g_warm_lock);
+  if (ticket) {
+    pthread_mutex_unlock(&g_warm_lock);
+    return;
+  }
+  ticket = 1;
+  pthread_mutex_unlock(&g_warm_lock);
+  const char *e = getenv("PT_V21_WARM");
+  int iters = e ? atoi(e) : 64000;
+  if (iters <= 0)
+    return;
+  if (cudaMalloc((void **) &g_warm_sink, 256 * sizeof(int)) != cudaSuccess) {
+    cudaGetLastError();
+    g_warm_sink = NULL;
+    return;
+  }
+  cudaMemset(g_warm_sink, 0, 256 * sizeof(int));
+  if (cudaStreamCreateWithFlags(&g_warm_stream, cudaStreamNonBlocking)) {
+    g_warm_stream = NULL;
+    cudaFree(g_warm_sink);
+    g_warm_sink = NULL;
+    return;
+  }
+  g_warm_t0 = gpu_now();
+  pt_warmup_kernel<<<32, 256, 0, g_warm_stream>>>(g_warm_sink, iters);
+}
+
+static double gpu_warm_finish(void) {
+  double cost = 0.0;
+  pthread_mutex_lock(&g_warm_lock);
+  if (g_warm_stream) {
+    if (cudaStreamSynchronize(g_warm_stream) != cudaSuccess)
+      cudaGetLastError();
+    cost = gpu_now() - g_warm_t0;
+    cudaStreamDestroy(g_warm_stream);
+    g_warm_stream = NULL;
+    if (g_warm_sink) {
+      cudaFree(g_warm_sink);
+      g_warm_sink = NULL;
+    }
+    g_warm_cost = cost;
+  } else {
+    cost = g_warm_cost >= 0.0 ? g_warm_cost : 0.0;
+  }
+  pthread_mutex_unlock(&g_warm_lock);
+  return cost;
+}
+
+int pt_v21_cuda_prewarm(void) {
+  static int ticket;
+  pthread_mutex_lock(&g_warm_lock);
+  if (ticket) {
+    pthread_mutex_unlock(&g_warm_lock);
+    return 0;
+  }
+  ticket = 1;
+  pthread_mutex_unlock(&g_warm_lock);
+  const char *e = getenv("PT_V21_WARM_PRE");
+  if (e && !atoi(e))
+    return 0;   /* serialized bisection endpoint: cuda_init does the ramp in its own time */
+  /* The context must exist before the ramp kernel can run, and creating it is the first serialized
+   * item of every process (~85 ms). The ramp kernel is pure SM work; the container record pass that
+   * the caller runs next is pure CPU/memory work, so launching the ramp here lets both proceed at
+   * once, and the weight copies that follow are still issued after the ramp completes (at the
+   * ramped clock, where H2D is 0.8 not 0.46 GB/s). This is not a thread: the ramp costs the CPU
+   * nothing, so no core is taken from the 4 streams -- which is what killed the 5-thread prewarm. */
+  {
+    const char *s = getenv("PT_V21_SYNC");
+    int mode = s ? atoi(s) : 2;
+    if (mode == 1) cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
+    else if (mode == 2) cudaSetDeviceFlags(cudaDeviceScheduleYield);
+    cudaGetLastError();
+  }
+  if (cudaFree(0) != cudaSuccess) {
+    cudaGetLastError();
+    return 0;
+  }
+  gpu_warm_launch();
+  g_prewarm = 1;
+  return 0;
+}
+
 int pt_v21_cuda_init(pt_ctx *c, int verbose) {
   if (verbose)
     fprintf(stderr, "pt_v21 cuda: device 0 (sm_53)\n");
@@ -322,6 +419,10 @@ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
   }
   PTCHK(cudaFree(0)); /* force context creation */
   double tw0 = gpu_now();
+  if (!g_prewarm) {
+    gpu_warm_launch();
+    gpu_warm_finish();   /* serialized ramp (prewarm off): the ramped clock must front the copies */
+  }
   double twarm = gpu_warm_once();
   if (verbose || getenv("PT_V21_WARMLOG"))
     fprintf(stderr, "pt_v21 cuda: clock warmup %.1f ms\n", twarm);
@@ -339,8 +440,9 @@ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
   {
     double tu0 = gpu_now();
     int ur = weights_upload(c, verbose);
+    double twarm = gpu_warm_finish();   /* ramp in flight since prewarm: join before inference */
     if (verbose || getenv("PT_V21_WARMLOG"))
-      fprintf(stderr, "pt_v21 cuda: weight upload %.1f ms\n", gpu_now() - tu0);
+      fprintf(stderr, "pt_v21 cuda: weight upload %.1f ms (ramp %.1f ms)\n", gpu_now() - tu0, twarm);
     if (ur)
       return -1;
   }

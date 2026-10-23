@@ -177,6 +177,10 @@ int pt_v21_checkpoints(pt_ctx *c, const char *dir, const int *tensor_ids, int n_
 
 /* CUDA layer (pt_v21_cuda.cu); host build provides the same symbols in pt_v21_host.c. */
 int pt_v21_cuda_init(pt_ctx *c, int verbose);
+/* Start the device context and the GPU clock ramp *before* the container record pass, so the ramp
+ * (GPU work) overlaps the pass (CPU work). The ramp is joined inside pt_v21_cuda_init.
+ * PT_V21_WARM_PRE=0 restores the serialized order. */
+int pt_v21_cuda_prewarm(void);
 void pt_v21_cuda_shutdown(pt_ctx *c);
 /* conv1d over the packed layout: Y[cout][n] = b + sum_k sum_ci Wp[blk][k][ci][co%4] X[ci][t+k*dil]
  * X already points at the column output column 0's first tap reads (shifted by -pad). */
