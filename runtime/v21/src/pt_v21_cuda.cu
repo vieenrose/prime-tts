@@ -1471,6 +1471,118 @@ __global__ void __launch_bounds__(256, 2) pt_conv_kernel_ig88p(
   }
 }
 
+/* 8-channel x 8-column conv-transpose tile with prefetch (the ig88p structure in the phase
+ * formulation of pt_convT_kernel_ig8): blockIdx.z = batch*s + r, output q of phase r is
+ * sum_t sum_ci W[r][t][ci] x[ci][q - t] written at oi = q*s + r - pad. Every output accumulates
+ * i = t*cin + ci ascending onto its bias -> bit-identical to pt_convT_kernel_ig8. 128 channels x
+ * 128 q columns per block; dispatched when the channel groups fill 32-group block rows and the
+ * magic division (cmag = ceil(2^32/cin)) is exact (ntap*cin < 2^16). */
+__global__ void __launch_bounds__(256, 2) pt_convT_kernel_ig88p(
+    const float *__restrict__ x, int64_t ldx, int cin, int64_t tin, float *__restrict__ y,
+    int64_t ldy, int64_t Lout, int cout, int s, int pad, int ntap, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int64_t q0, unsigned cmag) {
+  __shared__ float4 Ws[IG_RK][32];
+  __shared__ float4 Xs[IG_RK][32];
+  const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+  const int nblk = (cout + 3) / 4;
+  const int r = (int) (blockIdx.z % s);
+  const int b = (int) (blockIdx.z / s);
+  const int qb = (int) q0 + (int) blockIdx.x * 128;
+  const int kc = ntap * cin;
+  const float4 *w4 = (const float4 *) wp + (int64_t) r * nblk * kc;
+  const int gq0 = blockIdx.y * 32 + 2 * ty;
+  float4 a0[8], a1[8];
+  {
+    int c0 = gq0 * 4;
+    float4 b0 = make_float4(bias && c0 + 0 < cout ? bias[c0 + 0] : 0.f,
+                            bias && c0 + 1 < cout ? bias[c0 + 1] : 0.f,
+                            bias && c0 + 2 < cout ? bias[c0 + 2] : 0.f,
+                            bias && c0 + 3 < cout ? bias[c0 + 3] : 0.f);
+    float4 b1 = make_float4(bias && c0 + 4 < cout ? bias[c0 + 4] : 0.f,
+                            bias && c0 + 5 < cout ? bias[c0 + 5] : 0.f,
+                            bias && c0 + 6 < cout ? bias[c0 + 6] : 0.f,
+                            bias && c0 + 7 < cout ? bias[c0 + 7] : 0.f);
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+      a0[j] = b0;
+      a1[j] = b1;
+    }
+  }
+  const int lr = tid >> 4, lq = tid & 15;
+  float4 wv0, wv1;
+  float xv[8];
+  auto fetch = [&](int i0) {
+    int i = i0 + lr;
+    int g0 = blockIdx.y * 32 + lq, g1 = g0 + 16;
+    wv0 = (i < kc && g0 < nblk) ? w4[g0 * kc + i] : make_float4(0.f, 0.f, 0.f, 0.f);
+    wv1 = (i < kc && g1 < nblk) ? w4[g1 * kc + i] : make_float4(0.f, 0.f, 0.f, 0.f);
+    const float *row = x;
+    int qs = 0, ok = i < kc;
+    if (ok) {
+      int t = (int) __umulhi((unsigned) i, cmag), ci = i - t * cin;
+      row = x + (b * (int) bsx + ci * (int) ldx);
+      qs = qb - t;
+    }
+    if (ok && qs >= 0 && qs + 127 < (int) tin) {
+      const float *p = row + qs + lq;
+#pragma unroll
+      for (int m = 0; m < 8; m++)
+        xv[m] = p[16 * m];
+    } else {
+#pragma unroll
+      for (int m = 0; m < 8; m++) {
+        int qc = qs + lq + 16 * m;
+        xv[m] = (ok && qc >= 0 && qc < (int) tin) ? row[qc] : 0.f;
+      }
+    }
+  };
+  fetch(0);
+  for (int i0 = 0; i0 < kc; i0 += IG_RK) {
+    Ws[lr][lq] = wv0;
+    Ws[lr][lq + 16] = wv1;
+    float *xr = (float *) &Xs[lr][0];
+#pragma unroll
+    for (int m = 0; m < 8; m++)
+      xr[lq + 16 * m] = xv[m];
+    __syncthreads();
+    if (i0 + IG_RK < kc)
+      fetch(i0 + IG_RK);
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][2 * ty];
+      float4 u = Ws[rr][2 * ty + 1];
+      float4 v0 = Xs[rr][tx];
+      float4 v1 = Xs[rr][tx + 16];
+      float vv[8] = {v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w};
+#pragma unroll
+      for (int j = 0; j < 8; j++) {
+        a0[j].x += w.x * vv[j]; a0[j].y += w.y * vv[j]; a0[j].z += w.z * vv[j]; a0[j].w += w.w * vv[j];
+        a1[j].x += u.x * vv[j]; a1[j].y += u.y * vv[j]; a1[j].z += u.z * vv[j]; a1[j].w += u.w * vv[j];
+      }
+    }
+    __syncthreads();
+  }
+  float *yb = y + (int64_t) b * bsy;
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    int co0 = (gq0 + h) * 4;
+    if (gq0 + h >= nblk)
+      continue;
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+      int64_t q = qb + (j < 4 ? tx * 4 + j : 64 + tx * 4 + (j - 4));
+      int64_t oi = q * s + r - pad;
+      if (oi < 0 || oi >= Lout)
+        continue;
+      float4 v = h ? a1[j] : a0[j];
+      if (co0 + 0 < cout) yb[(int64_t) (co0 + 0) * ldy + oi] = v.x;
+      if (co0 + 1 < cout) yb[(int64_t) (co0 + 1) * ldy + oi] = v.y;
+      if (co0 + 2 < cout) yb[(int64_t) (co0 + 2) * ldy + oi] = v.z;
+      if (co0 + 3 < cout) yb[(int64_t) (co0 + 3) * ldy + oi] = v.w;
+    }
+  }
+}
+
 /* ---------------------------------------------------------------- hand-assembled kernels
  * PT_V21_SASS=1 runs the conv ig8 tile from runtime/v21/sass/conv_ig8.masm, assembled by masm.py
  * into a cubin at build time and loaded here through the driver API (one module for the process,
@@ -2222,7 +2334,21 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
     static int tig8 = -1;
     if (tig8 < 0)
       tig8 = getenv("PT_V21_CONVT_IG8") ? atoi(getenv("PT_V21_CONVT_IG8")) : 1;
-    if (tig8) {
+    /* PT_V21_CONVT88=1: the 8x8 prefetch tile when the channel groups fill 32-group rows and the
+     * magic division is exact; 0 = the ig8 path below (bisection endpoint) */
+    static int t88 = -1;
+    if (t88 < 0)
+      t88 = getenv("PT_V21_CONVT88") ? atoi(getenv("PT_V21_CONVT88")) : 1;
+    int tng = cout4 / 4;
+    if (t88 && tig8 && tng % 32 == 0 && cin > 1 && (int64_t) ntap * cin < 65536 &&
+        (int64_t) batch * cin * ldx < 0x7fffffff && tin + 128 < 0x7fffffff) {
+      unsigned tmag = (unsigned) ((0x100000000ULL + (unsigned long long) cin - 1) /
+                                  (unsigned long long) cin);
+      dim3 g88((unsigned) ((nq + 127) / 128), (unsigned) (tng / 32), (unsigned) (batch * s));
+      pt_convT_kernel_ig88p<<<g88, 256, 0, (cudaStream_t) c->g_stream>>>(
+          dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
+          (int64_t) cin * ldx, (int64_t) cout4 * Lout, qlo, tmag);
+    } else if (tig8) {
       dim3 g8t((unsigned) ((nq + 127) / 128), (unsigned) ((cout4 / 4 + 15) / 16),
                (unsigned) (batch * s));
       /* PT_V21_CONVT_COAL=0: the old quad X staging (bisection endpoint) */

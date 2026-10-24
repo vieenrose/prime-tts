@@ -3024,6 +3024,9 @@ int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
         int64_t Lout = (Tin - 1) * s - 2 * pad + K;
         int64_t d[3] = {N, cout, Lout};
         if (tv_alloc_nz(c, out[0], DT_F32, d, 3, 0) < 0) return -1;
+        if (getenv("PT_V21_CONVLOG"))
+          fprintf(stderr, "convT node %d T=%lld N=%lld cin=%d cout=%d K=%d s=%d pad=%d Lout=%lld\n",
+                  idx, (long long) Tin, (long long) N, cin, cout, K, s, pad, (long long) Lout);
         double t0 = pt_v21_now();
         if (cout4 == cout) {
           pt_v21_convT(c, (const float *) X->p, Tin, cin, Tin, (float *) out[0]->p, Lout, cout, s,
