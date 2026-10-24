@@ -961,3 +961,26 @@ Same mechanism, keep count now 1 (upper-most allowed cpu, e.g. cpu3). Verified o
 1784-2387), checks PASS. Expected profile: T81 ~6.9x realtime aggregate (RTF ~0.58); T20 at/over the
 real-time line (RTF 0.96-1.02). PT_V21_CPUS=all / "2,3" restore more cores. Committed directly
 (operator deployment decision, not a loop keep — the metric-worsening default would be auto-reverted).
+
+## PHASE 9 PLAN (operator-approved): 1-core regime review
+At the 1-core default, host work (~1000 ms aggregate) shares one core and ~430 ms is exposed (T81 N=4
+~2090 vs ~1660 on 4 cores). Host-side items closed as "hidden" on 4 cores must be re-tested.
+Tier 1 (bit-exact, cheap): (1) sync mode yield/blocking/spin 8+ pairs -- 3-pair probe: blocking 2185
+vs yield 2233 mean, mixed pairs = tie, but the 4-core +118 penalty is gone; (2) fp32 record-pass aliasing
+re-test (84 MB memcpy is serial again); (3) -mcpu=cortex-a57.
+Tier 2: host-op bundle (PAD reflect fast path, Add->LeakyReLU fold, conv zero-pad memcpy), conv-epilogue fusion.
+Tier 3 (needs approval): single-thread cooperative scheduler over 4 interpreters; server mode.
+Noise at 1 core is bimodal (1784-2387): need 8+ alternating pairs for <50 ms effects.
+
+## PHASE 9 Tier 1 results (1-core default, T81 N=4, 8 order-alternating pairs each, .auto/ab1.sh): ALL THREE KILLED
+- Sync mode: blocking (PT_V21_SYNC=1) vs yield: +45 ms, 1/8 wins (the 1 win = cold first draw). Yield stays.
+  The 3-pair "tie" probe was noise. Sync mode is now closed on BOTH 4 cores and 1 core.
+- fp32 record aliasing (one process-lifetime PROT_READ map, 297/336 records in place, alignment +
+  tail-padding guarded, never freed): bit-exact, RSS flat; -19 mean but driven by the cold pair1
+  (-226); pairs 2-8 +10, 1/7 wins = TIE. Killed twice now (4-core +10.6, 1-core tie). Mechanism:
+  page faults move from anon arena pages to file pages; startup is not where 1-core exposure lives.
+- -mcpu=cortex-a57 (host .c files): bit-exact, +30 ms, 2/8 wins. Killed.
+METHOD: the first draw of each A/B batch runs ~200 ms cold -> ab1.sh now discards one warmup draw.
+Arms of the form "@<binary> ENV=.." run alternate binaries.
+CONCLUSION: the ~430 ms of 1-core exposure is host-op time DURING inference, not startup and not
+codegen. Next: Tier 2 (host-op bundle, epilogue fusion) or Tier 3 (cooperative scheduler).
