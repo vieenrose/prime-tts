@@ -1,5 +1,20 @@
 # Ideas backlog (v2.1 Nano latency)
 
+## KEPT (run 1574, PHASE 8): coalesced X staging in the ig8 conv -- the kernel axis was NOT closed
+`PT_V21_IG8_COAL=1` (default; `=0` = old quad staging). Thread lq stages columns lq, lq+16, ..., lq+112
+(contiguous 64 B per half-warp per load) instead of 4 consecutive columns via 4 scalar loads 16 B apart.
+sm_53 does not cache plain global loads in L1, so the old pattern fetched every 32 B L2 sector for 2
+useful floats. Same values in the same Xs slots -> bit-exact on all 5 cases (identical max|d|/SNDR).
+64 regs / 0 spills needs `__launch_bounds__(256,4)` + 32-bit column math (an int64 draft hit 66 regs =
+3 blocks/SM). Results: picard T81 N=4 -162 ms (6/6 pairs), official 1996 (below all 551 prior phase-8
+draws, 2122-2323); N=1 stream ~640 -> ~595; CONV 424 -> 388 ms/stream. Other cases (N=4, 2 pairs each,
+8/8 wins): T20 -39 (warm pair), T40 -79, T120 -236, sid1_T29 -70. pesi T81 -179 ms (4/4 pairs).
+LESSON: the "closed from 8 directions" list varied tile shape, timing, cache config and occupancy but
+never the per-instruction global ACCESS PATTERN. Audit every staging load for sector efficiency.
+NEXT: (1) same column-per-thread staging in pt_convT_kernel_ig8 (same Xs quad pattern); (2) the Ws
+weight load `w4[lg*kc + r]` puts lanes kc float4s apart (16 B useful per 32 B sector) -- a [r][g]
+weight layout at upload time (or a transposed staging) would coalesce it; (3) ig/wsm/matmul_t staging.
+
 - **Keep taxonomy: CPU-side vs GPU-side (runs 417, 442, 454).** The startup bundle (-77 quiet
   official / -64 quiet warm) compresses to -45 ms pooled over 10 pairs at ~2 busy cores: splitting
   serialized startup work needs free cores. The convT ig8 keep (-13 picard / -20 pesi warm, -70
