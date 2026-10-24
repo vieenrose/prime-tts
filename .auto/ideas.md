@@ -910,3 +910,54 @@ Session best 2172 ms (run 305, default path).
   before the clock ramps), `.auto/h2d_test*.cu` (upload-rate table), `.auto/zcopy_test.cu`.
   These are standalone (never linked into the runtime).
 - Phase-6 cluster (official draws): 2203 (baseline), 2155 (convT ig8). Warm-pair cluster ~2065-2090.
+
+## 2-core cap A/B (deployment diagnostic, post-1774, no code change): realtime holds on 2 of 4 cores
+Operator question: if PrimeTTS may only use 2 of the Nano's 4 A57 cores, does N=4 stay real-time?
+Measured on picard (quiet box, load 0.6) with `taskset -c 0,1` on the par driver, alternating arms,
+SNDR identical in every arm (70.09 T81 / 69.70 T20 — scheduling cannot change numerics):
+- T81 N=4: FREE 1639-1680 (mean ~1658, 7/7 draws) vs 2-CORE 1665-1852 (mean ~1773, bimodal:
+  two draws at FREE level, three at +185): penalty ~+7% mean. RTF 0.46-0.51, throughput 7.8-8.7x
+  realtime — REAL-TIME HELD with ~2x margin.
+- T20 N=4: FREE warm 735-748 vs 2-CORE 805-827 (mean 819): penalty ~+78 ms (+10.5%).
+  RTF 0.88 — under the line with ~100 ms (~11%) margin on a QUIET box.
+Mechanism: the wall is GPU-serialized (4 x ~298 ms kernel+copy on the 1 SM); host work (~250
+ms/stream) partially de-hides on 2 cores but stays off the critical path for T81. T20's thinner
+margin = startup + higher host share. CAVEAT: these are quiet-box draws; a co-tenant ON the same
+2 pinned cores stacks the run-371 contention law (+2.9%/busy core) on top — T20's 11% margin can
+vanish. Deployment guidance: give TTS a dedicated 2-core cgroup and keep the LLM server on the
+other 2 (in-process affinity is a tie, run 274; do it at the cgroup level).
+
+## 2-core cap is now the DEFAULT (operator-directed, post-1776): main_v21_par.c self-caps to 2 of 4 cores
+Implementation: `apply_cpu_cap()` in main_v21_par.c runs first in main() — sched_getaffinity gives the
+allowed set, the cap keeps the UPPER half (cpu0 stays with IRQs/system; measured faster than 0-1, 3/3
+pairs: 1790-1814 vs 1833-1990). Children (stream threads + CUDA driver threads) inherit the mask.
+PT_V21_CPUS=all disables; PT_V21_CPUS="2,3" or "2-3" pins an explicit set (intersected with allowed).
+Default rule: ceil(nproc/2) of the allowed cpus, so a pre-existing 2-core cgroup is a no-op (never
+cuts below what's allowed... keeps at least the cap count of allowed cpus).
+Measured (official binary, checks PASS, SNDR 70.09 / 69.70 unchanged, N=1 stream 531 unchanged):
+- quiet box: CAP mean ~1773 (1665-1852, bimodal) vs FREE ~1658 -> ~+7% T81; T20 805-827 vs warm 735-748 -> +10.5%, RTF 0.88.
+- loaded box (load 1.2-1.5): CAP 1854 mean vs ALL 1709 (pair2 inverted; box noise) -> ~+9%.
+This is an operator deployment decision (co-tenant CPU headroom), NOT a metric keep: the official
+n4_wall under the shipped default is ~1800-2100 (vs 1783 4-core cluster mean). Committed directly,
+not through log_experiment (which would auto-revert a latency-worsening change).
+
+## 1-core A/B (post-default, operator question): T81 holds, T20 does not
+Same procedure as the 2-core A/B but PT_V21_CPUS=2 (single core, in-process cap) vs =2,3, alternating
+pairs, box load drifted 1.4 -> 0.67 mid-run (high-variance window, several load-spike draws):
+- T81 N=4: 1core 1784-2387 (mean ~2093, bimodal) vs 2core ~1825-2146 (mean ~1927; the 2136/2146
+  draws coincide with the load spike). 1core -> RTF ~0.58, ~6.9x realtime aggregate — REAL-TIME
+  HELD at one core for T81-class speech, ~1.7x margin. Mechanism: the wall is GPU-serialized
+  (~1192 ms on the SM); one core exposes ~500-600 ms of the ~1000 ms aggregate host work.
+- T20 N=4: 1core 799-951 (mean ~894) vs 2core 785-790 clean pairs -> ~+13%. RTF 0.96-1.02 — AT/OVER
+  the real-time line, zero margin for co-tenant noise. Startup's parallel record pass also
+  serializes on one core.
+Verdict: 1 core is NOT a safe deployment point for 4 parallel requests; 2 cores is the floor for
+the full case range (T20 margin ~11% quiet). SNDR identical in every arm (scheduling cannot change
+numerics).
+
+## Default moved to ONE core (operator-directed, follows the 1-core A/B): cap = 1 in apply_cpu_cap
+Same mechanism, keep count now 1 (upper-most allowed cpu, e.g. cpu3). Verified on the Nano: cap line
+"1 of 4 cpus [3]", SNDR 70.09, N=1 stream 532 (unchanged), official draw 2374 (in the 1-core band
+1784-2387), checks PASS. Expected profile: T81 ~6.9x realtime aggregate (RTF ~0.58); T20 at/over the
+real-time line (RTF 0.96-1.02). PT_V21_CPUS=all / "2,3" restore more cores. Committed directly
+(operator deployment decision, not a loop keep — the metric-worsening default would be auto-reverted).
