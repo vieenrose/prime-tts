@@ -151,6 +151,8 @@ def parse_operand(op, opcode):
         raise ValueError('memory operand %r' % op)
     if o.startswith('SR_') or o in ('SRZ',):
         return ('S', o, flags)
+    if re.match(r'^CC\.[A-Z]+$', o):
+        return ('K', o, flags)
     m = re.match(r'^SB([0-5])$', o)
     if m:
         return ('SB', int(m.group(1)), flags)
@@ -242,6 +244,8 @@ def cand_encoders(kind, slot):
         out.append(('B24rel', 0xffffff << 20, None))   # needs the address: handled specially
     elif kind == 'S':
         out.append(('S8@20', 0xff << 20, None))       # name -> code learned per corpus
+    elif kind == 'K':
+        out.append(('K5@0', 0x1f, None))              # condition-code test, learned per corpus
     elif kind == 'SB':
         for p in [26, 20, 23, 29]:
             out.append(('SB@%d' % p, 7 << p, (lambda p: lambda v: (v & 7) << p)(p)))
@@ -273,6 +277,8 @@ class Model:
                 for k, v, f in ops:
                     if k == 'S':
                         self.sregs[v] = (word >> 20) & 0xff
+                    elif k == 'K':
+                        self.sregs[v] = word & 0x1f
             nslots = len(ex[0][1])
             chosen = []
             # bits 16-19 are the guard predicate for most forms (PT = 7 when unguarded); a few
@@ -326,6 +332,8 @@ class Model:
             return bits(v - (addr + 8), 24) << 20
         if name == 'S8@20':
             return (self.sregs[v] & 0xff) << 20 if v in self.sregs else None
+        if name == 'K5@0':
+            return (self.sregs[v] & 0x1f) if v in self.sregs else None
         return fn(v)
 
     # -- encoding
