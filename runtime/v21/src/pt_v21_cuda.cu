@@ -992,7 +992,13 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig(
  * columns, 256 threads. 32 FMAs per (one weight + two input) 128-bit shared loads, versus 16 per
  * two in pt_conv_kernel_ig. Same per-output chain (r = k*cin + ci ascending onto the bias), same
  * in-kernel padding: bit-identical. */
-__global__ void __launch_bounds__(256) pt_conv_kernel_ig8(
+/* COAL: stage X column-per-thread (thread lq loads columns lq, lq+16, ..., lq+112) instead of
+ * four consecutive columns per thread. sm_53 does not cache plain global loads in L1, so the
+ * quad pattern (16 threads 16 B apart per load instruction) fetches each 32 B L2 sector for two
+ * useful floats; column-per-thread is a contiguous 64 B per half-warp. Same values land in the
+ * same Xs slots (column c is float c of the row), so the result is bit-identical. */
+template <int COAL>
+__global__ void __launch_bounds__(256, 4) pt_conv_kernel_ig8(
     const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
     float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
     const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
@@ -1020,6 +1026,27 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_ig8(
     int r = r0 + lr;
     int lg = blockIdx.y * 16 + lq;
     Ws[lr][lq] = (r < kc && lg < nblk) ? w4[(int64_t) lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    if (COAL) {
+      /* 32-bit column math (row lengths are far below 2^31): keeps the kernel at 64 registers */
+      float *xr = (float *) &Xs[lr][0];
+      const float *row = xb;
+      int s0 = 0, nt = 0, lim = 0;
+      if (r < kc) {
+        int k = r / cin, ci = r - k * cin;
+        row = xb + (int64_t) ci * ldx;
+        s0 = (int) t0 * stride + k * dil - (pad_in < 0 ? 0 : (int) pad_in);
+        nt = (int) (Tout - t0);   /* valid columns left in this tile */
+        lim = pad_in < 0 ? 0x7fffffff : (int) ldx;
+      }
+#pragma unroll
+      for (int m = 0; m < 8; m++) {
+        int cc = lq + 16 * m;
+        int s = s0 + cc * stride;
+        float v = 0.f;
+        if (cc < nt && s >= 0 && s < lim) v = row[s];
+        xr[cc] = v;
+      }
+    } else
 #pragma unroll
     for (int h = 0; h < 2; h++) {
       int qq = lq + 16 * h;   /* column quad 0..31 */
@@ -1178,9 +1205,16 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     if (ig8_min == -2) ig8_min = getenv("PT_V21_IG8_MINT") ? atol(getenv("PT_V21_IG8_MINT")) : 0;
     if (ig8_min >= 0 && Tout >= ig8_min) {
       dim3 g8((unsigned) ((Tout + 127) / 128), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
-      pt_conv_kernel_ig8<<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
-          dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-          (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
+      static int coal = -1;
+      if (coal < 0) coal = getenv("PT_V21_IG8_COAL") ? atoi(getenv("PT_V21_IG8_COAL")) : 1;
+      if (coal)
+        pt_conv_kernel_ig8<1><<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
+            dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+            (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
+      else
+        pt_conv_kernel_ig8<0><<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
+            dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+            (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
     } else {
     dim3 gig((unsigned) ((Tout + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
     pt_conv_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
