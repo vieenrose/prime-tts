@@ -1248,6 +1248,110 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_igt(
   }
 }
 
+/* Register-prefetch variant of the stride-1 ig8 tile: chunk i+1's staging loads (8 X floats + 1
+ * W float4 per thread) are issued right after chunk i's barrier and stay in registers while chunk
+ * i's 512 FFMAs run, so global-load latency overlaps compute inside the block instead of only
+ * across blocks. Same values into the same shared slots, same FFMA order -> bit-identical to
+ * pt_conv_kernel_ig8<3>. The ~12 extra live registers need __launch_bounds__(256, 3) (3 blocks/SM
+ * instead of 4); dispatched under the same conditions as ig8<3> (stride 1, cmag != 0). */
+__global__ void __launch_bounds__(256, 3) pt_conv_kernel_ig8p(
+    const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
+    float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
+    float ea1, int64_t pad_in, unsigned cmag) {
+  __shared__ float4 Ws[IG_RK][16];
+  __shared__ float4 Xs[IG_RK][32];
+  const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+  const int nblk = (cout + 3) / 4;
+  const int g = blockIdx.y * 16 + ty;
+  const int64_t t0 = (int64_t) blockIdx.x * 128;
+  const int kc = K * cin;
+  const float4 *w4 = (const float4 *) wp;
+  int co0 = g * 4;
+  float4 bz = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                          bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                          bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                          bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  float4 a[8];
+#pragma unroll
+  for (int j = 0; j < 8; j++) a[j] = bz;
+  const int lr = tid >> 4, lq = tid & 15;
+  const int lg = blockIdx.y * 16 + lq;
+  float4 wv;
+  float xv[8];
+  auto fetch = [&](int r0) {
+    int r = r0 + lr;
+    wv = (r < kc && lg < nblk) ? w4[lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    const float *row = x;
+    const int nt = (int) (Tout - t0);
+    const int lim = pad_in < 0 ? 0x7fffffff : (int) ldx;
+    int s0 = 0, ok = r < kc;
+    if (ok) {
+      int k = (int) __umulhi((unsigned) r, cmag), ci = r - k * cin;
+      row = x + ((int) blockIdx.z * (int) bsx + ci * (int) ldx);
+      s0 = (int) t0 + k * dil - (pad_in < 0 ? 0 : (int) pad_in);
+    }
+    if (ok && nt >= 128 && s0 >= 0 && s0 + 127 < lim) {
+      const float *p = row + s0 + lq;
+#pragma unroll
+      for (int m = 0; m < 8; m++)
+        xv[m] = p[16 * m];
+    } else {
+#pragma unroll
+      for (int m = 0; m < 8; m++) {
+        int cc = lq + 16 * m, sx = s0 + cc;
+        xv[m] = (ok && cc < nt && sx >= 0 && sx < lim) ? row[sx] : 0.f;
+      }
+    }
+  };
+  fetch(0);
+  for (int r0 = 0; r0 < kc; r0 += IG_RK) {
+    Ws[lr][lq] = wv;
+    float *xr = (float *) &Xs[lr][0];
+#pragma unroll
+    for (int m = 0; m < 8; m++)
+      xr[lq + 16 * m] = xv[m];
+    __syncthreads();
+    if (r0 + IG_RK < kc)
+      fetch(r0 + IG_RK);
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][ty];
+      float4 v0 = Xs[rr][tx];
+      float4 v1 = Xs[rr][tx + 16];
+      a[0].x += w.x * v0.x; a[0].y += w.y * v0.x; a[0].z += w.z * v0.x; a[0].w += w.w * v0.x;
+      a[1].x += w.x * v0.y; a[1].y += w.y * v0.y; a[1].z += w.z * v0.y; a[1].w += w.w * v0.y;
+      a[2].x += w.x * v0.z; a[2].y += w.y * v0.z; a[2].z += w.z * v0.z; a[2].w += w.w * v0.z;
+      a[3].x += w.x * v0.w; a[3].y += w.y * v0.w; a[3].z += w.z * v0.w; a[3].w += w.w * v0.w;
+      a[4].x += w.x * v1.x; a[4].y += w.y * v1.x; a[4].z += w.z * v1.x; a[4].w += w.w * v1.x;
+      a[5].x += w.x * v1.y; a[5].y += w.y * v1.y; a[5].z += w.z * v1.y; a[5].w += w.w * v1.y;
+      a[6].x += w.x * v1.z; a[6].y += w.y * v1.z; a[6].z += w.z * v1.z; a[6].w += w.w * v1.z;
+      a[7].x += w.x * v1.w; a[7].y += w.y * v1.w; a[7].z += w.z * v1.w; a[7].w += w.w * v1.w;
+    }
+    __syncthreads();
+  }
+  if (g >= nblk)
+    return;
+  float *yb = y + (int64_t) blockIdx.z * bsy;
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    int64_t t = t0 + (j < 4 ? tx * 4 + j : 64 + tx * 4 + (j - 4));
+    if (t >= Tout)
+      continue;
+    float4 v = a[j];
+    if (epi0 || epi1) {
+      v.x = pt_epi_dev(pt_epi_dev(v.x, epi0, ea0), epi1, ea1);
+      v.y = pt_epi_dev(pt_epi_dev(v.y, epi0, ea0), epi1, ea1);
+      v.z = pt_epi_dev(pt_epi_dev(v.z, epi0, ea0), epi1, ea1);
+      v.w = pt_epi_dev(pt_epi_dev(v.w, epi0, ea0), epi1, ea1);
+    }
+    if (co0 + 0 < cout) yb[(int64_t) (co0 + 0) * ldy + t] = v.x;
+    if (co0 + 1 < cout) yb[(int64_t) (co0 + 1) * ldy + t] = v.y;
+    if (co0 + 2 < cout) yb[(int64_t) (co0 + 2) * ldy + t] = v.z;
+    if (co0 + 3 < cout) yb[(int64_t) (co0 + 3) * ldy + t] = v.w;
+  }
+}
+
 /* ---------------------------------------------------------------- hand-assembled kernels
  * PT_V21_SASS=1 runs the conv ig8 tile from runtime/v21/sass/conv_ig8.masm, assembled by masm.py
  * into a cubin at build time and loaded here through the driver API (one module for the process,
@@ -1306,7 +1410,14 @@ static void launch_conv_ig8(pt_ctx *c, dim3 g, const float *x, int64_t ldx, int 
   /* PT_V21_IG8_S1=0: no stride-1 specialization (bisection endpoint) */
   static int s1 = -1;
   if (s1 < 0) s1 = getenv("PT_V21_IG8_S1") ? atoi(getenv("PT_V21_IG8_S1")) : 1;
-  if (s1 && stride == 1 && cmag && (int64_t) g.z * bsx < 0x7fffffff)
+  /* PT_V21_IG8_PF=0: no register prefetch (the ig8<3> tile, bisection endpoint) */
+  static int pf = -1;
+  if (pf < 0) pf = getenv("PT_V21_IG8_PF") ? atoi(getenv("PT_V21_IG8_PF")) : 1;
+  if (pf && s1 && stride == 1 && cmag && (int64_t) g.z * bsx < 0x7fffffff)
+    pt_conv_kernel_ig8p<<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
+        x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
+        pad_in, cmag);
+  else if (s1 && stride == 1 && cmag && (int64_t) g.z * bsx < 0x7fffffff)
     pt_conv_kernel_ig8<3><<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
         x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
         pad_in, cmag);
