@@ -984,3 +984,25 @@ METHOD: the first draw of each A/B batch runs ~200 ms cold -> ab1.sh now discard
 Arms of the form "@<binary> ENV=.." run alternate binaries.
 CONCLUSION: the ~430 ms of 1-core exposure is host-op time DURING inference, not startup and not
 codegen. Next: Tier 2 (host-op bundle, epilogue fusion) or Tier 3 (cooperative scheduler).
+
+## KEPT (phase 9, Tier 2 replaced): adaptive sleep-polled GPU wait -- the 1-core exposure WAS the wait
+DIAGNOSIS: `time` on a 1-core T81 N=4 run: yield wait = user 1.32 s + SYS 1.14 s on a 2.46 s wall
+(core 100% busy); blocking = user 1.0 + sys 0.52 (core ~67% busy, but slow interrupt wakeups, +45 ms).
+~0.9 s of the single core went to waiting threads (sched_yield churn + driver polling), not graph ops.
+The PAD reflect fast path already existed (Tier 2 item 1 was stale).
+FIX: pt_wait() before each inference-time pageable D2H (those block inside the driver until the kernel
+is done) at 4 sites: poll cudaStreamQuery; nanosleep(PT_V21_WAIT_US=100) while ANOTHER stream is
+inside pt_v21_run and not waiting (it could use the core), else sched_yield-poll (nobody to give the
+core to: a sleep would be pure wake latency). Per-thread timer slack 1 ns (PR_SET_TIMERSLACK).
+Active count = streams inside pt_v21_run (pt_v21_cuda_active hook); NOT cuda_init/shutdown --
+pt_v21_cuda_shutdown is never called (CUDA teardown is process exit).
+RESULTS (8/6/4-pair order-alternating, ab1.sh, bit-exact SNDR 70.09):
+- 1-core T81 N=4: sleep-only -194 (8/8); adaptive vs old -155 (6/6); adaptive vs sleep-only tie (+6).
+- interval plateau 50-200 us; 25 us +35 worse.
+- N=1: sleep-only +43 (0/6) [+28 with slack fix] -> adaptive 0 (3/6) = fixed.
+- 4-core T81 N=4: -113 (4/4) (sleep-only -107 6/6) -- the yield wait was costing 4-core runs too.
+- 1-core T20 -34 (3/4), T120 -244 (2/2).
+- Official 1-core draw 2136 (prev 2374), n1 534, checks PASS.
+Knobs: PT_V21_WAIT_US=0 = old driver wait (bisection), PT_V21_WAIT_ADAPT=0 = always sleep, PT_V21_SLACK0.
+LESSON: measure CPU accounting (user/sys via `time`) before optimizing host work in a core-capped
+regime; the per-op wall profile hides wait-loop CPU entirely.

@@ -3,7 +3,7 @@
 A="$1"; B="$2"; NP="${3:-8}"; CASE="${4:-T81}"; BIN="${BIN:-./build/pt_v21_par}"
 # an arm of the form "@<binary> [ENV=..]" runs that binary instead of $BIN
 run1 () { local b="$BIN" e="$1"; if [ "${e#@}" != "$e" ]; then b="${e%% *}"; b="${b#@}"; e="${e#* }"; [ "$e" = "$1" ] && e=""; fi
-  ssh picard@100.84.151.116 "cd ~/primetts && env $e $b --container build/v21.ptk --case tests/golden_v21/$CASE --cuda --parallel 4 2>&1" 2>/dev/null | grep -oE 'wall [0-9]+' | grep -oE '[0-9]+'; }
+  ssh picard@100.84.151.116 "cd ~/primetts && env $e $b --container build/v21.ptk --case tests/golden_v21/$CASE --cuda --parallel ${NPAR:-4} 2>&1" 2>/dev/null | grep -oE "${PICK:-wall [0-9]+}" | grep -oE "[0-9]+" | head -1; }
 run1 "$A" >/dev/null   # discarded warmup: the first draw of a batch runs cold
 sa=0; sb=0; wins=0
 for i in $(seq 1 $NP); do

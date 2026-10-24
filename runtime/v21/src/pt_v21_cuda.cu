@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 #include <pthread.h>
 #include <sched.h>
+#include <sys/prctl.h>
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,6 +21,40 @@
 #include <stdlib.h>
 
 #include "pt_v21.h"
+
+/* Sleep-polled stream wait (PT_V21_WAIT_US=<us>, default 100; 0 = the driver wait). With the stream threads capped to one
+ * core, the driver's yield wait burns the core the other streams need (measured: sys CPU 1.14 s
+ * of a 2.46 s run), and the blocking wait wakes late. Polling cudaStreamQuery with a short sleep
+ * between polls bounds the wake latency and leaves the core to the working streams. Called before
+ * the pageable D2H copies too: those block inside the driver until the kernel is done. */
+static int g_wait_us = -1;
+static volatile int g_n_active, g_n_waiting;   /* streams between cuda_init and shutdown / inside pt_wait */
+static int g_wait_adapt = 1;                    /* PT_V21_WAIT_ADAPT=0: always sleep-poll */
+static void pt_wait(cudaStream_t s) {
+  if (g_wait_us < 0) {
+    g_wait_adapt = getenv("PT_V21_WAIT_ADAPT") ? atoi(getenv("PT_V21_WAIT_ADAPT")) : 1;
+    g_wait_us = getenv("PT_V21_WAIT_US") ? atoi(getenv("PT_V21_WAIT_US")) : 100;
+  }
+  if (g_wait_us <= 0) return;
+  static __thread int slack_set;
+  if (!slack_set) {   /* default 50 us timer slack would stretch every 100 us poll sleep by half */
+    if (!getenv("PT_V21_SLACK0")) prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
+    slack_set = 1;
+  }
+  struct timespec ts = {0, (long) g_wait_us * 1000L};
+  /* sleep only while another stream is doing host work and could use the core; when every
+   * stream is waiting on the GPU (or this is the only one, N=1) a sleep is pure wake latency
+   * (measured +43 ms at N=1), so yield-poll instead */
+  __sync_add_and_fetch(&g_n_waiting, 1);
+  while (cudaStreamQuery(s) == cudaErrorNotReady) {
+    if (g_wait_adapt && __sync_add_and_fetch(&g_n_active, 0) - __sync_add_and_fetch(&g_n_waiting, 0) <= 0)
+      sched_yield();
+    else
+      nanosleep(&ts, 0);
+  }
+  __sync_sub_and_fetch(&g_n_waiting, 1);
+  cudaGetLastError();
+}
 #include <stdlib.h>
 
 #define PTCHK(x)                                                                                 \
@@ -386,6 +421,7 @@ void pt_v21_dev_reclaim(pt_ctx *c) {
 void pt_v21_dev_sync_host(pt_ctx *c, void *host, const void *dev, int64_t n) {
   if (n <= 0)
     return;
+  pt_wait((cudaStream_t) c->g_stream);
   cudaMemcpyAsync(host, dev, (size_t) n * 4, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream);
   cudaStreamSynchronize((cudaStream_t) c->g_stream);
 }
@@ -425,6 +461,8 @@ int pt_v21_conv_pads_in_kernel(pt_ctx *c) {
   return !e || atol(e) == 0;
 }
 
+/* streams inside pt_v21_run: pt_wait's "could another stream use the core" test */
+void pt_v21_cuda_active(int delta) { __sync_add_and_fetch(&g_n_active, delta); }
 double pt_v21_cuda_weights_mib(pt_ctx *c) { (void) c; return (double) (g_wdev_bytes >> 20); }
 
 static void *weight_ctab(int idx) {
@@ -1844,6 +1882,7 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     c->conv_out_dev = dy;
     return 0;
   }
+  pt_wait((cudaStream_t) c->g_stream);
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   pt_v21_dev_reclaim(c);   /* chain end: the operand uploads' kernels are provably done */
@@ -2389,6 +2428,7 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
                                                                        (int64_t) cin * ldx,
                                                                        (int64_t) cout4 * Lout);
   }
+  pt_wait((cudaStream_t) c->g_stream);
   PTCHK(cudaMemcpyAsync(Y, dy, yb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   if (dw_own)
@@ -2536,6 +2576,7 @@ int pt_v21_matmul(pt_ctx *c, const float *A, int64_t m, int64_t k, int64_t lda, 
                                                                     ldc);
   }
   PTCHK(cudaGetLastError());
+  pt_wait((cudaStream_t) c->g_stream);
   PTCHK(cudaMemcpyAsync(C, dC, cb, cudaMemcpyDeviceToHost, (cudaStream_t) c->g_stream));
   PTCHK(cudaStreamSynchronize((cudaStream_t) c->g_stream));
   if (d_own) {

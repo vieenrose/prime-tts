@@ -2495,6 +2495,7 @@ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
   return -1;   /* this binary was built without CUDA */
 }
 void pt_v21_cuda_shutdown(pt_ctx *c) { (void) c; }
+void pt_v21_cuda_active(int delta) { (void) delta; }
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
@@ -2563,7 +2564,14 @@ static void ck_save(pt_ctx *c, int tid) {
   }
 }
 
+static int pt_v21_run_graph(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n);
 int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
+  if (c->use_cuda) pt_v21_cuda_active(1);
+  int rc = pt_v21_run_graph(c, feeds, wav, wav_n);
+  if (c->use_cuda) pt_v21_cuda_active(-1);
+  return rc;
+}
+static int pt_v21_run_graph(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
   double t0 = pt_v21_now();
   c->n_conv = c->n_convT = c->n_matmul = 0;
   c->t_conv = c->t_convT = c->t_matmul = 0.0;

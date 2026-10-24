@@ -198,6 +198,7 @@ int pt_v21_convT_cpu(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_
                      const float *bias, int64_t batch, int wtab, int btab);
 /* MiB of resident container weights on the GPU (shared by all streams in the process) */
 double pt_v21_cuda_weights_mib(pt_ctx *c);
+void pt_v21_cuda_active(int delta);
 /* 1 when the CUDA conv path takes unpadded inputs (the GEMM kernel pads in-kernel) */
 int pt_v21_conv_pads_in_kernel(pt_ctx *c);
 /* Device-resident residual Add (PT_V21_DEVADD): both operands device-resident, result stays in the
