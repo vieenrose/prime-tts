@@ -1352,6 +1352,125 @@ __global__ void __launch_bounds__(256, 3) pt_conv_kernel_ig8p(
   }
 }
 
+/* 8-channel x 8-column register tile with prefetch: the block covers 128 channels x 128 columns
+ * (ty = 16 groups of 8 channels as two float4 quads, tx = 16 column groups of quads tx and tx+16).
+ * Per reduction row a thread does 64 FFMA for 4 LDS.128 (vs 32 per 3 in ig8p) and each staged
+ * value feeds twice the outputs, which raises the FFMA share of issued instructions. Every output
+ * still accumulates r = 0..kc-1 ascending onto its bias with one FFMA per r -> bit-identical to
+ * the ig8 tiles. ~100+ registers -> 2 blocks/SM; the doubled per-warp ILP covers the fewer warps.
+ * Dispatched for stride 1, cmag != 0 and a channel-group count that is a multiple of 32. */
+__global__ void __launch_bounds__(256, 2) pt_conv_kernel_ig88p(
+    const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
+    float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
+    float ea1, int64_t pad_in, unsigned cmag) {
+  __shared__ float4 Ws[IG_RK][32];   /* [r][channel quad], 32 quads = 128 channels */
+  __shared__ float4 Xs[IG_RK][32];   /* [r][column quad], 32 quads = 128 columns */
+  const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
+  const int nblk = (cout + 3) / 4;
+  const int64_t t0 = (int64_t) blockIdx.x * 128;
+  const int kc = K * cin;
+  const float4 *w4 = (const float4 *) wp;
+  const int q0 = blockIdx.y * 32 + 2 * ty;   /* this thread's two channel quads: q0, q0+1 */
+  float4 a0[8], a1[8];
+  {
+    int c0 = q0 * 4;
+    float4 b0 = make_float4(bias && c0 + 0 < cout ? bias[c0 + 0] : 0.f,
+                            bias && c0 + 1 < cout ? bias[c0 + 1] : 0.f,
+                            bias && c0 + 2 < cout ? bias[c0 + 2] : 0.f,
+                            bias && c0 + 3 < cout ? bias[c0 + 3] : 0.f);
+    float4 b1 = make_float4(bias && c0 + 4 < cout ? bias[c0 + 4] : 0.f,
+                            bias && c0 + 5 < cout ? bias[c0 + 5] : 0.f,
+                            bias && c0 + 6 < cout ? bias[c0 + 6] : 0.f,
+                            bias && c0 + 7 < cout ? bias[c0 + 7] : 0.f);
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+      a0[j] = b0;
+      a1[j] = b1;
+    }
+  }
+  const int lr = tid >> 4, lq = tid & 15;
+  float4 wv0, wv1;
+  float xv[8];
+  auto fetch = [&](int r0) {
+    int r = r0 + lr;
+    int g0 = blockIdx.y * 32 + lq, g1 = g0 + 16;
+    wv0 = (r < kc && g0 < nblk) ? w4[g0 * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    wv1 = (r < kc && g1 < nblk) ? w4[g1 * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    const float *row = x;
+    const int nt = (int) (Tout - t0);
+    const int lim = pad_in < 0 ? 0x7fffffff : (int) ldx;
+    int s0 = 0, ok = r < kc;
+    if (ok) {
+      int k = (int) __umulhi((unsigned) r, cmag), ci = r - k * cin;
+      row = x + ((int) blockIdx.z * (int) bsx + ci * (int) ldx);
+      s0 = (int) t0 + k * dil - (pad_in < 0 ? 0 : (int) pad_in);
+    }
+    if (ok && nt >= 128 && s0 >= 0 && s0 + 127 < lim) {
+      const float *p = row + s0 + lq;
+#pragma unroll
+      for (int m = 0; m < 8; m++)
+        xv[m] = p[16 * m];
+    } else {
+#pragma unroll
+      for (int m = 0; m < 8; m++) {
+        int cc = lq + 16 * m, sx = s0 + cc;
+        xv[m] = (ok && cc < nt && sx >= 0 && sx < lim) ? row[sx] : 0.f;
+      }
+    }
+  };
+  fetch(0);
+  for (int r0 = 0; r0 < kc; r0 += IG_RK) {
+    Ws[lr][lq] = wv0;
+    Ws[lr][lq + 16] = wv1;
+    float *xr = (float *) &Xs[lr][0];
+#pragma unroll
+    for (int m = 0; m < 8; m++)
+      xr[lq + 16 * m] = xv[m];
+    __syncthreads();
+    if (r0 + IG_RK < kc)
+      fetch(r0 + IG_RK);
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][2 * ty];
+      float4 u = Ws[rr][2 * ty + 1];
+      float4 v0 = Xs[rr][tx];
+      float4 v1 = Xs[rr][tx + 16];
+      float vv[8] = {v0.x, v0.y, v0.z, v0.w, v1.x, v1.y, v1.z, v1.w};
+#pragma unroll
+      for (int j = 0; j < 8; j++) {
+        a0[j].x += w.x * vv[j]; a0[j].y += w.y * vv[j]; a0[j].z += w.z * vv[j]; a0[j].w += w.w * vv[j];
+        a1[j].x += u.x * vv[j]; a1[j].y += u.y * vv[j]; a1[j].z += u.z * vv[j]; a1[j].w += u.w * vv[j];
+      }
+    }
+    __syncthreads();
+  }
+  float *yb = y + (int64_t) blockIdx.z * bsy;
+#pragma unroll
+  for (int h = 0; h < 2; h++) {
+    int co0 = (q0 + h) * 4;
+    if (q0 + h >= nblk)
+      continue;
+#pragma unroll
+    for (int j = 0; j < 8; j++) {
+      int64_t t = t0 + (j < 4 ? tx * 4 + j : 64 + tx * 4 + (j - 4));
+      if (t >= Tout)
+        continue;
+      float4 v = h ? a1[j] : a0[j];
+      if (epi0 || epi1) {
+        v.x = pt_epi_dev(pt_epi_dev(v.x, epi0, ea0), epi1, ea1);
+        v.y = pt_epi_dev(pt_epi_dev(v.y, epi0, ea0), epi1, ea1);
+        v.z = pt_epi_dev(pt_epi_dev(v.z, epi0, ea0), epi1, ea1);
+        v.w = pt_epi_dev(pt_epi_dev(v.w, epi0, ea0), epi1, ea1);
+      }
+      if (co0 + 0 < cout) yb[(int64_t) (co0 + 0) * ldy + t] = v.x;
+      if (co0 + 1 < cout) yb[(int64_t) (co0 + 1) * ldy + t] = v.y;
+      if (co0 + 2 < cout) yb[(int64_t) (co0 + 2) * ldy + t] = v.z;
+      if (co0 + 3 < cout) yb[(int64_t) (co0 + 3) * ldy + t] = v.w;
+    }
+  }
+}
+
 /* ---------------------------------------------------------------- hand-assembled kernels
  * PT_V21_SASS=1 runs the conv ig8 tile from runtime/v21/sass/conv_ig8.masm, assembled by masm.py
  * into a cubin at build time and loaded here through the driver API (one module for the process,
@@ -1413,7 +1532,17 @@ static void launch_conv_ig8(pt_ctx *c, dim3 g, const float *x, int64_t ldx, int 
   /* PT_V21_IG8_PF=0: no register prefetch (the ig8<3> tile, bisection endpoint) */
   static int pf = -1;
   if (pf < 0) pf = getenv("PT_V21_IG8_PF") ? atoi(getenv("PT_V21_IG8_PF")) : 1;
-  if (pf && s1 && stride == 1 && cmag && (int64_t) g.z * bsx < 0x7fffffff)
+  /* PT_V21_IG88=1: the 8x8 register tile (128x128 block) when the channel groups fill whole
+   * 32-group block rows (no channel padding); 0 = ig8p everywhere (bisection endpoint) */
+  static int ig88 = -1;
+  if (ig88 < 0) ig88 = getenv("PT_V21_IG88") ? atoi(getenv("PT_V21_IG88")) : 1;
+  int ngr = (cout + 3) / 4;
+  if (ig88 && pf && s1 && stride == 1 && cmag && (int64_t) g.z * bsx < 0x7fffffff && ngr % 32 == 0) {
+    dim3 g88(g.x, (unsigned) (ngr / 32), g.z);
+    pt_conv_kernel_ig88p<<<g88, 256, 0, (cudaStream_t) c->g_stream>>>(
+        x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
+        pad_in, cmag);
+  } else if (pf && s1 && stride == 1 && cmag && (int64_t) g.z * bsx < 0x7fffffff)
     pt_conv_kernel_ig8p<<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
         x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
         pad_in, cmag);
