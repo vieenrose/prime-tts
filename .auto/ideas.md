@@ -31,6 +31,22 @@ weight layout at upload time (or a transposed staging) would coalesce it; (3) ig
   i.e. masked not reversed. No keep regresses in any regime; report each keep with its regime
   condition.
 
+## ig88p CLOSED BY SASS + MEASUREMENT (run 1772, phase 8): the per-chunk overhead is real but irreducible at the C level
+Read the ig88p SASS (cuobjdump -sass, 4401 instr total): the main loop [0xba0,0x3fd8) is 1253 instr =
+1024 FFMA (82%, the 16 rr x 64 float4 FMAs) + 64 LDS (5%) + ~165 per-chunk overhead (W/X address
+forests with XMAD.PSL.CBCC 64-bit mul chains, edge-path predicates, STS addressing). A SASS-guided C
+rewrite (run 1772: hoisted 64-bit W/X row bases, 32-bit folded row math, fetch_full/fetch_tail split
+with the tail chunk hoisted out of the loop and zeroed tail rows) compiled bit-exact but to 1246
+instr -- a wash -- and measured neutral-to-WORSE over 6 order-alternating official pairs (1799.3 vs
+1759.8 mean, CONV +3.2 ms/stream 327.1 vs 323.9). MECHANISM: ig88p's W loads are inherently mul.wide
+(64-bit pointer + int index); the ORIGINAL w4[g0*kc + r] 32-bit-folded index is the better
+formulation -- my hoisted 64-bit wb0/wb1 pointers added a mul.wide+add.s64 per chunk per load, and
+ptxas (which rematerializes addresses instead of keeping them live at the 128-reg ceiling) had
+already balanced the tradeoff. Remaining theoretical slice: ~2-3% of conv (~25-30 ms N=4) and only a
+hand-SASS rewrite of the 1250-instr loop could get it -- below the confirmability bar for the effort.
+The kernel axis is now closed BY MEASUREMENT, not just by reading: FFMA 82% + LDS 5% is the floor of
+this tile on sm_53.
+
 ## Contention-sensitivity map (runs 434-448) -- which regimes the co-tenant CPU cost hits
 Loaded vs quiet official numbers on the primary box (loaded = ~1-2 busy cores from the operator's
 jtop GPU monitors, load 1.0-1.9): N=1 1200/1262 = **-5%** (single stream is co-tenant-proof: one
