@@ -1002,7 +1002,7 @@ __global__ void __launch_bounds__(256, 4) pt_conv_kernel_ig8(
     const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
     float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
     const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
-    float ea1, int64_t pad_in) {
+    float ea1, int64_t pad_in, unsigned cmag) {
   __shared__ float4 Ws[IG_RK][16];
   __shared__ float4 Xs[IG_RK][32];   /* [r][column quad], 32 quads = 128 columns */
   const int tid = threadIdx.x, tx = tid & 15, ty = tid >> 4;
@@ -1032,7 +1032,9 @@ __global__ void __launch_bounds__(256, 4) pt_conv_kernel_ig8(
       const float *row = xb;
       int s0 = 0, nt = 0, lim = 0;
       if (r < kc) {
-        int k = r / cin, ci = r - k * cin;
+        /* cmag = ceil(2^32 / cin): exact quotient for r, cin < 2^16 (host checks), a 32-bit
+         * multiply-high instead of sm_53's ~20-instruction software divide; 0 = plain division */
+        int k = cmag ? (int) __umulhi((unsigned) r, cmag) : r / cin, ci = r - k * cin;
         row = xb + (int64_t) ci * ldx;
         s0 = (int) t0 * stride + k * dil - (pad_in < 0 ? 0 : (int) pad_in);
         nt = (int) (Tout - t0);   /* valid columns left in this tile */
@@ -1205,16 +1207,22 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
     if (ig8_min == -2) ig8_min = getenv("PT_V21_IG8_MINT") ? atol(getenv("PT_V21_IG8_MINT")) : 0;
     if (ig8_min >= 0 && Tout >= ig8_min) {
       dim3 g8((unsigned) ((Tout + 127) / 128), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
+      /* PT_V21_IG8_MAG=0: the plain integer division in the staging (bisection endpoint) */
+      static int mag = -1;
+      if (mag < 0) mag = getenv("PT_V21_IG8_MAG") ? atoi(getenv("PT_V21_IG8_MAG")) : 1;
+      unsigned cmag = 0;
+      if (mag && cin > 1 && cin < 65536 && (int64_t) K * cin < 65536)
+        cmag = (unsigned) ((0x100000000ULL + (unsigned long long) cin - 1) / (unsigned long long) cin);
       static int coal = -1;
       if (coal < 0) coal = getenv("PT_V21_IG8_COAL") ? atoi(getenv("PT_V21_IG8_COAL")) : 1;
       if (coal)
         pt_conv_kernel_ig8<1><<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
             dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-            (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
+            (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag);
       else
         pt_conv_kernel_ig8<0><<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
             dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-            (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in);
+            (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag);
     } else {
     dim3 gig((unsigned) ((Tout + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16), (unsigned) batch);
     pt_conv_kernel_ig<<<gig, 256, 0, (cudaStream_t) c->g_stream>>>(
