@@ -11,7 +11,11 @@ draws, 2122-2323); N=1 stream ~640 -> ~595; CONV 424 -> 388 ms/stream. Other cas
 8/8 wins): T20 -39 (warm pair), T40 -79, T120 -236, sid1_T29 -70. pesi T81 -179 ms (4/4 pairs).
 LESSON: the "closed from 8 directions" list varied tile shape, timing, cache config and occupancy but
 never the per-instruction global ACCESS PATTERN. Audit every staging load for sector efficiency.
-NEXT: (1) same column-per-thread staging in pt_convT_kernel_ig8 (same Xs quad pattern); (2) the Ws
+DONE (run 1575): convT ig8 coalesced too (PT_V21_CONVT_COAL) -- -39 ms T81 N=4 (8/8 pairs), 8/8 on
+the other cases; the old convT ig8 was 84 regs = 3 blocks/SM (run 348's occupancy table said 4: re-check
+any table built from assumptions with `nvcc -Xptxas -v`). DEAD: the ig8 Ws load is already sector-
+efficient (lanes lr=2w/2w+1 fetch adjacent float4s of one group = one full sector).
+OLD NEXT LIST: (1) same column-per-thread staging in pt_convT_kernel_ig8 (same Xs quad pattern); (2) the Ws
 weight load `w4[lg*kc + r]` puts lanes kc float4s apart (16 B useful per 32 B sector) -- a [r][g]
 weight layout at upload time (or a transposed staging) would coalesce it; (3) ig/wsm/matmul_t staging.
 
