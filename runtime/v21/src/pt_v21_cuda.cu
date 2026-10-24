@@ -1214,6 +1214,66 @@ __global__ void __launch_bounds__(256) pt_conv_kernel_igt(
   }
 }
 
+/* ---------------------------------------------------------------- hand-assembled kernels
+ * PT_V21_SASS=1 runs the conv ig8 tile from runtime/v21/sass/conv_ig8.masm, assembled by masm.py
+ * into a cubin at build time and loaded here through the driver API (one module for the process,
+ * in the runtime's primary context, launched on the stream's own cudaStream_t). Default off. */
+#ifdef PT_V21_SASS_EMBED
+#include <cuda.h>
+#include "pt_sass_cubin.h"
+static pthread_mutex_t g_sass_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_sass_state = 0;   /* 0 = not tried, 1 = loaded, -1 = off/failed */
+static CUfunction g_sass_ig8;
+static int sass_ig8_on(void) {
+  if (g_sass_state)
+    return g_sass_state > 0;
+  pthread_mutex_lock(&g_sass_lock);
+  if (!g_sass_state) {
+    const char *e = getenv("PT_V21_SASS");
+    int st = -1;
+    if (e && atoi(e) > 0) {
+      CUmodule mod;
+      CUresult r = cuModuleLoadData(&mod, pt_sass_cubin);
+      if (r == CUDA_SUCCESS)
+        r = cuModuleGetFunction(&g_sass_ig8, mod,
+                                "_Z18pt_conv_kernel_ig8ILi1EEvPKfliiiiPflliS1_S1_lliifflj");
+      if (r == CUDA_SUCCESS)
+        st = 1;
+      else
+        fprintf(stderr, "pt_v21: SASS module load failed (%d), using the nvcc kernels\n", (int) r);
+    }
+    g_sass_state = st;
+  }
+  pthread_mutex_unlock(&g_sass_lock);
+  return g_sass_state > 0;
+}
+#else
+static int __attribute__((unused)) sass_ig8_on(void) { return 0; }
+#endif
+
+/* pt_conv_kernel_ig8<1> launch: the hand-assembled module when enabled, else the nvcc kernel */
+static void launch_conv_ig8(pt_ctx *c, dim3 g, const float *x, int64_t ldx, int cin, int K, int dil,
+                            int stride, float *y, int64_t ldy, int64_t Tout, int cout,
+                            const float *wp, const float *bias, int64_t bsx, int64_t bsy, int epi0,
+                            int epi1, float ea0, float ea1, int64_t pad_in, unsigned cmag) {
+#ifdef PT_V21_SASS_EMBED
+  if (sass_ig8_on()) {
+    void *args[] = {&x,   &ldx, &cin,  &K,   &dil,  &stride, &y,   &ldy,    &Tout,   &cout,
+                    &wp,  &bias, &bsx, &bsy, &epi0, &epi1,   &ea0, &ea1,    &pad_in, &cmag};
+    CUresult r = cuLaunchKernel(g_sass_ig8, g.x, g.y, g.z, 256, 1, 1, 0,
+                                (CUstream) c->g_stream, args, NULL);
+    if (r != CUDA_SUCCESS) {
+      fprintf(stderr, "pt_v21: SASS ig8 launch failed (%d)\n", (int) r);
+      abort();
+    }
+    return;
+  }
+#endif
+  pt_conv_kernel_ig8<1><<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
+      x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
+      pad_in, cmag);
+}
+
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
                 const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float ea0,
@@ -1337,9 +1397,9 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
       if (tcg) {
         if (nfull > 0) {
           dim3 gf((unsigned) nfull, g8.y, g8.z);
-          pt_conv_kernel_ig8<1><<<gf, 256, 0, (cudaStream_t) c->g_stream>>>(
-              dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-              (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag);
+          launch_conv_ig8(c, gf, dx, ldx, (int) cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout,
+                          cout, dw, db, (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0,
+                          ea1, c->conv_pad_in, cmag);
         }
         int cols = 8 * (256 / tcg);
         dim3 gt((unsigned) ((rem + cols - 1) / cols), (unsigned) ((cout4 / 4 + tcg - 1) / tcg),
@@ -1355,9 +1415,9 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
               (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag,
               nfull * 128);
       } else if (coal)
-        pt_conv_kernel_ig8<1><<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
-            dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
-            (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag);
+        launch_conv_ig8(c, g8, dx, ldx, (int) cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout,
+                        cout, dw, db, (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0,
+                        ea1, c->conv_pad_in, cmag);
       else
         pt_conv_kernel_ig8<0><<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
             dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,

@@ -37,25 +37,40 @@ build/pt_v21_host: $(SRC) $(GEN) $(HDR) runtime/v21/src/pt_v21_host.c
 # kernels when ctx->use_cuda is 0, so --cuda and the CPU path share one binary.
 nano: build/pt_v21_nano
 
-build/pt_v21_nano: $(SRC) $(GEN) runtime/v21/src/pt_v21_cuda.cu $(HDR)
+build/pt_v21_nano: $(SRC) $(GEN) runtime/v21/src/pt_v21_cuda.cu $(HDR) build/pt_sass_cubin.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(INC) -DPT_V21_CUDA -c runtime/v21/src/pt_v21_host.c -o build/pt_v21_host_cu.o
 	$(CC) $(CFLAGS) $(INC) -c runtime/v21/src/main_v21.c -o build/main_v21_cu.o
 	$(CC) $(CFLAGS) $(INC) -c $(GEN) -o build/pt_graph_cu.o
-	$(NVCC) $(CUF) $(INC) -c runtime/v21/src/pt_v21_cuda.cu -o build/pt_v21_cuda.o
+	$(NVCC) $(CUF) $(INC) -Ibuild -DPT_V21_SASS_EMBED -c runtime/v21/src/pt_v21_cuda.cu -o build/pt_v21_cuda.o
 	$(NVCC) $(CUF) -o $@ build/pt_v21_cuda.o build/pt_v21_host_cu.o build/pt_graph_cu.o \
-	  build/main_v21_cu.o -L$(CUDA)/lib64 -lcudart -lm
+	  build/main_v21_cu.o -L$(CUDA)/lib64 -lcudart -lcuda -lm
+
+# Hand-assembled kernels (runtime/v21/sass): compile a template cubin of pt_v21_cuda.cu, assemble
+# each .masm source into its function's .text with masm.py (encodings learned from this very
+# toolchain's cuobjdump listing; no third-party assembler), embed with bin2c. Loaded at run time
+# through the driver API behind PT_V21_SASS=1 (default off: the nvcc-compiled kernels run).
+PY3     ?= python3
+SASSDIR  = runtime/v21/sass
+SASS_IG8 = _Z18pt_conv_kernel_ig8ILi1EEvPKfliiiiPflliS1_S1_lliifflj
+build/pt_sass_cubin.h: runtime/v21/src/pt_v21_cuda.cu $(SASSDIR)/masm.py $(SASSDIR)/conv_ig8.masm $(HDR)
+	@mkdir -p build
+	$(NVCC) $(CUF) $(INC) -cubin runtime/v21/src/pt_v21_cuda.cu -o build/sass_tmpl.cubin
+	$(CUDA)/bin/cuobjdump -sass build/sass_tmpl.cubin > build/sass_tmpl.sass
+	$(PY3) $(SASSDIR)/masm.py patch build/sass_tmpl.cubin build/sass_tmpl.sass $(SASS_IG8) \
+	  $(SASSDIR)/conv_ig8.masm build/sass.cubin
+	$(CUDA)/bin/bin2c -c --name pt_sass_cubin build/sass.cubin > $@
 
 # M3 multi-stream driver: N concurrent requests on one GPU (needs CUDA on the Nano)
 par: build/pt_v21_par
 
-build/pt_v21_par: $(SRC) runtime/v21/src/main_v21_par.c $(GEN) runtime/v21/src/pt_v21_cuda.cu $(HDR)
+build/pt_v21_par: $(SRC) runtime/v21/src/main_v21_par.c $(GEN) runtime/v21/src/pt_v21_cuda.cu $(HDR) build/pt_sass_cubin.h
 	@mkdir -p build
 	$(CC) $(CFLAGS) $(INC) -DPT_V21_CUDA -c runtime/v21/src/pt_v21_host.c -o build/pt_v21_host_par.o
 	$(CC) $(CFLAGS) $(INC) -c runtime/v21/gen/pt_graph.c -o build/pt_graph_par.o
-	$(NVCC) $(CUF) $(INC) -c runtime/v21/src/pt_v21_cuda.cu -o build/pt_v21_cuda_par.o
+	$(NVCC) $(CUF) $(INC) -Ibuild -DPT_V21_SASS_EMBED -c runtime/v21/src/pt_v21_cuda.cu -o build/pt_v21_cuda_par.o
 	$(NVCC) $(CUF) $(INC) -o $@ build/pt_v21_cuda_par.o build/pt_v21_host_par.o build/pt_graph_par.o \
-	  runtime/v21/src/main_v21_par.c -L$(CUDA)/lib64 -lcudart -lpthread -lm
+	  runtime/v21/src/main_v21_par.c -L$(CUDA)/lib64 -lcudart -lcuda -lpthread -lm
 
 gen:
 	$(PY) tools/gen_v21_graph.py
