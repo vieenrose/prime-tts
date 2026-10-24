@@ -1484,7 +1484,9 @@ __global__ void pt_convT_kernel_ph(const float *__restrict__ x, int64_t ldx, int
  * Per output the accumulation walks the kc reductions in the same ascending order as
  * pt_conv_kernel_ig, so results are bit-identical to that kernel; the win is 2x the columns per
  * block, i.e. half the index/loop overhead per element. */
-__global__ void __launch_bounds__(256) pt_convT_kernel_ig8(
+/* COAL: column-per-thread X staging, as in pt_conv_kernel_ig8 (same Xs slots, bit-identical). */
+template <int COAL>
+__global__ void __launch_bounds__(256, COAL ? 4 : 1) pt_convT_kernel_ig8(
     const float *__restrict__ x, int64_t ldx, int cin, int64_t tin, float *__restrict__ y,
     int64_t ldy, int64_t Lout, int cout, int s, int pad, int ntap, const float *__restrict__ wp,
     const float *__restrict__ bias, int64_t bsx, int64_t bsy, int64_t q0) {
@@ -1513,6 +1515,24 @@ __global__ void __launch_bounds__(256) pt_convT_kernel_ig8(
     int i = i0 + lr;
     int lg = blockIdx.y * 16 + lq;
     Ws[lr][lq] = (i < kc && lg < nblk) ? w4[(int64_t) lg * kc + i] : make_float4(0.f, 0.f, 0.f, 0.f);
+    if (COAL) {
+      float *xr = (float *) &Xs[lr][0];
+      const float *row = xb;
+      int qs = 0, lim = 0;   /* 32-bit column math: q ranges are far below 2^31 */
+      if (i < kc) {
+        int t = i / cin, ci = i - t * cin;
+        row = xb + (int64_t) ci * ldx;
+        qs = (int) qb - t;
+        lim = (int) tin;
+      }
+#pragma unroll
+      for (int m = 0; m < 8; m++) {
+        int qc = qs + lq + 16 * m;
+        float v = 0.f;
+        if (qc >= 0 && qc < lim) v = row[qc];
+        xr[lq + 16 * m] = v;
+      }
+    } else
 #pragma unroll
     for (int h = 0; h < 2; h++) {
       int qq = lq + 16 * h; /* column quad 0..31 */
@@ -1716,9 +1736,18 @@ int pt_v21_convT(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, int64_t ti
     if (tig8) {
       dim3 g8t((unsigned) ((nq + 127) / 128), (unsigned) ((cout4 / 4 + 15) / 16),
                (unsigned) (batch * s));
-      pt_convT_kernel_ig8<<<g8t, 256, 0, (cudaStream_t) c->g_stream>>>(
-          dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
-          (int64_t) cin * ldx, (int64_t) cout4 * Lout, qlo);
+      /* PT_V21_CONVT_COAL=0: the old quad X staging (bisection endpoint) */
+      static int tcoal = -1;
+      if (tcoal < 0)
+        tcoal = getenv("PT_V21_CONVT_COAL") ? atoi(getenv("PT_V21_CONVT_COAL")) : 1;
+      if (tcoal)
+        pt_convT_kernel_ig8<1><<<g8t, 256, 0, (cudaStream_t) c->g_stream>>>(
+            dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
+            (int64_t) cin * ldx, (int64_t) cout4 * Lout, qlo);
+      else
+        pt_convT_kernel_ig8<0><<<g8t, 256, 0, (cudaStream_t) c->g_stream>>>(
+            dx, ldx, cin, tin, dy, /*ldy=*/Lout, /*Lout=*/Lout, cout, s, pad, ntap, dw, db,
+            (int64_t) cin * ldx, (int64_t) cout4 * Lout, qlo);
     } else {
     dim3 gig((unsigned) ((nq + 63) / 64), (unsigned) ((cout4 / 4 + 15) / 16),
              (unsigned) (batch * s));
