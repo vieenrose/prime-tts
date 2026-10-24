@@ -1115,6 +1115,105 @@ __global__ void __launch_bounds__(256, 4) pt_conv_kernel_ig8(
   }
 }
 
+/* Tail tile for the ig8 conv: the same per-thread work (8 columns x one 4-channel group, the same
+ * FMA sequence over r ascending onto the bias, the same epilogue -> bit-identical outputs), but the
+ * 256-thread block is reshaped to CG channel groups x (256/CG) column quads-pairs: CG=32 covers
+ * 128 channels x 64 columns, CG=64 covers 256 channels x 32 columns. pt_v21_conv runs the full
+ * 128-column tiles with pt_conv_kernel_ig8 and hands only the leftover columns (t >= tbase) to this
+ * kernel, so a 904-column output no longer computes a whole 128-column tile for its last 8 columns.
+ * At N=4 the SM is issue-saturated, so the discarded columns' FMAs were real wall time. */
+template <int CG>
+__global__ void __launch_bounds__(256) pt_conv_kernel_igt(
+    const float *__restrict__ x, int64_t ldx, int cin, int K, int dil, int stride,
+    float *__restrict__ y, int64_t ldy, int64_t Tout, int cout, const float *__restrict__ wp,
+    const float *__restrict__ bias, int64_t bsx, int64_t bsy, int epi0, int epi1, float ea0,
+    float ea1, int64_t pad_in, unsigned cmag, int64_t tbase) {
+  constexpr int TXN = 256 / CG;      /* threads along columns; each owns quads tx and tx+TXN */
+  constexpr int COLS = 8 * TXN;      /* columns per block */
+  __shared__ float4 Ws[IG_RK][CG];
+  __shared__ float Xs[IG_RK][COLS];
+  const int tid = threadIdx.x, tx = tid % TXN, ty = tid / TXN;
+  const int nblk = (cout + 3) / 4;
+  const int g = blockIdx.y * CG + ty;
+  const int64_t t0 = tbase + (int64_t) blockIdx.x * COLS;
+  const int64_t b = blockIdx.z;
+  const int kc = K * cin;
+  const float *xb = x + b * bsx;
+  const float4 *w4 = (const float4 *) wp;
+  int co0 = g * 4;
+  float4 bz = make_float4(bias && co0 + 0 < cout ? bias[co0 + 0] : 0.f,
+                          bias && co0 + 1 < cout ? bias[co0 + 1] : 0.f,
+                          bias && co0 + 2 < cout ? bias[co0 + 2] : 0.f,
+                          bias && co0 + 3 < cout ? bias[co0 + 3] : 0.f);
+  float4 a[8];
+#pragma unroll
+  for (int j = 0; j < 8; j++) a[j] = bz;
+  const int lr = tid >> 4, lq = tid & 15;
+  const int nt = (int) (Tout - t0);
+  const int lim = pad_in < 0 ? 0x7fffffff : (int) ldx;
+  const int sb = (int) t0 * stride - (pad_in < 0 ? 0 : (int) pad_in);
+  for (int r0 = 0; r0 < kc; r0 += IG_RK) {
+    /* weights: lanes pair adjacent r of one channel group (full 32 B sectors), as in ig8 */
+    int r = r0 + lr;
+#pragma unroll
+    for (int u = 0; u < CG / 16; u++) {
+      int lgq = lq + 16 * u;
+      int lg = blockIdx.y * CG + lgq;
+      Ws[lr][lgq] = (r < kc && lg < nblk) ? w4[(int64_t) lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    }
+    /* X: one row per COLS consecutive threads, contiguous columns (coalesced) */
+#pragma unroll
+    for (int u = 0; u < IG_RK * COLS / 256; u++) {
+      int e = tid + 256 * u;
+      int row = e / COLS, cc = e % COLS;
+      int rr = r0 + row;
+      float v = 0.f;
+      if (rr < kc && cc < nt) {
+        int k = cmag ? (int) __umulhi((unsigned) rr, cmag) : rr / cin, ci = rr - k * cin;
+        int sx = sb + k * dil + cc * stride;
+        if (sx >= 0 && sx < lim) v = xb[(int64_t) ci * ldx + sx];
+      }
+      Xs[row][cc] = v;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int rr = 0; rr < IG_RK; rr++) {
+      float4 w = Ws[rr][ty];
+      float4 v0 = *(const float4 *) &Xs[rr][4 * tx];
+      float4 v1 = *(const float4 *) &Xs[rr][4 * (tx + TXN)];
+      a[0].x += w.x * v0.x; a[0].y += w.y * v0.x; a[0].z += w.z * v0.x; a[0].w += w.w * v0.x;
+      a[1].x += w.x * v0.y; a[1].y += w.y * v0.y; a[1].z += w.z * v0.y; a[1].w += w.w * v0.y;
+      a[2].x += w.x * v0.z; a[2].y += w.y * v0.z; a[2].z += w.z * v0.z; a[2].w += w.w * v0.z;
+      a[3].x += w.x * v0.w; a[3].y += w.y * v0.w; a[3].z += w.z * v0.w; a[3].w += w.w * v0.w;
+      a[4].x += w.x * v1.x; a[4].y += w.y * v1.x; a[4].z += w.z * v1.x; a[4].w += w.w * v1.x;
+      a[5].x += w.x * v1.y; a[5].y += w.y * v1.y; a[5].z += w.z * v1.y; a[5].w += w.w * v1.y;
+      a[6].x += w.x * v1.z; a[6].y += w.y * v1.z; a[6].z += w.z * v1.z; a[6].w += w.w * v1.z;
+      a[7].x += w.x * v1.w; a[7].y += w.y * v1.w; a[7].z += w.z * v1.w; a[7].w += w.w * v1.w;
+    }
+    __syncthreads();
+  }
+  if (g >= nblk)
+    return;
+  float *yb = y + b * bsy;
+#pragma unroll
+  for (int j = 0; j < 8; j++) {
+    int64_t t = t0 + (j < 4 ? tx * 4 + j : 4 * (tx + TXN) + (j - 4));
+    if (t >= Tout)
+      continue;
+    float4 v = a[j];
+    if (epi0 || epi1) {
+      v.x = pt_epi_dev(pt_epi_dev(v.x, epi0, ea0), epi1, ea1);
+      v.y = pt_epi_dev(pt_epi_dev(v.y, epi0, ea0), epi1, ea1);
+      v.z = pt_epi_dev(pt_epi_dev(v.z, epi0, ea0), epi1, ea1);
+      v.w = pt_epi_dev(pt_epi_dev(v.w, epi0, ea0), epi1, ea1);
+    }
+    if (co0 + 0 < cout) yb[(int64_t) (co0 + 0) * ldy + t] = v.x;
+    if (co0 + 1 < cout) yb[(int64_t) (co0 + 1) * ldy + t] = v.y;
+    if (co0 + 2 < cout) yb[(int64_t) (co0 + 2) * ldy + t] = v.z;
+    if (co0 + 3 < cout) yb[(int64_t) (co0 + 3) * ldy + t] = v.w;
+  }
+}
+
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
                 const float *bias, int64_t batch, int wtab, int btab, int epi0, int epi1, float ea0,
@@ -1215,7 +1314,47 @@ int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, i
         cmag = (unsigned) ((0x100000000ULL + (unsigned long long) cin - 1) / (unsigned long long) cin);
       static int coal = -1;
       if (coal < 0) coal = getenv("PT_V21_IG8_COAL") ? atoi(getenv("PT_V21_IG8_COAL")) : 1;
-      if (coal)
+      /* Narrow-conv grid (PT_V21_IG8_TAIL): a conv narrower than one 128-column tile runs as
+       * pt_conv_kernel_igt when that block shape computes fewer output slots (columns x padded
+       * channels), i.e. fewer blocks of the same duration. Mode 2 (default) applies it only when
+       * there is no full tile (one launch either way); mode 1 also splits the leftover columns of
+       * wide convs into a second launch, which measured WORSE (+30 ms T81: the tail launch
+       * serializes behind the main grid and runs a lone block for a full block-duration);
+       * 0 = ig8 everywhere (bisection endpoint). */
+      static int tail = -1;
+      if (tail < 0) tail = getenv("PT_V21_IG8_TAIL") ? atoi(getenv("PT_V21_IG8_TAIL")) : 2;
+      int64_t nfull = Tout / 128, rem = Tout - nfull * 128;
+      int tcg = 0;
+      if (tail && coal && rem > 0 && (tail == 1 || nfull == 0)) {
+        int64_t ng = cout4 / 4;
+        int64_t s16 = 128 * ((ng + 15) / 16 * 16);
+        int64_t s32 = (rem + 63) / 64 * 64 * ((ng + 31) / 32 * 32);
+        int64_t s64 = (rem + 31) / 32 * 32 * ((ng + 63) / 64 * 64);
+        int64_t best = s16;
+        if (s32 < best) { best = s32; tcg = 32; }
+        if (s64 < best) { best = s64; tcg = 64; }
+      }
+      if (tcg) {
+        if (nfull > 0) {
+          dim3 gf((unsigned) nfull, g8.y, g8.z);
+          pt_conv_kernel_ig8<1><<<gf, 256, 0, (cudaStream_t) c->g_stream>>>(
+              dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+              (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag);
+        }
+        int cols = 8 * (256 / tcg);
+        dim3 gt((unsigned) ((rem + cols - 1) / cols), (unsigned) ((cout4 / 4 + tcg - 1) / tcg),
+                (unsigned) batch);
+        if (tcg == 32)
+          pt_conv_kernel_igt<32><<<gt, 256, 0, (cudaStream_t) c->g_stream>>>(
+              dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+              (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag,
+              nfull * 128);
+        else
+          pt_conv_kernel_igt<64><<<gt, 256, 0, (cudaStream_t) c->g_stream>>>(
+              dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
+              (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag,
+              nfull * 128);
+      } else if (coal)
         pt_conv_kernel_ig8<1><<<g8, 256, 0, (cudaStream_t) c->g_stream>>>(
             dx, ldx, cin, K, dil, stride, dy, /*ldy=*/Tout, /*Tout=*/Tout, cout, dw, db,
             (int64_t) cin * ldx, (int64_t) cout4 * Tout, epi0, epi1, ea0, ea1, c->conv_pad_in, cmag);
