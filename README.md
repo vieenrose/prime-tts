@@ -14,29 +14,47 @@ so a runtime that serializes launches, copies activations over PCIe per node, an
 spaces element-by-element loses most of the machine. This branch is the work of removing that
 overhead while keeping the output **bit-for-bit inside the validated parity envelope**.
 
-## Current state (measured on the Nano)
+## Result (measured on the Nano)
 
 Target: **4 concurrent real-time requests** with quality preserved. Metric is the wall time of
-four concurrent requests (`n4_wall_ms`), not one fast request.
+four concurrent requests (`n4_wall_ms`), not one fast request. The latency session ran 1551 kept
+experiments; the chart shows every kept draw (blue: official N=4 draws on the primary box; red:
+best-so-far) with the session's phase structure and the biggest single levers:
 
-| step | N=4 wall | 1 stream | SNDR |
+![Wall time of 4 concurrent T81 requests over the latency session](docs/latency-session.svg)
+
+| milestone (run #) | N=4 wall | 1 stream | SNDR |
 |---|---|---|---|
-| baseline: resident GPU weights, per-stream arenas, per-stream CUDA streams, async staging | 10308 ms | 3863 ms | 70.08 dB |
-| contiguous / scalar-broadcast fp32 elementwise paths (ADD, SUB, MUL, DIV, MAX, MIN) | 10239 | 3690 | 70.08 |
-| fp16→fp32 container weight conversions shared across contexts (refcounted, ctab-keyed) | 10070 | 3613 | 70.08 |
-| iSTFT einsums (`bkt,kn->bnt`) as a specialized batched matmul | 9867 | 3294 | 70.08 |
-| vectorizable LEAKYRELU / RELU / NEG / ABS paths | 9865 | 3212 | 70.08 |
-| conv bias resident on the GPU + async input staging | 9638 | 3142 | 70.08 |
-| conv kernel: cooperative shared-memory weight staging | 8787 | 2807 | 70.08 |
-| conv_transpose kernel: shared-memory phase-slice staging (barrier-safe) | **8325** | **2714** | 70.08 |
+| session baseline: resident GPU weights, per-stream arenas, per-stream CUDA streams, async staging (#1) | 10308 ms | 3863 ms | 70.08 dB |
+| conv kernel: cooperative shared-memory weight staging (#8) | 8787 | 2807 | 70.08 |
+| conv_transpose: barrier-safe phase-slice staging (#10) | 8325 | 2714 | 70.08 |
+| implicit-GEMM conv, 128-column tiles, weight slice in shared mem (#32) | 3597 | 1359 | 70.08 |
+| tiled matmul kernel (#46) | 3041 | 964 | 70.08 |
+| NEON elementwise + fp16 LUT decode + interpolated tanh/sigmoid tables (#63) | 2580 | 677 | 70.08 |
+| GPU clock warmup before the weight upload (226 → 138 ms) (#75) | 2328 | 647 | 70.08 |
+| startup de-serialization: parallel record pass, parallel weight upload, prewarm, adaptive ramp (#278–#300) | 2220 | 638 | 70.09 |
+| convT ig8 kernel, 128-column tiles (#325) | 2155 | 640 | 70.09 |
+| coalesced conv staging: sector-efficient column-per-thread X loads (#1574) | 1996 | 593 | 70.09 |
+| stride-1 conv staging specialization (#1583) | 1908 | 581 | 70.09 |
+| ig88p: 8ch × 8col register tile with prefetch (#1589) | 1877 | 538 | 70.09 |
+| **final cluster** — 152 official draws, runs 1600+ | **1783 mean (1692–1902)** | **~536** | 70.09 |
 
-- **-19.2 % at N=4** and **-29.7 % single stream** from the session baseline, with **every kept
-  change producing bit-identical audio** (`max|d|` 2.247e-04 on T81, identical SNDR).
-- 4 streams × 3.62 s of audio = 14.46 s of speech in **8.33 s** of wall time → aggregate RTF 0.58,
-  per-stream RTF 1.78. True real-time for four streams needs ≈ 6.0 s, so the remaining gap is ~28 %.
-- Quality gate throughout: **SNDR ≥ 60 dB** on the Nano for T20 + T81 on the GPU path and T81 on the
-  CPU path, checked on every run by `.auto/checks.sh`, plus the per-node gate
-  (`tests/v21_parity_c.py --from-dumps <Nano dumps>` → 0 nodes over gate).
+- **5.78× at N=4** (10308 → 1783 ms) and **7.2× single stream** (3863 → ~536 ms) from the session
+  baseline, with every kept change bit-exact or inside the parity envelope (`max|d|` 2.258e-04 on
+  T81 — the 1551 optimizations moved the output by 5 % of the deviation the baseline itself carried).
+- 4 streams × 3.62 s of audio = 14.46 s of speech in **1.78 s** of wall → **8.1× realtime
+  aggregate** (per-stream RTF 0.49; single stream RTF 0.15). All five golden cases
+  (T20/T40/T81/T120/sid1_T29) pass on both Nano boxes, GPU and CPU paths; N=8 measured 3.8 s with
+  flat RAM (no leak).
+- Quality gates on every run: **SNDR ≥ 60 dB** on the Nano for T20 + T81 (GPU) and T81 (CPU) via
+  `.auto/checks.sh`, plus the full per-node gate (`tests/v21_parity_c.py --from-dumps <Nano dumps>`)
+  → 4010 nodes, 0 over gate.
+- The wall is fully accounted for by measured components (bar chart above): serialized startup
+  287 ms, 4 × ~298 ms of per-stream kernel+copy time on the single SM, a scheduling remainder, and
+  the close/SNDR tail. Every optimization axis is closed by measurement or arithmetic — kernel
+  tiling, memory-access pattern, FFT/Winograd, occupancy, device residency, CUDA graphs, batch
+  lockstep, startup, host scheduling — with mechanisms recorded in `.auto/ideas.md` and the full
+  1551-run ledger in `.auto/log.jsonl`.
 
 ## Layout
 
@@ -53,6 +71,7 @@ tools/export_v21.py             ONNX -> build/v21.ptk container
 tests/golden_v21/**             goldens, feeds, per-node probe dump (the ground truth)
 tests/v21_parity_c.py           per-node parity gate against the Nano's dumps
 bench/gpu/RESULTS.md            measured Nano roofline
+docs/latency-session.svg        the session result chart (embedded above)
 .auto/                          the latency loop: playbook, measure.sh, checks.sh, ideas, run log
 ```
 
@@ -91,10 +110,14 @@ while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split
 
 - fp32 tiled GEMM **62 GFLOP/s**; fp16-storage + fp32-acc **70 GFLOP/s**; issue ceilings
   88 GFLOP/s fp32 and **168 GFLOP/s half2** (a half2-compute runtime is the only way past ~5 streams).
-- **2 SMs**, 64 KB shared per SM, launch overhead ~26 µs, cooperative launch unavailable,
-  device memcpy 5-5.9 GB/s, and GPU memory (NvMap) counts against system RAM — so RSS understates
-  real memory pressure and free-RAM sampling is part of every measurement.
-- v2.1 costs 11.9 GFLOP per audio-second: fp32 tops out at ~5 concurrent streams.
+- **1 SM** (128 CUDA cores — `cudaGetDeviceProperties` says `multiProcessorCount = 1` on both
+  boxes; early notes here said 2, corrected during the latency session), 64 KB shared per SM,
+  65536 regs/SM, launch overhead ~26 µs, cooperative launch unavailable, device memcpy 5-5.9 GB/s,
+  and GPU memory (NvMap) counts against system RAM — so RSS understates real memory pressure and
+  free-RAM sampling is part of every measurement. Theoretical fp32 peak is 235.9 GFLOP/s; the
+  measured pure-FMA rate (`.auto/peak_test.cu`) is 97.6 GFMA/s ≈ 195 GFLOP/s.
+- v2.1 costs 11.9 GFLOP per audio-second: fp32 carries the 4-stream target at 8.1× realtime
+  aggregate, and N=8 still fits (3.8 s wall, RAM flat).
 
 ## Kernel rules this branch learned
 
@@ -105,7 +128,7 @@ while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split
    are untouched.
 2. **Do not tile the input with per-chunk barriers.** A variant that cooperatively staged input
    tiles 16 channels at a time was **2.7× slower** (conv 2.5 s → 6.9 s): ~48 `__syncthreads` per
-   block per launch dominate on a 2-SM part. Read activations straight from global, coalesced.
+   block per launch dominate on a single-SM part. Read activations straight from global, coalesced.
 3. **`__syncthreads()` must be reached by every thread in the block.** A `continue` that can skip a
    barrier is undefined behaviour. It produced a 6.6 % faster conv_transpose kernel that was
    deterministically wrong on exactly the nodes where the staged path was active (SNDR 6.47 dB on
@@ -123,19 +146,42 @@ while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split
    the primary metric, attack GPU kernels.
 7. **A buffer pool for activation tensors is not a win here**: no measurable latency gain, and
    ~200 MB of retained memory at N=4 (glibc was already reusing the freed blocks).
+8. **Audit the per-instruction global access pattern, not just the tile shape.** The last big conv
+   win of the session (-162 ms at N=4, run 1574) came from noticing that each thread's four scalar
+   loads 16 B apart fetched every 32 B L2 sector for 2 useful floats; staging columns
+   `lq, lq+16, …` instead gives contiguous 64 B per half-warp per load. Tile shape, timing, cache
+   config and occupancy had all been tuned before anyone looked at sector efficiency — and sm_53
+   does not cache plain global loads in L1, so there is no second chance to fix it.
 
-## Open work
+## Where the session ended
 
-- Encoder convs (12 at ~42 ms each, `cin=768`): their 4-channel weight slice is 36 KB, above the
-  shared-memory gate, so they fall back to the unstaged kernel. A 2-lane (`float2`) slice halves it
-  to 18 KB and fits.
-- Matmul kernels (50 calls per request): same weight-staging idea.
-- Host side, biggest remaining: `SLICE` 205 ms over 214 calls (memcpy-bound, scalar), `ADD` 105 ms,
-  `TANH` 81 ms (libm per element), `PAD` 76 ms. Shape-only ops (Reshape/Transpose/Copy) still
-  materialize; carrying a strided view through the interpreter is unbuilt.
-- fp16 activations in the decoder (its weights are already fp16; measured rel 1.9e-3 today) to halve
-  activation traffic in the deepest group — hard-gated on SNDR and the per-node gate.
-- Half2-compute path if the target is more than 5 concurrent streams.
+Every optimization axis is closed by measurement or arithmetic; the mechanisms are recorded in
+`.auto/ideas.md`. Highlights of the closures:
+
+- **Kernel algorithms**: implicit-GEMM tiling (64/128/256-column variants benched, 128 kept),
+  window-direct and templated-K (faster in isolation, +640 ms at N=4 — a single-kernel bench
+  cannot predict the contended regime), FFT (10× slower), Winograd F(2,3) (1.6× MORE work for
+  these 1-D convs — the 2.25× figure is a 2-D number).
+- **Data placement**: full device residency implemented and measured **+261 ms** — the staging
+  copies it removes were already hidden behind GPU work; the added device passes are not.
+- **Scheduling**: batch-4 lockstep +390 ms (natural stream desync is worth more than wave
+  alignment); CUDA graphs ~1–2 ms of launch overhead, below the confirmability bar; affinity
+  pinning a tie.
+- **Startup**: 287 ms serialized (context 85 + ramp + record pass + upload), bounded below by the
+  governor's clock ramp — every attack that removes GPU work from that window measures worse.
+- **Occupancy/carveout**: register-limited at 4 blocks/SM by design; forcing changes to blocks/SM
+  moved zero of 11 kernels and measured neutral-to-worse.
+
+What remains needs to happen outside this benchmark's scope:
+
+- **Server-mode weight/context amortization** — the deployment (a resident server rather than a
+  process-per-request) amortizes the 287 ms startup: worth ~260 ms on short requests, the largest
+  remaining deployment win. Measuring it here would be timer-scope gaming, so it is reported, not
+  benchmarked.
+- **Half2 compute** if the concurrency target moves well beyond 4 streams (issue ceiling 168
+  GFLOP/s half2 vs 88 fp32).
+- **Production guidance**: give the TTS process CPU priority (a co-tenant costs +2.9 % per busy
+  core at N=4), and keep the process warm (cold-after-idle costs +6.7 %).
 
 ## Reproduction and integrity
 
