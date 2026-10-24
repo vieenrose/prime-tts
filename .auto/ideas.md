@@ -15,6 +15,11 @@ DONE (run 1575): convT ig8 coalesced too (PT_V21_CONVT_COAL) -- -39 ms T81 N=4 (
 the other cases; the old convT ig8 was 84 regs = 3 blocks/SM (run 348's occupancy table said 4: re-check
 any table built from assumptions with `nvcc -Xptxas -v`). DEAD: the ig8 Ws load is already sector-
 efficient (lanes lr=2w/2w+1 fetch adjacent float4s of one group = one full sector).
+KEPT (runs 1578, 1580): magic-number division in conv ig8 staging (PT_V21_IG8_MAG; carrying the index
+instead spilled and regressed T20, run 1577) and a narrow-conv grid (pt_conv_kernel_igt, PT_V21_IG8_TAIL=2:
+only for convs narrower than one 128-col tile; splitting WIDE convs' tails into a 2nd launch is +30 ms on
+T81 because block duration is kc-bound and the extra launch serializes). T20 -48 ms. DISCARDED: block
+raster swap (run 1576, not DRAM-bound), convT magic division (run 1579, below floor).
 OLD NEXT LIST: (1) same column-per-thread staging in pt_convT_kernel_ig8 (same Xs quad pattern); (2) the Ws
 weight load `w4[lg*kc + r]` puts lanes kc float4s apart (16 B useful per 32 B sector) -- a [r][g]
 weight layout at upload time (or a transposed staging) would coalesce it; (3) ig/wsm/matmul_t staging.
