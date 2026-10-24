@@ -1026,7 +1026,35 @@ __global__ void __launch_bounds__(256, 4) pt_conv_kernel_ig8(
     int r = r0 + lr;
     int lg = blockIdx.y * 16 + lq;
     Ws[lr][lq] = (r < kc && lg < nblk) ? w4[(int64_t) lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
-    if (COAL) {
+    if (COAL == 3) {
+      /* stride == 1 (the host dispatches this variant only then): one base pointer per chunk and
+       * the 8 loads at immediate offsets 64 B apart, unpredicated when the whole 128-column window
+       * is in range; edge tiles take the predicated per-element path. Same addresses and values
+       * as COAL=1 (bit-identical); removes the per-element multiply + bounds + 64-bit address
+       * arithmetic that ptxas emitted for every staged element. */
+      float *xr = (float *) &Xs[lr][0];
+      const float *row = xb;
+      const int nt = (int) (Tout - t0);
+      const int lim = pad_in < 0 ? 0x7fffffff : (int) ldx;
+      int s0 = 0, ok = r < kc;
+      if (ok) {
+        int k = cmag ? (int) __umulhi((unsigned) r, cmag) : r / cin, ci = r - k * cin;
+        row = xb + (int64_t) ci * ldx;
+        s0 = (int) t0 + k * dil - (pad_in < 0 ? 0 : (int) pad_in);
+      }
+      if (ok && nt >= 128 && s0 >= 0 && s0 + 127 < lim) {
+        const float *p = row + s0 + lq;
+#pragma unroll
+        for (int m = 0; m < 8; m++)
+          xr[lq + 16 * m] = p[16 * m];
+      } else {
+#pragma unroll
+        for (int m = 0; m < 8; m++) {
+          int cc = lq + 16 * m, sx = s0 + cc;
+          xr[cc] = (ok && cc < nt && sx >= 0 && sx < lim) ? row[sx] : 0.f;
+        }
+      }
+    } else if (COAL) {
       /* 32-bit column math (row lengths are far below 2^31): keeps the kernel at 64 registers */
       float *xr = (float *) &Xs[lr][0];
       const float *row = xb;
@@ -1269,9 +1297,17 @@ static void launch_conv_ig8(pt_ctx *c, dim3 g, const float *x, int64_t ldx, int 
     return;
   }
 #endif
-  pt_conv_kernel_ig8<1><<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
-      x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
-      pad_in, cmag);
+  /* PT_V21_IG8_S1=0: no stride-1 specialization (bisection endpoint) */
+  static int s1 = -1;
+  if (s1 < 0) s1 = getenv("PT_V21_IG8_S1") ? atoi(getenv("PT_V21_IG8_S1")) : 1;
+  if (s1 && stride == 1)
+    pt_conv_kernel_ig8<3><<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
+        x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
+        pad_in, cmag);
+  else
+    pt_conv_kernel_ig8<1><<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
+        x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
+        pad_in, cmag);
 }
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
