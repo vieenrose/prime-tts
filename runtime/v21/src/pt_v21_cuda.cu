@@ -1025,21 +1025,27 @@ __global__ void __launch_bounds__(256, 4) pt_conv_kernel_ig8(
   for (int r0 = 0; r0 < kc; r0 += IG_RK) {
     int r = r0 + lr;
     int lg = blockIdx.y * 16 + lq;
-    Ws[lr][lq] = (r < kc && lg < nblk) ? w4[(int64_t) lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    if (COAL == 3)   /* 32-bit index (weights < 2^31 elements): ptxas re-derives it every chunk at
+                      * 64 registers, and a 32-bit multiply is 3 XMADs where the 64-bit one is 8 */
+      Ws[lr][lq] = (r < kc && lg < nblk) ? w4[lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
+    else
+      Ws[lr][lq] = (r < kc && lg < nblk) ? w4[(int64_t) lg * kc + r] : make_float4(0.f, 0.f, 0.f, 0.f);
     if (COAL == 3) {
       /* stride == 1 (the host dispatches this variant only then): one base pointer per chunk and
        * the 8 loads at immediate offsets 64 B apart, unpredicated when the whole 128-column window
        * is in range; edge tiles take the predicated per-element path. Same addresses and values
        * as COAL=1 (bit-identical); removes the per-element multiply + bounds + 64-bit address
        * arithmetic that ptxas emitted for every staged element. */
+      /* all offsets in 32-bit (activation buffers < 2^31 elements), folded into one pointer;
+       * cmag != 0 is host-guaranteed for this variant, so no software divide in the loop */
       float *xr = (float *) &Xs[lr][0];
-      const float *row = xb;
+      const float *row = x;
       const int nt = (int) (Tout - t0);
       const int lim = pad_in < 0 ? 0x7fffffff : (int) ldx;
       int s0 = 0, ok = r < kc;
       if (ok) {
-        int k = cmag ? (int) __umulhi((unsigned) r, cmag) : r / cin, ci = r - k * cin;
-        row = xb + (int64_t) ci * ldx;
+        int k = (int) __umulhi((unsigned) r, cmag), ci = r - k * cin;
+        row = x + ((int) blockIdx.z * (int) bsx + ci * (int) ldx);
         s0 = (int) t0 + k * dil - (pad_in < 0 ? 0 : (int) pad_in);
       }
       if (ok && nt >= 128 && s0 >= 0 && s0 + 127 < lim) {
@@ -1300,7 +1306,7 @@ static void launch_conv_ig8(pt_ctx *c, dim3 g, const float *x, int64_t ldx, int 
   /* PT_V21_IG8_S1=0: no stride-1 specialization (bisection endpoint) */
   static int s1 = -1;
   if (s1 < 0) s1 = getenv("PT_V21_IG8_S1") ? atoi(getenv("PT_V21_IG8_S1")) : 1;
-  if (s1 && stride == 1)
+  if (s1 && stride == 1 && cmag && (int64_t) g.z * bsx < 0x7fffffff)
     pt_conv_kernel_ig8<3><<<g, 256, 0, (cudaStream_t) c->g_stream>>>(
         x, ldx, cin, K, dil, stride, y, ldy, Tout, cout, wp, bias, bsx, bsy, epi0, epi1, ea0, ea1,
         pad_in, cmag);
