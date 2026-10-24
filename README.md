@@ -65,7 +65,7 @@ runtime/v21/src/pt_v21_cuda.cu  sm_53 kernels: conv, conv_transpose, matmul; res
 runtime/v21/src/pt_v21.h        shared types, pt_ctx, kernel signatures
 runtime/v21/src/main_v21.c      single-stream driver (parity)
 runtime/v21/src/main_v21_par.c  multi-stream driver (N threads: own ctx/stream/arena, shared weights;
-                                defaults to a 2-of-4-core CPU cap — PT_V21_CPUS=all to disable)
+                                defaults to a 1-core CPU cap — PT_V21_CPUS=all to disable)
 runtime/v21/gen/pt_graph.c      generated graph tables (from spec/v21_layers.json + the ONNX model)
 tools/gen_v21_graph.py          regenerates those tables; legitimate place to bake in optimizations
 tools/export_v21.py             ONNX -> build/v21.ptk container
@@ -181,12 +181,14 @@ What remains needs to happen outside this benchmark's scope:
   benchmarked.
 - **Half2 compute** if the concurrency target moves well beyond 4 streams (issue ceiling 168
   GFLOP/s half2 vs 88 fp32).
-- **Production guidance**: the multi-stream driver now **self-caps to 2 of the 4 cores by default**
-  (`PT_V21_CPUS=all` disables, `PT_V21_CPUS="2,3"` picks an explicit set; the cap keeps the upper
-  half of the allowed set, leaving cpu0 to IRQs/system) so co-tenants keep CPU headroom. Measured
-  cost: ~+7 % on T81 (still 7.8–8.7× realtime, RTF 0.46–0.51) and +10 % on T20 (RTF 0.88); SNDR is
-  identical in every arm — scheduling cannot change numerics. On a *loaded* box the co-tenant
-  costs a further +2.9 % per busy core, and a cold first request +6.7 %.
+- **Production guidance**: the multi-stream driver now **self-caps to one core by default**
+  (`PT_V21_CPUS=all` disables, `PT_V21_CPUS="2,3"` pins an explicit set; the cap keeps the
+  upper-most allowed cpu, leaving cpu0 to IRQs/system) for maximal co-tenant headroom. Measured
+  at 1 core: T81-class speech holds ~6.9× realtime (RTF ~0.58), but short utterances (T20) sit
+  at RTF 0.96–1.02 — at/over the real-time line. **Two cores is the floor for the full case
+  range** (T20 RTF 0.88 at 2 cores; 7.8–8.7× realtime at T81). SNDR is identical in every arm —
+  scheduling cannot change numerics. On a loaded box a co-tenant costs a further +2.9 % per busy
+  core, and a cold first request +6.7 %.
 
 ## Reproduction and integrity
 

@@ -113,11 +113,11 @@ static void *job_run(void *arg) {
   return 0;
 }
 
-/* Operator default: cap PrimeTTS to half the machine's cores (2 of the Nano's 4 A57s) so the
- * co-tenant (LLM server, monitors) keeps CPU headroom. The N=4 wall is GPU-serialized on the
- * single SM, so the measured cost is only ~+7% at T81 / +10% at T20, and realtime holds with
- * margin (2-core cap A/B, .auto/ideas.md). The cap keeps the UPPER half of the allowed set:
- * cpu0 stays with IRQs and system tasks (measured slightly faster than 0-1, 3/3 pairs).
+/* Operator default: cap PrimeTTS to ONE core so co-tenants keep maximal CPU headroom. The N=4
+ * wall is GPU-serialized on the single SM, so T81-class speech still runs ~6.9x realtime
+ * (RTF ~0.58, measured); SHORT utterances (T20) sit at RTF ~0.96-1.02 — at/over the real-time
+ * line. 2 cores is the floor for the full case range (2-core A/B, .auto/ideas.md).
+ * The cap keeps the upper-most allowed cpu (cpu0 stays with IRQs/system).
  * PT_V21_CPUS=all disables the cap; PT_V21_CPUS="2,3" or "2-3" pins an explicit set. */
 static int parse_cpu_list(const char *s, cpu_set_t *set) {
   CPU_ZERO(set);
@@ -147,9 +147,7 @@ static void apply_cpu_cap(void) {
   CPU_ZERO(&allowed);
   if (sched_getaffinity(0, sizeof(allowed), &allowed)) return; /* unknown: leave scheduling alone */
   int navail = CPU_COUNT(&allowed);
-  int total = (int) sysconf(_SC_NPROCESSORS_ONLN);
-  if (total < 1) total = navail;
-  int cap = (total + 1) / 2;                 /* half the machine: 4 -> 2, 2 -> 1 (no further cut) */
+  int cap = 1;                               /* operator default: one core */
   CPU_ZERO(&want);
   if (env && *env) {
     if (parse_cpu_list(env, &want)) {
