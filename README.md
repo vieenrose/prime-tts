@@ -38,6 +38,7 @@ best-so-far) with the session's phase structure and the biggest single levers:
 | stride-1 conv staging specialization (#1583) | 1908 | 581 | 70.09 |
 | ig88p: 8ch × 8col register tile with prefetch (#1589) | 1877 | 538 | 70.09 |
 | **final cluster** — 152 official draws, runs 1600+ | **1783 mean (1692–1902)** | **~536** | 70.09 |
+| adaptive sleep-polled GPU wait (phase 9; matched pairs, not a new cluster) | −113 ms (4/4 pairs) | ±0 | 70.09 |
 
 - **5.78× at N=4** (10308 → 1783 ms) and **7.2× single stream** (3863 → ~536 ms) from the session
   baseline, with every kept change bit-exact or inside the parity envelope (`max|d|` 2.258e-04 on
@@ -49,6 +50,11 @@ best-so-far) with the session's phase structure and the biggest single levers:
 - Quality gates on every run: **SNDR ≥ 60 dB** on the Nano for T20 + T81 (GPU) and T81 (CPU) via
   `.auto/checks.sh`, plus the full per-node gate (`tests/v21_parity_c.py --from-dumps <Nano dumps>`)
   → 4010 nodes, 0 over gate.
+- **Deployment defaults moved after the session** (operator decisions, see below): the drivers
+  cap themselves to **one CPU core**, and the GPU wait became an adaptive sleep-poll that gives
+  that core back to the working streams (**−155 ms** at N=4 on 1 core, 6/6 pairs; T81 1-core
+  official draws 2.04–2.19 s). The **server mode** removes the per-process startup on top of that:
+  4 concurrent T81 requests in **1.61 s** on one core.
 - The wall is fully accounted for by measured components (bar chart above): serialized startup
   287 ms, 4 × ~298 ms of per-stream kernel+copy time on the single SM, a scheduling remainder, and
   the close/SNDR tail. Every optimization axis is closed by measurement or arithmetic — kernel
@@ -66,6 +72,10 @@ runtime/v21/src/pt_v21.h        shared types, pt_ctx, kernel signatures
 runtime/v21/src/main_v21.c      single-stream driver (parity)
 runtime/v21/src/main_v21_par.c  multi-stream driver (N threads: own ctx/stream/arena, shared weights;
                                 defaults to a 1-core CPU cap — PT_V21_CPUS=all to disable)
+runtime/v21/src/main_v21_serve.c persistent server: warm workers, OpenAI-shaped POST /v1/audio/speech
+runtime/v21/src/pt_cpucap.h     the CPU cap shared by the par driver and the server
+server/tts_gateway.py           text frontend gateway (g2pw + g2p_en) -> Nano server, for HF s2s
+docs/server.md                  server protocol, setup, measured latencies
 runtime/v21/gen/pt_graph.c      generated graph tables (from spec/v21_layers.json + the ONNX model)
 tools/gen_v21_graph.py          regenerates those tables; legitimate place to bake in optimizations
 tools/export_v21.py             ONNX -> build/v21.ptk container
@@ -100,11 +110,20 @@ make -f runtime/v21/Makefile serve
 ./build/pt_v21_serve --container build/v21.ptk --cuda --port 8090
 ```
 
+On the s2s host, the text gateway (its own venv; setup in `docs/server.md`):
+
+```bash
+NLTK_DATA=<nltk_data> server/.venv-gateway/bin/python server/tts_gateway.py \
+    --nano http://<nano>:8090 --port 8091
+```
+
 Profiling knobs (no recompile): `PT_V21_EKIND=1` prints accumulated time per op kind plus the
 GPU/host split (kernels, staging copies, arena, alloc); `PT_V21_EKIND=2` adds the top-20 per-node
 GPU times; `PT_V21_DUMP_T=<node>` writes `/tmp/pt_dump_<node>.bin` (raw fp32) for byte-exact A/B of
 a kernel variant against the CPU reference; `PT_V21_GPU=conv|convT|matmul` restricts the GPU to one
-kind; `PT_V21_ARENA_MB` sizes the per-stream device arena.
+kind; `PT_V21_ARENA_MB` sizes the per-stream device arena. Deployment knobs: `PT_V21_CPUS`
+(`all` / `"2,3"`; default one core), `PT_V21_WAIT_US` (GPU wait poll interval, default 100;
+`0` = the driver's yield wait), `PT_V21_WAIT_ADAPT=0` (always sleep while waiting).
 
 The measurement harness is `./.auto/measure.sh` (syncs to the Nano, rebuilds, samples free RAM
 while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split) and
@@ -157,9 +176,12 @@ scheduled earliest-deadline-first. Through the gateway: first audio of a paragra
    decoder records are 13.6M elements: each stream used to build its own 54.5 MB fp32 copy. Sharing
    them (ctab-keyed, refcounted, mutex-guarded, container-path guarded) removed ~164 MB at N=4 and
    the per-call `cudaMalloc`+copy for every conv's bias.
-6. **Host-side wins do not move the N=4 wall.** At 4 streams the wall is GPU-contention-bound;
-   host wins (einsum, elementwise) show up in single-stream latency and free CPU cycles. To move
-   the primary metric, attack GPU kernels.
+6. **Host-side wins do not move the N=4 wall — when cores are free.** With 4 cores the wall is
+   GPU-contention-bound and host work hides behind it. On a 1-core cap that stops being true, and
+   the biggest host cost was not graph ops at all but **threads waiting on the GPU**: the yield
+   wait burned ~0.9 s of the single core per N=4 run (`time`: sys 1.14 s of a 2.46 s run).
+   Measure CPU accounting (user/sys) before optimizing host work in a core-capped regime — a
+   per-op wall profile cannot see wait-loop CPU.
 7. **A buffer pool for activation tensors is not a win here**: no measurable latency gain, and
    ~200 MB of retained memory at N=4 (glibc was already reusing the freed blocks).
 8. **Audit the per-instruction global access pattern, not just the tile shape.** The last big conv
@@ -168,6 +190,13 @@ scheduled earliest-deadline-first. Through the gateway: first audio of a paragra
    `lq, lq+16, …` instead gives contiguous 64 B per half-warp per load. Tile shape, timing, cache
    config and occupancy had all been tuned before anyone looked at sector efficiency — and sm_53
    does not cache plain global loads in L1, so there is no second chance to fix it.
+
+9. **Sleep while waiting only when someone else needs the core.** A plain sleep-poll freed the core
+   (−194 ms at N=4) but cost a lone stream +43 ms of wake latency; sleeping only while another
+   stream is doing host work, and yield-polling otherwise, kept the gain at N=4 and made N=1 a tie.
+10. **A context must survive many runs.** The benchmark ran each context once, which hid a bug:
+    fusion state (skip flags, aliased tensors) leaked into the next run and segfaulted it. Server
+    mode exposed it on its second request; `pt_v21_run` now resets per-run state.
 
 ## Where the session ended
 
@@ -182,26 +211,37 @@ Every optimization axis is closed by measurement or arithmetic; the mechanisms a
   copies it removes were already hidden behind GPU work; the added device passes are not.
 - **Scheduling**: batch-4 lockstep +390 ms (natural stream desync is worth more than wave
   alignment); CUDA graphs ~1–2 ms of launch overhead, below the confirmability bar; affinity
-  pinning a tie.
+  pinning a tie; blocking CUDA sync worse on both 4 cores (+118 ms) and 1 core (+45 ms).
+- **1-core regime (phase 9)**: fp32 container aliasing (a tie, its second kill) and
+  `-mcpu=cortex-a57` (+30 ms) closed; the adaptive GPU wait kept (above).
 - **Startup**: 287 ms serialized (context 85 + ramp + record pass + upload), bounded below by the
   governor's clock ramp — every attack that removes GPU work from that window measures worse.
 - **Occupancy/carveout**: register-limited at 4 blocks/SM by design; forcing changes to blocks/SM
   moved zero of 11 kernels and measured neutral-to-worse.
 
-What remains needs to happen outside this benchmark's scope:
+Done after the session, outside the benchmark's timer (it would be timer-scope gaming inside it):
 
-- **Server-mode weight/context amortization** — the deployment (a resident server rather than a
-  process-per-request) amortizes the 287 ms startup: worth ~260 ms on short requests, the largest
-  remaining deployment win. Measuring it here would be timer-scope gaming, so it is reported, not
-  benchmarked.
+- **Server mode** — `pt_v21_serve` pays the 287 ms startup once per process, not per request,
+  and holds the GPU clock between requests (the governor otherwise idles it within seconds and
+  the next request runs ~2.5× slower). OpenAI-compatible `/v1/audio/speech` plus a text gateway
+  for HF speech-to-speech; see [`docs/server.md`](docs/server.md).
+
+What remains:
+
+- **Chunked vocoding** — audio within one sentence arrives when the sentence is done; streaming
+  inside a sentence needs the decoder/iSTFT run in windows.
+- **Stochastic sampling** — the runtime evaluates the sampler as zeros (the parity setting), so
+  `noise_scale` has no effect yet.
 - **Half2 compute** if the concurrency target moves well beyond 4 streams (issue ceiling 168
   GFLOP/s half2 vs 88 fp32).
-- **Production guidance**: the multi-stream driver now **self-caps to one core by default**
+- **Production guidance**: the drivers and the server **self-cap to one core by default**
   (`PT_V21_CPUS=all` disables, `PT_V21_CPUS="2,3"` pins an explicit set; the cap keeps the
   upper-most allowed cpu, leaving cpu0 to IRQs/system) for maximal co-tenant headroom. Measured
   at 1 core: T81-class speech holds ~6.9× realtime (RTF ~0.58), but short utterances (T20) sit
   at RTF 0.96–1.02 — at/over the real-time line. **Two cores is the floor for the full case
-  range** (T20 RTF 0.88 at 2 cores; 7.8–8.7× realtime at T81). SNDR is identical in every arm —
+  range** (T20 RTF 0.88 at 2 cores; 7.8–8.7× realtime at T81) for the per-process driver; the
+  server removes the per-process startup, which was 28 % of T20's wall (not yet measured for T20
+  at N=4 through the server). SNDR is identical in every arm —
   scheduling cannot change numerics. On a loaded box a co-tenant costs a further +2.9 % per busy
   core, and a cold first request +6.7 %.
 
