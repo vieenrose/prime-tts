@@ -1,5 +1,9 @@
 # Nano TTS wire protocol (v1)
 
+> The v2.1 server speaks an OpenAI-compatible HTTP API instead: `POST /v1/audio/speech`
+> (`build/pt_v21_serve` + `server/tts_gateway.py`, see [`server.md`](server.md)). This TCP
+> protocol is the v1b_8k design, implemented by the mock and client in `server/`.
+
 TCP, one connection per stream, max 8 concurrent (`MAX_STREAMS = 8`). Little-endian throughout.
 Implemented by `server/mock_tts.py` (mock) and `server/tts_client.py` (client); the Nano runtime
 serves the same wire format with real audio.

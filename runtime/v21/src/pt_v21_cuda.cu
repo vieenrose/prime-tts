@@ -565,6 +565,43 @@ static double gpu_warm_once(void) {
   return cost;
 }
 
+/* Server keep-warm (main_v21_serve.c): the governor drops the clock within seconds of idle, so a
+ * request arriving 5 s after the previous one ran ~2.3x slower (measured 1316 vs 542-577 ms, T81).
+ * One short ALU burst on its own stream keeps the load signal up between requests; the caller
+ * decides when (only inside a window after real traffic, only while no worker is busy). */
+int pt_v21_cuda_keepwarm(int iters) {
+  static cudaStream_t s;
+  static int *sink;
+  static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&mu);
+  if (!s) {
+    if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) != cudaSuccess ||
+        cudaMalloc((void **) &sink, 256 * sizeof(int)) != cudaSuccess) {
+      cudaGetLastError();
+      s = NULL;
+      pthread_mutex_unlock(&mu);
+      return -1;
+    }
+    cudaMemsetAsync(sink, 0, 256 * sizeof(int), s);
+  }
+  pt_warmup_kernel<<<32, 256, 0, s>>>(sink, iters);
+  struct timespec ts = {0, 200000L};
+  while (cudaStreamQuery(s) == cudaErrorNotReady) nanosleep(&ts, 0);
+  cudaGetLastError();
+  pthread_mutex_unlock(&mu);
+  return 0;
+}
+
+/* current GPU clock in Hz from devfreq sysfs (uncached), -1 if unreadable */
+long pt_v21_gpu_cur_freq(void) {
+  FILE *f = fopen("/sys/devices/platform/host1x/57000000.gpu/devfreq/57000000.gpu/cur_freq", "r");
+  char buf[32];
+  long v = -1;
+  if (f && fgets(buf, sizeof buf, f)) v = atol(buf);
+  if (f) fclose(f);
+  return v;
+}
+
 static int g_prewarm;
 static void gpu_warm_launch(void);
 static double gpu_warm_finish(void);

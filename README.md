@@ -95,6 +95,9 @@ make -f runtime/v21/Makefile gen      # regenerate runtime/v21/gen/pt_graph.c
 ./build/pt_v21_nano --container build/v21.ptk --case tests/golden_v21/T81 --cuda
 # four concurrent requests
 ./build/pt_v21_par --container build/v21.ptk --case tests/golden_v21/T81 --cuda --parallel 4
+# persistent server (docs/server.md)
+make -f runtime/v21/Makefile serve
+./build/pt_v21_serve --container build/v21.ptk --cuda --port 8090
 ```
 
 Profiling knobs (no recompile): `PT_V21_EKIND=1` prints accumulated time per op kind plus the
@@ -106,6 +109,18 @@ kind; `PT_V21_ARENA_MB` sizes the per-stream device arena.
 The measurement harness is `./.auto/measure.sh` (syncs to the Nano, rebuilds, samples free RAM
 while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split) and
 `./.auto/checks.sh` (integrity manifest + SNDR gates). Both take `NANO=user@host`.
+
+## Server mode: OpenAI-compatible `/v1/audio/speech` (HF speech-to-speech ready)
+
+`build/pt_v21_serve` (Nano, `make -f runtime/v21/Makefile serve`) keeps 4 warm contexts and the
+resident weights for the life of the process, so requests skip the ~287 ms per-process startup:
+4 concurrent T81 requests in **1.61 s** (vs ~2 s per-process), with a GPU keep-warm window that
+holds full clock between requests (post-idle T81 0.56-0.62 s instead of 1.3-1.7 s).
+`server/tts_gateway.py` runs the zh-TW/en text frontend (g2pw + g2p_en, needs torch) on the
+s2s host and exposes the standard text API; sentences stream back as PCM16 16 kHz as they finish,
+scheduled earliest-deadline-first. Through the gateway: first audio of a paragraph 0.34 s alone,
+0.42-0.98 s with 4 concurrent paragraphs, no playback underrun. Full protocol, setup and the
+`speech-to-speech --tts openai` command: [`docs/server.md`](docs/server.md).
 
 ## What the Nano actually gives you (measured, `bench/gpu/RESULTS.md`)
 

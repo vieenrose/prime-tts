@@ -12,7 +12,7 @@ CFLAGS  ?= -O3 -std=gnu11 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare
 CUF     ?= -O3 -arch=sm_53 -std=c++11
 CUDA    ?= /usr/local/cuda
 GEN      = runtime/v21/gen/pt_graph.c
-HDR      = runtime/v21/src/pt_v21.h runtime/v21/gen/pt_graph_tab.h runtime/v21/Makefile   # flag changes rebuild
+HDR      = runtime/v21/src/pt_v21.h runtime/v21/src/pt_cpucap.h runtime/v21/gen/pt_graph_tab.h runtime/v21/Makefile   # flag changes rebuild
 # Fingerprint of the effective toolchain flags: an env-provided CFLAGS/CUF change must also
 # rebuild (a stale binary would silently benchmark the wrong code). Content changes only when
 # the flags do, so steady-state builds stay no-ops.
@@ -72,9 +72,16 @@ build/pt_v21_par: $(SRC) runtime/v21/src/main_v21_par.c $(GEN) runtime/v21/src/p
 	$(NVCC) $(CUF) $(INC) -o $@ build/pt_v21_cuda_par.o build/pt_v21_host_par.o build/pt_graph_par.o \
 	  runtime/v21/src/main_v21_par.c -L$(CUDA)/lib64 -lcudart -lcuda -lpthread -lm
 
+# Persistent server: warm contexts, OpenAI-shaped POST /v1/audio/speech (see main_v21_serve.c)
+serve: build/pt_v21_serve
+
+build/pt_v21_serve: build/pt_v21_par runtime/v21/src/main_v21_serve.c
+	$(NVCC) $(CUF) $(INC) -o $@ build/pt_v21_cuda_par.o build/pt_v21_host_par.o build/pt_graph_par.o \
+	  runtime/v21/src/main_v21_serve.c -L$(CUDA)/lib64 -lcudart -lcuda -lpthread -lm
+
 gen:
 	$(PY) tools/gen_v21_graph.py
 
 clean:
-	rm -f build/pt_v21_host build/pt_v21_nano build/pt_v21_par build/*.o
-.PHONY: host nano par gen clean BFORCE
+	rm -f build/pt_v21_host build/pt_v21_nano build/pt_v21_par build/pt_v21_serve build/*.o
+.PHONY: host nano par serve gen clean BFORCE

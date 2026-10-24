@@ -2496,6 +2496,8 @@ int pt_v21_cuda_init(pt_ctx *c, int verbose) {
 }
 void pt_v21_cuda_shutdown(pt_ctx *c) { (void) c; }
 void pt_v21_cuda_active(int delta) { (void) delta; }
+int pt_v21_cuda_keepwarm(int iters) { (void) iters; return -1; }
+long pt_v21_gpu_cur_freq(void) { return -1; }
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
@@ -2581,6 +2583,15 @@ static int pt_v21_run_graph(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t 
     pt_tv *t = &c->V[i];
     if (t->dev != 2) tv_free(c, t);
   }
+  /* A context can run many requests (server mode). Fusion state is per run: the previous run's
+   * skip flags would stop the producer from re-fusing while its consumers still skip (their
+   * outputs never computed -> NULL operands), and its dev==2 aliases point at buffers their owners
+   * just freed. Every node re-executes, so a clean tensor table is the correct starting state. */
+  memset(c->V, 0, sizeof(pt_tv) * PT_N_TENSOR);
+  if (c->skip) memset(c->skip, 0, PT_N_NODE);
+  c->conv_in_dev = NULL;
+  c->conv_keep = c->conv_keep_res = 0;
+  c->conv_out_dev = NULL;
   /* graph inputs (ids in table order, all origin "IN") alias the caller's feeds */
   int ni = 0;
   for (int i = 0; i < PT_N_TENSOR && strncmp(pt_tdefs[i].origin, "IN", 2) == 0; i++) {
