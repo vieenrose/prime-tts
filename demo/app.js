@@ -19,7 +19,7 @@ const EXAMPLES = [
 
 const $ = (id) => document.getElementById(id);
 const textEl = $("text");
-let ctx = null, ctrl = null, playing = false;
+let ctx = null, ctrl = null, playing = false, workletReady = null;
 
 for (const ex of EXAMPLES) {
   const c = document.createElement("span");
@@ -49,6 +49,18 @@ health();
 
 const showErr = (m) => { $("err").style.display = "block"; $("err").textContent = m; };
 const clearErr = () => { $("err").style.display = "none"; $("err").textContent = ""; };
+const note = (m) => { $("note").textContent = m; };
+
+/* AudioWorklet setup can fail OR hang (some browsers, locked-down contexts). Never let that leave
+ * the UI stuck: bound it, and fall back to whole-buffer playback, which the browser resamples. */
+async function ensureWorklet() {
+  if (workletReady !== null) return workletReady;
+  if (!ctx.audioWorklet) { workletReady = false; return false; }
+  const load = ctx.audioWorklet.addModule("./player.worklet.js").then(() => true).catch(() => false);
+  const timeout = new Promise((r) => setTimeout(() => r(false), 3000));
+  workletReady = await Promise.race([load, timeout]);
+  return workletReady;
+}
 
 function wavBlob(pcm) {
   const n = pcm.length, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
@@ -141,7 +153,10 @@ async function speak() {
     }
   }
   if (ctx.state === "suspended") await ctx.resume();
-  if (!ctx.audioWorklet) { showErr("This browser has no AudioWorklet support."); return; }
+  if (!(await ensureWorklet())) {
+    note("streaming player unavailable here — buffered playback (browser-side conversion)");
+    return speakBuffered(text);
+  }
 
   playing = true;
   $("go").disabled = true; $("stop").disabled = false;
@@ -152,12 +167,17 @@ async function speak() {
   let firstMs = null, audioS = 0, started = false, gaps = 0;
   const parts = [];
 
-  await ctx.audioWorklet.addModule("./player.worklet.js");
-  const node = new AudioWorkletNode(ctx, "primetts-player", {
-    numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
-    processorOptions: { inRate: SR },
-  });
-  node.connect(ctx.destination);
+  let node;
+  try {
+    node = new AudioWorkletNode(ctx, "primetts-player", {
+      numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
+      processorOptions: { inRate: SR },
+    });
+    node.connect(ctx.destination);
+  } catch (e) {
+    note("worklet node failed — buffered playback");
+    return speakBuffered(text);
+  }
   node.port.onmessage = (e) => {
     if (e.data && e.data.underrunSamples) {   // network starvation, in ms of inserted silence
       gaps = Math.round((e.data.underrunSamples / SR) * 1000);
