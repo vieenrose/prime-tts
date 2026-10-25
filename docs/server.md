@@ -39,7 +39,7 @@ End-to-end through the gateway (text in, HF s2s request shape, this host → pic
 
 ```bash
 make -f runtime/v21/Makefile serve        # on the Nano (CUDA)
-./build/pt_v21_serve --container build/v21.ptk --cuda --port 8090 [--workers 8] [--keepwarm 30]
+./build/pt_v21_serve --container build/v21.ptk --port 8090 [--workers 8] [--keepwarm 30]
 ```
 
 - `--workers N` (default 8, max 8): warm contexts = concurrent syntheses; more requests queue

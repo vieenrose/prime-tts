@@ -1,6 +1,6 @@
 /* main_v21_serve.c - persistent PrimeTTS v2.1 server: OpenAI-shaped POST /v1/audio/speech.
  *
- *   ./pt_v21_serve --container build/v21.ptk --cuda [--port 8090] [--bind 0.0.0.0] [--workers 8]
+ *   ./pt_v21_serve --container build/v21.ptk [--port 8090] [--bind 0.0.0.0] [--workers 8]
  *                  [--noise 0] [--default-sid 0]
  *
  * Server mode is the latency lever the benchmark driver cannot show: the container record pass,
@@ -642,7 +642,8 @@ out:
 int main(int argc, char **argv) {
   apply_cpu_cap();
   const char *container = "build/v21.ptk", *bind_ip = "0.0.0.0";
-  int use_cuda = 0, port = 8090, nw = 8;
+  int use_cuda = 1;   /* CUDA is the default; --no-cuda selects the portable CPU path */
+  int port = 8090, nw = 8;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--container") && i + 1 < argc) container = argv[++i];
     else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);
@@ -651,9 +652,10 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--noise") && i + 1 < argc) g_default_noise = (float) atof(argv[++i]);
     else if (!strcmp(argv[i], "--default-sid") && i + 1 < argc) g_default_sid = atoi(argv[++i]);
     else if (!strcmp(argv[i], "--keepwarm") && i + 1 < argc) g_kw_window = atof(argv[++i]) * 1000.0;
-    else if (!strcmp(argv[i], "--cuda")) use_cuda = 1;
+    else if (!strcmp(argv[i], "--cuda")) use_cuda = 1;   /* accepted for compatibility */
+    else if (!strcmp(argv[i], "--no-cuda") || !strcmp(argv[i], "--cpu")) use_cuda = 0;
     else {
-      fprintf(stderr, "usage: %s --container F [--cuda] [--port P] [--bind IP] [--workers N] "
+      fprintf(stderr, "usage: %s --container F [--no-cuda] [--port P] [--bind IP] [--workers N] "
                       "[--noise X] [--default-sid S] [--keepwarm SEC]\n", argv[0]);
       return 1;
     }

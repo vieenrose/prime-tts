@@ -107,7 +107,7 @@ make -f runtime/v21/Makefile gen      # regenerate runtime/v21/gen/pt_graph.c
 ./build/pt_v21_par --container build/v21.ptk --case tests/golden_v21/T81 --cuda --parallel 4
 # persistent server (docs/server.md)
 make -f runtime/v21/Makefile serve
-./build/pt_v21_serve --container build/v21.ptk --cuda --port 8090
+./build/pt_v21_serve --container build/v21.ptk --port 8090
 ```
 
 On the s2s host, the text gateway (its own venv; setup in `docs/server.md`):

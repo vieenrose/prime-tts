@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
   const char *ckdir = 0;
   const char *shapes = 0;
   int trace_idx = -1;
-  int use_cuda = 0;
+  int use_cuda = 1;   /* CUDA is the default; --no-cuda / --cpu selects the portable CPU path */
   const char *out = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--container") && i + 1 < argc) container = argv[++i];
@@ -50,7 +50,8 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--trace-matmul")) trace_idx = -2;
     else if (!strcmp(argv[i], "--shapes") && i + 1 < argc) shapes = argv[++i];
     else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
-    else if (!strcmp(argv[i], "--cuda")) use_cuda = 1;
+    else if (!strcmp(argv[i], "--cuda")) use_cuda = 1;   /* accepted for compatibility */
+    else if (!strcmp(argv[i], "--no-cuda") || !strcmp(argv[i], "--cpu")) use_cuda = 0;
   }
   if (use_cuda)
     pt_v21_cuda_prewarm();   /* context + clock ramp overlap the container record pass */
