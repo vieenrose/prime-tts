@@ -1,11 +1,17 @@
-/* PrimeTTS v2.1 Nano demo client.
- * POSTs text to the public gateway (OpenAI-shaped /v1/audio/speech) and plays the
- * streamed PCM16 16 kHz sentences back-to-back via Web Audio as they arrive.
+/* PrimeTTS v2.1 Nano demo client (player v4).
  *
- * If the tunnel restarted and this URL 404s/refuses, update it (see demo/README.md).
+ * Two playback modes, so a remaining artefact can be attributed instead of guessed:
+ *   Stream   - schedule 0.25 s pieces as they arrive, after a 0.75 s prebuffer (lowest latency).
+ *   Buffered - download everything, then play it as ONE AudioBuffer (no scheduling, no seams).
+ * If Buffered is clean and Stream is not, the problem is scheduling. If both sound the same,
+ * the problem is not in this file.
+ *
+ * The delivered PCM is verified clean server-side (joint energy profiles, edge bursts, click
+ * detection normalised by peak, byte-identical across runs, and the downloaded WAV plays clean),
+ * so the indicator line reports evidence rather than assumptions.
  */
 const GATEWAY_URL = "https://variation-joan-requirement-delivers.trycloudflare.com";
-
+const PLAYER_VERSION = "v4";
 const SR = 16000;
 const EXAMPLES = [
   "您好，歡迎使用語音助理。",
@@ -16,7 +22,7 @@ const EXAMPLES = [
 ];
 
 const $ = (id) => document.getElementById(id);
-const textEl = $("text"), goBtn = $("go"), stopBtn = $("stop"), errEl = $("err");
+const textEl = $("text");
 let ctx = null, ctrl = null, playing = false;
 
 for (const ex of EXAMPLES) {
@@ -27,6 +33,7 @@ for (const ex of EXAMPLES) {
   c.onclick = () => { textEl.value = ex; };
   $("chips").appendChild(c);
 }
+$("pver").textContent = PLAYER_VERSION;
 
 async function health() {
   $("health").textContent = "checking…";
@@ -46,8 +53,8 @@ async function health() {
 $("retry").onclick = health;
 health();
 
-function showErr(m) { errEl.style.display = "block"; errEl.textContent = m; }
-function clearErr() { errEl.style.display = "none"; errEl.textContent = ""; }
+const showErr = (m) => { $("err").style.display = "block"; $("err").textContent = m; };
+const clearErr = () => { $("err").style.display = "none"; $("err").textContent = ""; };
 
 function wavBlob(pcmBytes) {
   const n = pcmBytes.length, buf = new ArrayBuffer(44 + n), v = new DataView(buf);
@@ -61,79 +68,99 @@ function wavBlob(pcmBytes) {
   return new Blob([buf], { type: "audio/wav" });
 }
 
-goBtn.onclick = speak;
+/* s16le bytes -> Float32Array with SIGN extension (unsigned decode mirrors every negative sample) */
+function toFloat(bytes) {
+  const n = bytes.length >> 1, f = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let v = (bytes[2 * i + 1] << 8) | bytes[2 * i];
+    if (v >= 0x8000) v -= 0x10000;
+    f[i] = v / 32768;
+  }
+  return f;
+}
 
-async function speak() {
-  const text = textEl.value.trim();
-  if (!text || playing) return;
+async function ensureCtx() {
+  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") await ctx.resume();
+  return ctx;
+}
+
+function requestBody(text) {
+  return {
+    model: "primetts-v21", input: text, voice: $("voice").value,
+    response_format: "pcm", stream_format: "audio",
+    speed: parseFloat($("speed").value),
+  };
+}
+
+function beginRun() {
   clearErr();
   $("dl").style.display = "none";
-  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: SR });
-  if (ctx.state === "suspended") await ctx.resume();
-  playing = true; goBtn.disabled = true; stopBtn.disabled = false;
-  $("first").textContent = "…"; $("nc").textContent = "0"; $("audio").textContent = "0.0s";
+  playing = true;
+  $("go").disabled = true; $("goBuf").disabled = true; $("stop").disabled = false;
+  $("first").textContent = "…"; $("nc").textContent = "0";
+  $("audio").textContent = "0.0s"; $("gaps").textContent = "0";
   $("bar").style.width = "0";
-  const t0 = performance.now();
-  // Jitter-tolerant streaming player. The bytes are proven clean (the WAV download built from the
-  // same stream is artefact-free), so playback follows two rules: (1) buffers are created at the
-  // 16 kHz source rate and the BROWSER resamples to the device rate with its native resampler --
-  // a hand-rolled linear interpolator adds audible imaging harshness whenever the context doesn't
-  // run at 16 kHz; (2) scheduling starts only after PREBUF of audio is banked, so a late sentence
-  // can't tear a hole at a joint (underruns are counted in the stats instead of snapping silently).
-  const IN_CHUNK = 4000;          // 0.25 s per scheduled piece at 16 kHz
-  const PREBUF = 12000;           // 0.75 s banked before the first piece starts
-  let firstMs = null, nChunks = 0, audioS = 0, underruns = 0;
+  ctrl = new AbortController();
+  return performance.now();
+}
+
+function endRun() {
+  playing = false;
+  $("go").disabled = false; $("goBuf").disabled = false; $("stop").disabled = true;
+}
+
+function publishWav(pcmBytes) {
+  const dl = $("dl");
+  dl.href = URL.createObjectURL(wavBlob(pcmBytes));
+  dl.style.display = "inline";
+}
+
+/* ---------------- mode 1: streaming, with prebuffer and underrun accounting ---------------- */
+async function speakStream() {
+  const text = textEl.value.trim();
+  if (!text || playing) return;
+  await ensureCtx();
+  const t0 = beginRun();
+  const IN_CHUNK = 4000;   // 0.25 s at 16 kHz
+  const PREBUF = 12000;    // 0.75 s banked before the first piece starts
+  let firstMs = null, nChunks = 0, audioS = 0, gaps = 0;
   let fq = new Float32Array(0), playAt = 0, started = false;
   const full = [];
-  ctrl = new AbortController();
-  const pushBytes = (bytes) => {  // s16le -> float with SIGN extension (unsigned decode distorts)
-    const n = bytes.length >> 1, f = new Float32Array(n);
-    for (let i = 0; i < n; i++) {
-      let v = (bytes[2 * i + 1] << 8) | bytes[2 * i];
-      if (v >= 0x8000) v -= 0x10000;
-      f[i] = v / 32768;
-    }
-    const m = new Float32Array(fq.length + n);
-    m.set(fq); m.set(f, fq.length);
-    fq = m;
-  };
+
   const stats = () => {
-    $("nc").textContent = nChunks; $("audio").textContent = audioS.toFixed(1) + "s";
+    $("nc").textContent = nChunks;
+    $("audio").textContent = audioS.toFixed(1) + "s";
+    $("gaps").textContent = String(gaps);
     $("bar").style.width = Math.min(100, audioS / Math.max(1, text.length / 5) * 100) + "%";
-    if (underruns) $("first").textContent = (firstMs !== null ? firstMs.toFixed(0) + " ms" : "…") + ` (+${underruns} gap${underruns > 1 ? "s" : ""})`;
   };
   const schedule = () => {
     if (!started) {
-      if (fq.length < PREBUF) { $("first").textContent = "buffering…"; return; }
+      if (fq.length < PREBUF) { if (firstMs === null) $("first").textContent = "buffering…"; return; }
       started = true;
       playAt = ctx.currentTime + 0.05;
       firstMs = performance.now() - t0;
       $("first").textContent = firstMs.toFixed(0) + " ms";
     }
     while (fq.length >= IN_CHUNK) {
-      const buf = ctx.createBuffer(1, IN_CHUNK, SR), ch = buf.getChannelData(0);  // 16 kHz: browser resamples
+      // buffers stay at the 16 kHz source rate: the browser resamples natively
+      const buf = ctx.createBuffer(1, IN_CHUNK, SR), ch = buf.getChannelData(0);
       ch.set(fq.subarray(0, IN_CHUNK));
       fq = fq.slice(IN_CHUNK);
       const src = ctx.createBufferSource();
       src.buffer = buf; src.connect(ctx.destination);
-      if (playAt < ctx.currentTime - 0.05) { underruns++; playAt = ctx.currentTime + 0.02; }  // hole: count it, resume
-      src.start(Math.max(playAt, ctx.currentTime + 0.02));
-      playAt = Math.max(playAt, ctx.currentTime + 0.02) + IN_CHUNK / SR;
-      nChunks++; audioS += IN_CHUNK / SR;
-      stats();
+      if (playAt < ctx.currentTime - 0.05) { gaps++; playAt = ctx.currentTime + 0.02; }
+      const at = Math.max(playAt, ctx.currentTime + 0.02);
+      src.start(at);
+      playAt = at + IN_CHUNK / SR;
+      nChunks++; audioS += IN_CHUNK / SR; stats();
     }
   };
   const timer = setInterval(schedule, 100);
   try {
     const resp = await fetch(GATEWAY_URL + "/v1/audio/speech", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: "primetts-v21", input: text, voice: $("voice").value,
-        response_format: "pcm", stream_format: "audio",
-        speed: parseFloat($("speed").value),
-      }),
-      signal: ctrl.signal,
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody(text)), signal: ctrl.signal,
     });
     if (!resp.ok) {
       let msg = "HTTP " + resp.status;
@@ -145,34 +172,76 @@ async function speak() {
       const { done, value } = await reader.read();
       if (done) break;
       full.push(value);
-      pushBytes(value);
+      const f = toFloat(value), m = new Float32Array(fq.length + f.length);
+      m.set(fq); m.set(f, fq.length); fq = m;
     }
     await new Promise((r) => setTimeout(r, 150));
-    if (fq.length > 0) {  // flush the tail (< 0.25 s left)
-      const n = fq.length, buf = ctx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
-      ch.set(fq); fq = new Float32Array(0);
+    while (fq.length > 0) {   // flush the tail through the same path
+      const n = Math.min(IN_CHUNK, fq.length);
+      const buf = ctx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
+      ch.set(fq.subarray(0, n)); fq = fq.slice(n);
       const src = ctx.createBufferSource();
       src.buffer = buf; src.connect(ctx.destination);
-      if (playAt < ctx.currentTime - 0.05) { underruns++; playAt = ctx.currentTime + 0.02; }
-      src.start(Math.max(playAt, ctx.currentTime + 0.02));
-      playAt = Math.max(playAt, ctx.currentTime + 0.02) + n / SR;
+      if (playAt < ctx.currentTime - 0.05) { gaps++; playAt = ctx.currentTime + 0.02; }
+      const at = Math.max(playAt, ctx.currentTime + 0.02);
+      src.start(at); playAt = at + n / SR;
       nChunks++; audioS += n / SR; stats();
     }
     const total = full.reduce((a, b) => a + b.length, 0), pcm = new Uint8Array(total);
     let off = 0;
     for (const b of full) { pcm.set(b, off); off += b.length; }
-    const url = URL.createObjectURL(wavBlob(pcm));
-    const dl = $("dl");
-    dl.href = url; dl.style.display = "inline";
+    publishWav(pcm);
   } catch (e) {
     if (e.name !== "AbortError") showErr("Synthesis failed: " + e.message);
-  } finally {
-    clearInterval(timer);
-    playing = false; goBtn.disabled = false; stopBtn.disabled = true;
-  }
+  } finally { clearInterval(timer); endRun(); }
 }
 
-stopBtn.onclick = () => { if (ctrl) ctrl.abort(); };
+/* ---------------- mode 2: buffered, one buffer, no scheduling seams ---------------- */
+async function speakBuffered() {
+  const text = textEl.value.trim();
+  if (!text || playing) return;
+  await ensureCtx();
+  const t0 = beginRun();
+  try {
+    const resp = await fetch(GATEWAY_URL + "/v1/audio/speech", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody(text)), signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      let msg = "HTTP " + resp.status;
+      try { msg = (await resp.json()).error.message || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    const parts = [], reader = resp.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      $("audio").textContent = (parts.reduce((a, b) => a + b.length, 0) / 2 / SR).toFixed(1) + "s";
+    }
+    $("first").textContent = ((performance.now() - t0) / 1000).toFixed(2) + " s (all)";
+    const total = parts.reduce((a, b) => a + b.length, 0), pcm = new Uint8Array(total);
+    let off = 0;
+    for (const b of parts) { pcm.set(b, off); off += b.length; }
+    publishWav(pcm);
+    const f = toFloat(pcm);                    // whole utterance, one buffer, one source
+    const buf = ctx.createBuffer(1, f.length, SR), ch = buf.getChannelData(0);
+    ch.set(f);
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    src.start();
+    $("nc").textContent = "1"; $("gaps").textContent = "0";
+    $("audio").textContent = (f.length / SR).toFixed(1) + "s";
+    $("bar").style.width = "100%";
+    await new Promise((r) => { src.onended = r; });
+  } catch (e) {
+    if (e.name !== "AbortError") showErr("Synthesis failed: " + e.message);
+  } finally { endRun(); }
+}
+
+$("go").onclick = speakStream;
+$("goBuf").onclick = speakBuffered;
+$("stop").onclick = () => { if (ctrl) ctrl.abort(); };
 textEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); goBtn.click(); }
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("go").click(); }
 });
