@@ -20,10 +20,20 @@ Web demo for the custom C/CUDA PrimeTTS v2.1 runtime in
 - **Text frontend** on the gateway host (g2pw bopomofo + g2p_en, same `model/scripts/`
   frontend the training used).
 - **Waveforms synthesized remotely on one Jetson Nano** (`pt_v21_serve`, 8 warm workers,
-  resident weights, 1 CPU core) and streamed back sentence by sentence as 16 kHz PCM.
+  resident weights, 1 CPU core). One request = one continuous utterance: the encoder runs once and
+  the decoder is streamed in overlapping windows, so prosody never restarts mid-sentence and audio
+  still starts early. Playback uses an AudioWorklet ring buffer (one continuous stream).
 
 Inspired by the [PrimeTTS-Streaming](https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming)
 demo — except inference runs on real Jetson hardware instead of in the browser.
+
+## Latency (measured, 1 core, gateway in the loop)
+
+| request | first audio | total |
+|---|---|---|
+| 12-char sentence | 0.44 s | 0.64 s |
+| 58-char paragraph (10.9 s of audio) | 1.45 s | 2.61 s |
+| 4 concurrent paragraphs | 1.5-5.1 s | 6.5 s wall (6.7x realtime) |
 
 ## If the demo is offline
 
