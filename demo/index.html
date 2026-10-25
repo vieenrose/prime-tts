@@ -71,6 +71,19 @@
     </div>
   </div>
 
+  <div class="sectitle">Use it in your voice bot</div>
+  <div class="card" style="font-size:13px;color:var(--mut)">
+    The backend implements the <b style="color:var(--fg)">OpenAI text-to-speech API</b>
+    (<code>POST /v1/audio/speech</code>, pcm/wav, 16 kHz, streaming), so it works as the TTS of a
+    <a style="color:var(--acc)" href="https://github.com/huggingface/speech-to-speech">Hugging Face speech-to-speech</a> voice bot:
+    <pre style="background:#0b0f16;border:1px solid #2a3342;border-radius:8px;padding:10px;overflow-x:auto;color:var(--fg)">speech-to-speech local --tts openai \
+  --openai_tts_base_url http://&lt;your-gateway&gt;:8091/v1 \
+  --openai_tts_voice 0 --openai_tts_response_format pcm \
+  --openai_tts_sample_rate 16000</pre>
+    Self-host the Nano server and gateway from
+    <a style="color:var(--acc)" href="https://github.com/vieenrose/prime-tts/tree/custom-runtime#openai-tts-api-compatibility">the repo</a>.
+  </div>
+
   <p class="foot">Shared demo box. The first request after the Nano idles can take ~1 s longer (GPU
   clock ramp). Code:
   <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime">custom-runtime</a> ·

@@ -28,6 +28,22 @@ Web demo for the custom C/CUDA PrimeTTS v2.1 runtime in
 Inspired by the [PrimeTTS-Streaming](https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming)
 demo — except inference runs on real Jetson hardware instead of in the browser.
 
+## Use it in your own voice bot
+
+The backend speaks the **OpenAI text-to-speech API** (`POST /v1/audio/speech`, `pcm`/`wav`, 16 kHz,
+streaming), so it plugs directly into the
+[Hugging Face speech-to-speech](https://github.com/huggingface/speech-to-speech) framework:
+
+```bash
+speech-to-speech local --tts openai \
+  --openai_tts_base_url http://<your-gateway>:8091/v1 \
+  --openai_tts_voice 0 --openai_tts_response_format pcm --openai_tts_sample_rate 16000
+```
+
+Run your own Nano server and gateway from
+[vieenrose/prime-tts (custom-runtime)](https://github.com/vieenrose/prime-tts/tree/custom-runtime);
+see its README section "OpenAI TTS API compatibility" and `docs/server.md`.
+
 ## Latency (measured, 1 core, gateway in the loop)
 
 | request | first audio | total |

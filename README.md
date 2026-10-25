@@ -11,8 +11,9 @@ English, 16 kHz) on the original **Jetson Nano** (Tegra X1: 4× Cortex-A57, 128-
 - **Bit-faithful:** every waveform stays inside the reference parity envelope (SNDR ≥ 60 dB; 70.09 dB
   on the reference utterance).
 - **Real-time at 8 concurrent requests on one CPU core.**
-- **OpenAI-compatible server** (`POST /v1/audio/speech`), streaming, drop-in for
-  [Hugging Face speech-to-speech](https://github.com/huggingface/speech-to-speech).
+- **OpenAI TTS API compatible** (`POST /v1/audio/speech`, streaming) — works as the TTS backend of
+  [Hugging Face speech-to-speech](https://github.com/huggingface/speech-to-speech) voice bots
+  ([details](#openai-tts-api-compatibility)).
 
 ## Performance
 
@@ -99,12 +100,41 @@ curl -X POST http://localhost:8091/v1/audio/speech -H 'Content-Type: application
   -d '{"input": "您好，歡迎使用語音助理。", "voice": "0", "response_format": "wav"}' -o out.wav
 ```
 
-With Hugging Face speech-to-speech:
+See [OpenAI TTS API compatibility](#openai-tts-api-compatibility) to use it from a voice bot.
+
+## OpenAI TTS API compatibility
+
+The text gateway (`server/tts_gateway.py`) implements the **OpenAI text-to-speech API**, so any
+OpenAI-compatible TTS client can use it unchanged — including the
+[Hugging Face speech-to-speech](https://github.com/huggingface/speech-to-speech) voice-bot
+framework (`--tts openai` backend). Point clients at the gateway (port 8091), not at the Nano
+server directly.
+
+| endpoint | supported |
+|---|---|
+| `POST /v1/audio/speech` | `model` (any string), `input` (zh-TW / English text), `voice` (`"0"`, `"1"`, `"2"`), `response_format` (`pcm`, `wav`), `speed` (0.25–4), `stream_format: "audio"` |
+| `GET /v1/audio/voices` | `{"voices": ["0", "1", "2"]}` |
+| `GET /health` | gateway and Nano status |
+
+Output is 16-bit mono PCM at **16 kHz**. With `pcm`, audio streams as it is synthesized (chunked
+HTTP). Not supported: `mp3`/`opus`/`aac`/`flac`, `instructions`, and the vLLM `stream: true`
+extension. No API key is required (any `Authorization` header is ignored).
+
+**Using it in a Hugging Face speech-to-speech voice bot:**
 
 ```bash
-speech-to-speech local --tts openai --openai_tts_base_url http://<gateway>:8091/v1 \
-  --openai_tts_voice 0 --openai_tts_response_format pcm --openai_tts_sample_rate 16000
+speech-to-speech local \
+  --tts openai \
+  --openai_tts_base_url http://<gateway-host>:8091/v1 \
+  --openai_tts_model primetts-v21 \
+  --openai_tts_voice 0 \
+  --openai_tts_response_format pcm \
+  --openai_tts_sample_rate 16000
 ```
+
+Keep `--openai_tts_stream` at its default (`false`). The startup "Warmup" request of
+speech-to-speech is answered normally. Each LLM text chunk becomes one request and is streamed back
+as it is synthesized.
 
 ## Configuration
 
