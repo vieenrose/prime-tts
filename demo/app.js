@@ -2,8 +2,9 @@
  *
  * The Android/iOS-style flow: text -> public gateway (zh-TW/en frontend) -> ONE request on the
  * Jetson Nano, which synthesizes the whole utterance once (single encoder pass, decoder streamed
- * in windows) and streams PCM16 16 kHz back. Playback goes through an AudioWorklet ring buffer, so
- * the audio is one continuous stream with no per-buffer seams.
+ * in windows) and streams PCM16 16 kHz back. The page reassembles the byte stream (network chunks
+ * split samples at arbitrary byte boundaries) and plays it through an AudioWorklet FIFO in a 16 kHz
+ * AudioContext: a 1:1 sample copy, with the browser converting to the device rate.
  */
 const GATEWAY_URL = "https://variation-joan-requirement-delivers.trycloudflare.com";
 const SR = 16000;
@@ -74,7 +75,7 @@ function wavBlob(pcm) {
   return new Blob([buf], { type: "audio/wav" });
 }
 
-/* s16le -> Float32Array with sign extension */
+/* s16le -> Float32Array with sign extension (whole buffers: download, buffered playback) */
 function toFloat(bytes) {
   const n = bytes.length >> 1, f = new Float32Array(n);
   for (let i = 0; i < n; i++) {
@@ -83,6 +84,32 @@ function toFloat(bytes) {
     f[i] = v / 32768;
   }
   return f;
+}
+
+/* Streaming s16le decoder. Network chunks arrive at arbitrary byte boundaries (measured through
+ * the public tunnel: 4-52 odd-sized chunks per request), so a sample can be split across two
+ * chunks. Decoding each chunk on its own dropped the odd byte and misaligned every later sample
+ * into full-scale noise; this decoder carries the pending byte into the next chunk. */
+function makeS16Decoder() {
+  let carry = -1;                                  // low byte waiting for its high byte, or -1
+  return (bytes) => {
+    const total = bytes.length + (carry >= 0 ? 1 : 0), f = new Float32Array(total >> 1);
+    let i = 0, j = 0;
+    if (carry >= 0 && bytes.length > 0) {
+      let v = (bytes[0] << 8) | carry;
+      if (v >= 0x8000) v -= 0x10000;
+      f[i++] = v / 32768;
+      j = 1;
+      carry = -1;
+    }
+    for (; j + 1 < bytes.length; j += 2) {
+      let v = (bytes[j + 1] << 8) | bytes[j];
+      if (v >= 0x8000) v -= 0x10000;
+      f[i++] = v / 32768;
+    }
+    if (j < bytes.length) carry = bytes[j];
+    return f;
+  };
 }
 
 /* Fallback for browsers that refuse a 16 kHz context: one buffer, browser-side conversion. */
@@ -147,7 +174,7 @@ async function speak() {
     try { ctx = new AC({ sampleRate: SR }); } catch (_) { ctx = new AC(); }
     if (ctx.sampleRate !== SR) {
       // This browser would not open at 16 kHz. Playback is then one whole buffer so the BROWSER
-      // does the rate conversion (the worklet must never resample: measured -14 dB images).
+      // does the rate conversion (the worklet only ever copies samples 1:1).
       $("health").textContent += ` · browser audio ${ctx.sampleRate} Hz (buffered playback)`;
       return speakBuffered(text);
     }
@@ -171,19 +198,24 @@ async function speak() {
   try {
     node = new AudioWorkletNode(ctx, "primetts-player", {
       numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
-      processorOptions: { inRate: SR },
     });
     node.connect(ctx.destination);
   } catch (e) {
     note("worklet node failed — buffered playback");
     return speakBuffered(text);
   }
+  let drained;
+  const done = new Promise((r) => { drained = r; });
+  ctrl.signal.addEventListener("abort", () => drained());
   node.port.onmessage = (e) => {
-    if (e.data && e.data.underrunSamples) {   // network starvation, in ms of inserted silence
+    if (!e.data) return;
+    if (e.data.drained) drained();                // every queued sample has been played
+    if (e.data.underrunSamples) {                 // network starvation, in ms of inserted silence
       gaps = Math.round((e.data.underrunSamples / SR) * 1000);
       $("gaps").textContent = String(gaps);
     }
   };
+  const decode = makeS16Decoder();
 
   try {
     const resp = await fetch(GATEWAY_URL + "/v1/audio/speech", {
@@ -204,8 +236,9 @@ async function speak() {
       const { done, value } = await reader.read();
       if (done) break;
       parts.push(value);
-      node.port.postMessage(toFloat(value));      // one continuous ring: no buffer seams
-      audioS += value.length / 2 / SR;
+      const f = decode(value);
+      node.port.postMessage(f);
+      audioS += f.length / SR;
       $("audio").textContent = audioS.toFixed(1) + "s";
       $("bar").style.width = Math.min(100, audioS / Math.max(1, text.length / 5) * 100) + "%";
       if (!started && audioS * SR >= PREBUF) {
@@ -221,13 +254,17 @@ async function speak() {
       firstMs = performance.now() - t0;
       $("first").textContent = firstMs.toFixed(0) + " ms";
     }
+    node.port.postMessage("end");                  // complete: running dry now means finished
     const total = parts.reduce((a, b) => a + b.length, 0), pcm = new Uint8Array(total);
     let off = 0;
     for (const b of parts) { pcm.set(b, off); off += b.length; }
     $("dl").href = URL.createObjectURL(wavBlob(pcm));
     $("dl").style.display = "inline";
-    const waitMs = audioS * 1000 - (performance.now() - t0) + 400;
-    if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+    // wait until the worklet has played the last sample (the old timer counted from the
+    // request, not from playback start, and cut off the last ~first-audio seconds)
+    const safety = setTimeout(() => drained(), audioS * 1000 + 3000);
+    await done;
+    clearTimeout(safety);
   } catch (e) {
     if (e.name !== "AbortError") showErr("Synthesis failed: " + e.message);
   } finally {

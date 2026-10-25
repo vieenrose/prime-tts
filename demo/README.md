@@ -22,7 +22,8 @@ Web demo for the custom C/CUDA PrimeTTS v2.1 runtime in
 - **Waveforms synthesized remotely on one Jetson Nano** (`pt_v21_serve`, 8 warm workers,
   resident weights, 1 CPU core). One request = one continuous utterance: the encoder runs once and
   the decoder is streamed in overlapping windows, so prosody never restarts mid-sentence and audio
-  still starts early. Playback uses an AudioWorklet ring buffer (one continuous stream).
+  still starts early. The page reassembles the PCM byte stream and plays it through an AudioWorklet FIFO at 16 kHz,
+  verified in Chrome to render exactly the samples of the downloadable WAV.
 
 Inspired by the [PrimeTTS-Streaming](https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming)
 demo — except inference runs on real Jetson hardware instead of in the browser.

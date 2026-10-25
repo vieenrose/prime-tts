@@ -165,7 +165,9 @@ single full-graph run, the windowed output converges to max|d| 9e-8 (identical) 
 
 **Try it live:** [huggingface.co/spaces/Luigi/PrimeTTS-Nano](https://huggingface.co/spaces/Luigi/PrimeTTS-Nano) —
 a static page (in [`demo/`](demo/)) whose JS client posts text to the public gateway and plays the
-Nano's streamed PCM through an AudioWorklet ring buffer (continuous stream: no per-buffer seams).
+Nano's streamed PCM through an AudioWorklet FIFO at 16 kHz; verified in Chrome to render exactly the
+samples of the downloadable WAV (the earlier player dropped bytes at odd-sized network chunks,
+overflowed past 8 s and cut the last ~0.2-1.6 s of each request — all three fixed).
 All synthesis happens remotely on the Jetson Nano.
 
 ## What the Nano actually gives you (measured, `bench/gpu/RESULTS.md`)
