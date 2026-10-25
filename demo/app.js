@@ -74,9 +74,16 @@ async function speak() {
   $("first").textContent = "…"; $("nc").textContent = "0"; $("audio").textContent = "0.0s";
   $("bar").style.width = "0";
   const t0 = performance.now();
-  const outRate = ctx.sampleRate, ratio = SR / outRate;  // resample only if the browser ignored 16 kHz
-  const IN_CHUNK = 4000;  // 0.25 s of input samples per scheduled piece: gapless queue
-  let firstMs = null, nChunks = 0, audioS = 0, fq = new Float32Array(0), playAt = ctx.currentTime + 0.05;
+  // Jitter-tolerant streaming player. The bytes are proven clean (the WAV download built from the
+  // same stream is artefact-free), so playback follows two rules: (1) buffers are created at the
+  // 16 kHz source rate and the BROWSER resamples to the device rate with its native resampler --
+  // a hand-rolled linear interpolator adds audible imaging harshness whenever the context doesn't
+  // run at 16 kHz; (2) scheduling starts only after PREBUF of audio is banked, so a late sentence
+  // can't tear a hole at a joint (underruns are counted in the stats instead of snapping silently).
+  const IN_CHUNK = 4000;          // 0.25 s per scheduled piece at 16 kHz
+  const PREBUF = 12000;           // 0.75 s banked before the first piece starts
+  let firstMs = null, nChunks = 0, audioS = 0, underruns = 0;
+  let fq = new Float32Array(0), playAt = 0, started = false;
   const full = [];
   ctrl = new AbortController();
   const pushBytes = (bytes) => {  // s16le -> float with SIGN extension (unsigned decode distorts)
@@ -90,24 +97,33 @@ async function speak() {
     m.set(fq); m.set(f, fq.length);
     fq = m;
   };
-  const playIn = (nIn) => {  // schedule nIn input samples (linear resample to the context rate)
-    const outN = Math.max(1, Math.round(nIn / ratio));
-    const buf = ctx.createBuffer(1, outN, outRate), ch = buf.getChannelData(0);
-    for (let i = 0; i < outN; i++) {
-      const pos = i * ratio, i0 = Math.floor(pos), fr = pos - i0;
-      const a = fq[i0], b = fq[Math.min(i0 + 1, fq.length - 1)];
-      ch[i] = a + (b - a) * fr;
-    }
-    fq = fq.slice(nIn);
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.connect(ctx.destination);
-    playAt = Math.max(playAt, ctx.currentTime + 0.02);
-    src.start(playAt); playAt += outN / outRate;
-    nChunks++; audioS += nIn / SR;
+  const stats = () => {
     $("nc").textContent = nChunks; $("audio").textContent = audioS.toFixed(1) + "s";
     $("bar").style.width = Math.min(100, audioS / Math.max(1, text.length / 5) * 100) + "%";
+    if (underruns) $("first").textContent = (firstMs !== null ? firstMs.toFixed(0) + " ms" : "…") + ` (+${underruns} gap${underruns > 1 ? "s" : ""})`;
   };
-  const timer = setInterval(() => { while (fq.length >= IN_CHUNK) playIn(IN_CHUNK); }, 100);
+  const schedule = () => {
+    if (!started) {
+      if (fq.length < PREBUF) { $("first").textContent = "buffering…"; return; }
+      started = true;
+      playAt = ctx.currentTime + 0.05;
+      firstMs = performance.now() - t0;
+      $("first").textContent = firstMs.toFixed(0) + " ms";
+    }
+    while (fq.length >= IN_CHUNK) {
+      const buf = ctx.createBuffer(1, IN_CHUNK, SR), ch = buf.getChannelData(0);  // 16 kHz: browser resamples
+      ch.set(fq.subarray(0, IN_CHUNK));
+      fq = fq.slice(IN_CHUNK);
+      const src = ctx.createBufferSource();
+      src.buffer = buf; src.connect(ctx.destination);
+      if (playAt < ctx.currentTime - 0.05) { underruns++; playAt = ctx.currentTime + 0.02; }  // hole: count it, resume
+      src.start(Math.max(playAt, ctx.currentTime + 0.02));
+      playAt = Math.max(playAt, ctx.currentTime + 0.02) + IN_CHUNK / SR;
+      nChunks++; audioS += IN_CHUNK / SR;
+      stats();
+    }
+  };
+  const timer = setInterval(schedule, 100);
   try {
     const resp = await fetch(GATEWAY_URL + "/v1/audio/speech", {
       method: "POST",
@@ -128,12 +144,20 @@ async function speak() {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (firstMs === null) { firstMs = performance.now() - t0; $("first").textContent = firstMs.toFixed(0) + " ms"; }
       full.push(value);
       pushBytes(value);
     }
     await new Promise((r) => setTimeout(r, 150));
-    if (fq.length > 0) playIn(fq.length);  // flush the tail
+    if (fq.length > 0) {  // flush the tail (< 0.25 s left)
+      const n = fq.length, buf = ctx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
+      ch.set(fq); fq = new Float32Array(0);
+      const src = ctx.createBufferSource();
+      src.buffer = buf; src.connect(ctx.destination);
+      if (playAt < ctx.currentTime - 0.05) { underruns++; playAt = ctx.currentTime + 0.02; }
+      src.start(Math.max(playAt, ctx.currentTime + 0.02));
+      playAt = Math.max(playAt, ctx.currentTime + 0.02) + n / SR;
+      nChunks++; audioS += n / SR; stats();
+    }
     const total = full.reduce((a, b) => a + b.length, 0), pcm = new Uint8Array(total);
     let off = 0;
     for (const b of full) { pcm.set(b, off); off += b.length; }
