@@ -7,3 +7,4 @@ gemini-live-credential.txt
 *.ptk
 build/
 __pycache__/
+G2PWModel/
