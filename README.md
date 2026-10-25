@@ -1,303 +1,142 @@
-# PrimeTTS v2.1 on the Jetson Nano (Gen1) — custom C/CUDA runtime
+# PrimeTTS v2.1 on the Jetson Nano
 
-A from-scratch runtime that runs **PrimeTTS v2.1** (`v21_mbistft_16k`, 37.9M params, 16 kHz,
-iSTFT decoder) on an original **Jetson Nano** (Tegra X1: 4× Cortex-A57 + 128-core Maxwell,
-`sm_53`, 4 GB of RAM shared between CPU and GPU).
+A C/CUDA inference runtime for **PrimeTTS v2.1** (`v21_mbistft_16k`, 37.9M parameters, zh-TW +
+English, 16 kHz) on the original **Jetson Nano** (Tegra X1: 4× Cortex-A57, 128-core Maxwell `sm_53`,
+4 GB shared RAM).
 
-> 🔊 **Live demo: [huggingface.co/spaces/Luigi/PrimeTTS-Nano](https://huggingface.co/spaces/Luigi/PrimeTTS-Nano)** —
-> type zh-TW / English text, hear speech synthesized on a real Jetson Nano Gen1 and streamed back
-> sentence by sentence (static page + JS client, inspired by the
-> [PrimeTTS-Streaming](https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming) demo; inference
-> runs remotely on the Nano, see [`demo/`](demo/) and [`docs/server.md`](docs/server.md)).
+**Live demo:** [huggingface.co/spaces/Luigi/PrimeTTS-Nano](https://huggingface.co/spaces/Luigi/PrimeTTS-Nano)
+— type text and hear it synthesized on a Jetson Nano, streamed back as it is produced.
 
-Everything is **C (gnu11) + CUDA C + pthreads**. No PyTorch, no ONNX Runtime, no TensorRT, no
-framework at runtime. Host-side Python is used only to export the model into a container, generate
-the graph tables, and check parity against goldens.
+- Pure **C (gnu11) + CUDA + pthreads** at runtime — no PyTorch, ONNX Runtime or TensorRT.
+- **Bit-faithful:** every waveform stays inside the reference parity envelope (SNDR ≥ 60 dB; 70.09 dB
+  on the reference utterance).
+- **Real-time at 8 concurrent requests on one CPU core.**
+- **OpenAI-compatible server** (`POST /v1/audio/speech`), streaming, drop-in for
+  [Hugging Face speech-to-speech](https://github.com/huggingface/speech-to-speech).
 
-**Why a custom runtime:** on this chip the graph interpreter *is* the product. v2.1 is a 4066-node
-graph over 41 ONNX op kinds; the model's own GEMM/conv work is only ~11.9 GFLOP per audio-second,
-so a runtime that serializes launches, copies activations over PCIe per node, and walks index
-spaces element-by-element loses most of the machine. This branch is the work of removing that
-overhead while keeping the output **bit-for-bit inside the validated parity envelope**.
+## Performance
 
-## Result (measured on the Nano)
+Measured on a Jetson Nano, reference utterance T81 (3.62 s of audio):
 
-Target: **4 concurrent real-time requests** with quality preserved. Metric is the wall time of
-four concurrent requests (`n4_wall_ms`), not one fast request. The latency session ran 1551 kept
-experiments; the chart shows every kept draw (blue: official N=4 draws on the primary box; red:
-best-so-far) with the session's phase structure and the biggest single levers:
+| scenario | wall time | realtime factor |
+|---|---|---|
+| 1 request | 0.54 s | 6.8× |
+| 4 concurrent requests (4 CPU cores) | 1.78 s | 8.1× aggregate |
+| 4 concurrent requests, server mode (1 core) | 1.61 s | 9.0× aggregate |
+| 8 concurrent requests, server mode (1 core) | 3.17 s | 9.1× aggregate |
 
-![Wall time of 4 concurrent T81 requests over the latency session](docs/latency-session.svg)
+Streaming through the server (1 core, text in, first audio → end of synthesis):
 
-| milestone (run #) | N=4 wall | 1 stream | SNDR |
+| input | first audio | complete | audio length |
 |---|---|---|---|
-| session baseline: resident GPU weights, per-stream arenas, per-stream CUDA streams, async staging (#1) | 10308 ms | 3863 ms | 70.08 dB |
-| conv kernel: cooperative shared-memory weight staging (#8) | 8787 | 2807 | 70.08 |
-| conv_transpose: barrier-safe phase-slice staging (#10) | 8325 | 2714 | 70.08 |
-| implicit-GEMM conv, 128-column tiles, weight slice in shared mem (#32) | 3597 | 1359 | 70.08 |
-| tiled matmul kernel (#46) | 3041 | 964 | 70.08 |
-| NEON elementwise + fp16 LUT decode + interpolated tanh/sigmoid tables (#63) | 2580 | 677 | 70.08 |
-| GPU clock warmup before the weight upload (226 → 138 ms) (#75) | 2328 | 647 | 70.08 |
-| startup de-serialization: parallel record pass, parallel weight upload, prewarm, adaptive ramp (#278–#300) | 2220 | 638 | 70.09 |
-| convT ig8 kernel, 128-column tiles (#325) | 2155 | 640 | 70.09 |
-| coalesced conv staging: sector-efficient column-per-thread X loads (#1574) | 1996 | 593 | 70.09 |
-| stride-1 conv staging specialization (#1583) | 1908 | 581 | 70.09 |
-| ig88p: 8ch × 8col register tile with prefetch (#1589) | 1877 | 538 | 70.09 |
-| **final cluster** — 152 official draws, runs 1600+ | **1783 mean (1692–1902)** | **~536** | 70.09 |
-| adaptive sleep-polled GPU wait (phase 9; matched pairs, not a new cluster) | −113 ms (4/4 pairs) | ±0 | 70.09 |
+| short sentence (12 chars) | 0.44 s | 0.64 s | 2.0 s |
+| paragraph (58 chars) | 1.45 s | 2.61 s | 10.9 s |
 
-- **5.78× at N=4** (10308 → 1783 ms) and **7.2× single stream** (3863 → ~536 ms) from the session
-  baseline, with every kept change bit-exact or inside the parity envelope (`max|d|` 2.258e-04 on
-  T81 — the 1551 optimizations moved the output by 5 % of the deviation the baseline itself carried).
-- 4 streams × 3.62 s of audio = 14.46 s of speech in **1.78 s** of wall → **8.1× realtime
-  aggregate** (per-stream RTF 0.49; single stream RTF 0.15). All five golden cases
-  (T20/T40/T81/T120/sid1_T29) pass on both Nano boxes, GPU and CPU paths; N=8 measured 3.8 s with
-  flat RAM (no leak).
-- Quality gates on every run: **SNDR ≥ 60 dB** on the Nano for T20 + T81 (GPU) and T81 (CPU) via
-  `.auto/checks.sh`, plus the full per-node gate (`tests/v21_parity_c.py --from-dumps <Nano dumps>`)
-  → 4010 nodes, 0 over gate.
-- **Deployment defaults moved after the session** (operator decisions, see below): the drivers
-  cap themselves to **one CPU core**, and the GPU wait became an adaptive sleep-poll that gives
-  that core back to the working streams (**−155 ms** at N=4 on 1 core, 6/6 pairs; T81 1-core
-  official draws 2.04–2.19 s). The **server mode** removes the per-process startup on top of that:
-  4 concurrent T81 requests in **1.61 s** on one core.
-- The wall is fully accounted for by measured components (bar chart above): serialized startup
-  287 ms, 4 × ~298 ms of per-stream kernel+copy time on the single SM, a scheduling remainder, and
-  the close/SNDR tail. Every optimization axis is closed by measurement or arithmetic — kernel
-  tiling, memory-access pattern, FFT/Winograd, occupancy, device residency, CUDA graphs, batch
-  lockstep, startup, host scheduling — with mechanisms recorded in `.auto/ideas.md` and the full
-  1551-run ledger in `.auto/log.jsonl`.
+Against the starting point of this runtime, 4-request latency improved **5.8×** (10.3 s → 1.78 s) and
+single-request latency **7.2×** (3.86 s → 0.54 s).
 
-## Layout
+![Wall time of 4 concurrent requests across the optimization work](docs/latency-session.svg)
+
+## How it works
+
+- **Graph interpreter** (`pt_v21_host.c`): executes the model's 4066 nodes (41 op kinds) from tables
+  generated from the ONNX export, with NEON elementwise ops, table-based activations and fused
+  epilogues.
+- **GPU kernels** (`pt_v21_cuda.cu`): implicit-GEMM convolution and transposed convolution with
+  register-tiled, coalesced staging; weights uploaded once and shared by all streams.
+- **Concurrency:** each request has its own context, CUDA stream and device arena; waiting threads
+  sleep only when another stream needs the CPU.
+- **Streaming decoder:** the text encoder runs once per request; the decoder runs on overlapping
+  windows (overlap-save), so audio starts early while remaining identical to a single full
+  synthesis (max deviation 9e-8).
+
+## Repository layout
 
 ```
-runtime/v21/src/pt_v21_host.c   portable C graph interpreter (4066 nodes, 41 op kinds) + CPU kernels
-runtime/v21/src/pt_v21_cuda.cu  sm_53 kernels: conv, conv_transpose, matmul; resident weight cache,
-                                per-stream arena, per-stream CUDA streams
-runtime/v21/src/pt_v21.h        shared types, pt_ctx, kernel signatures
-runtime/v21/src/main_v21.c      single-stream driver (parity)
-runtime/v21/src/main_v21_par.c  multi-stream driver (N threads: own ctx/stream/arena, shared weights;
-                                defaults: 8 parallel, CUDA on, 1-core CPU cap — see --parallel,
-                                --no-cuda, PT_V21_CPUS)
-runtime/v21/src/main_v21_serve.c persistent server: warm workers, OpenAI-shaped POST /v1/audio/speech
-runtime/v21/src/pt_cpucap.h     the CPU cap shared by the par driver and the server
-server/tts_gateway.py           text frontend gateway (g2pw + g2p_en) -> Nano server, for HF s2s
-docs/server.md                  server protocol, setup, measured latencies
-demo/                           HF Space static site (index.html + app.js): type text, hear the Nano
-runtime/v21/gen/pt_graph.c      generated graph tables (from spec/v21_layers.json + the ONNX model)
-tools/gen_v21_graph.py          regenerates those tables; legitimate place to bake in optimizations
-tools/export_v21.py             ONNX -> build/v21.ptk container
-tests/golden_v21/**             goldens, feeds, per-node probe dump (the ground truth)
-tests/v21_parity_c.py           per-node parity gate against the Nano's dumps
-bench/gpu/RESULTS.md            measured Nano roofline
-docs/latency-session.svg        the session result chart (embedded above)
-.auto/                          the latency loop: playbook, measure.sh, checks.sh, ideas, run log
+runtime/v21/src/      runtime: interpreter, CUDA kernels, drivers, server
+runtime/v21/gen/      generated graph tables (do not edit; `make ... gen`)
+server/tts_gateway.py text gateway: zh-TW/en frontend (g2pw + g2p_en) -> Nano server
+demo/                 web demo (Hugging Face Space)
+docs/server.md        server protocol, setup, latency
+tools/                ONNX export and graph-table generation
+tests/                golden cases and the per-node parity gate
+bench/, .auto/        benchmarks and the measurement harness
 ```
 
-`model/`, `build/*.ptk`, `*.wav`, `*.npy` are git-ignored. Fetch the PrimeTTS v2.1 model into
-`model/v21_mbistft_16k/primetts_v21_3voice.onnx`, then
-`.venv/bin/python tools/export_v21.py` (writes `build/v21.ptk`; `--model` overrides the path),
-then `make -f runtime/v21/Makefile gen` to build the graph tables for it.
+## Quick start
 
-## Build and run on the Nano
-
-The Nano builds natively (gcc 8.4, `/usr/local/cuda/bin/nvcc`, `-arch=sm_53`). No root needed.
+**1. Prepare the model** (on a workstation). Place the model at
+`model/v21_mbistft_16k/primetts_v21_3voice.onnx`, then:
 
 ```bash
-make -f runtime/v21/Makefile nano     # single-stream binary, CPU + GPU paths in one binary
-make -f runtime/v21/Makefile par      # multi-stream driver
-make -f runtime/v21/Makefile host     # CPU-only build for the x86 parity box
-make -f runtime/v21/Makefile gen      # regenerate runtime/v21/gen/pt_graph.c
+.venv/bin/python tools/export_v21.py        # -> build/v21.ptk
+make -f runtime/v21/Makefile gen            # graph tables
+```
 
-# one request, parity against the golden (CUDA is the default; --no-cuda for the CPU path)
+**2. Build on the Nano** (gcc 8, CUDA 10, no root needed):
+
+```bash
+make -f runtime/v21/Makefile nano par serve
+```
+
+**3. Run:**
+
+```bash
+# one request, checked against the golden waveform
 ./build/pt_v21_nano --container build/v21.ptk --case tests/golden_v21/T81
-# eight concurrent requests (the default; --parallel 4 for the session's N=4 metric)
-./build/pt_v21_par --container build/v21.ptk --case tests/golden_v21/T81
-# persistent server (docs/server.md): 8 warm workers by default
-make -f runtime/v21/Makefile serve
+# 8 concurrent requests
+./build/pt_v21_par  --container build/v21.ptk --case tests/golden_v21/T81
+# server: 8 warm workers on port 8090
 ./build/pt_v21_serve --container build/v21.ptk --port 8090
 ```
 
-On the s2s host, the text gateway (its own venv; setup in `docs/server.md`):
+**4. Text API** (on any host with Python; setup in [`docs/server.md`](docs/server.md)):
 
 ```bash
-NLTK_DATA=<nltk_data> server/.venv-gateway/bin/python server/tts_gateway.py \
-    --nano http://<nano>:8090 --port 8091
+server/.venv-gateway/bin/python server/tts_gateway.py --nano http://<nano>:8090 --port 8091
+
+curl -X POST http://localhost:8091/v1/audio/speech -H 'Content-Type: application/json' \
+  -d '{"input": "您好，歡迎使用語音助理。", "voice": "0", "response_format": "wav"}' -o out.wav
 ```
 
-Profiling knobs (no recompile): `PT_V21_EKIND=1` prints accumulated time per op kind plus the
-GPU/host split (kernels, staging copies, arena, alloc); `PT_V21_EKIND=2` adds the top-20 per-node
-GPU times; `PT_V21_DUMP_T=<node>` writes `/tmp/pt_dump_<node>.bin` (raw fp32) for byte-exact A/B of
-a kernel variant against the CPU reference; `PT_V21_GPU=conv|convT|matmul` restricts the GPU to one
-kind; `PT_V21_ARENA_MB` sizes the per-stream device arena. Deployment knobs: `PT_V21_CPUS`
-(`all` / `"2,3"`; default one core), `PT_V21_WAIT_US` (GPU wait poll interval, default 200;
-`0` = the driver's yield wait), `PT_V21_WAIT_ADAPT=0` (always sleep while waiting).
+With Hugging Face speech-to-speech:
 
-The measurement harness is `./.auto/measure.sh` (syncs to the Nano, rebuilds, samples free RAM
-while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split) and
-`./.auto/checks.sh` (integrity manifest + SNDR gates). Both take `NANO=user@host`.
+```bash
+speech-to-speech local --tts openai --openai_tts_base_url http://<gateway>:8091/v1 \
+  --openai_tts_voice 0 --openai_tts_response_format pcm --openai_tts_sample_rate 16000
+```
 
-## Server mode: OpenAI-compatible `/v1/audio/speech` (HF speech-to-speech ready)
+## Configuration
 
-`build/pt_v21_serve` (Nano, `make -f runtime/v21/Makefile serve`) keeps 8 warm contexts and the
-resident weights for the life of the process, so requests skip the ~287 ms per-process startup.
-`server/tts_gateway.py` runs the zh-TW/en text frontend (g2pw + g2p_en, needs torch) on the s2s
-host and exposes the standard text API. Full protocol, setup and the
-`speech-to-speech --tts openai` command: [`docs/server.md`](docs/server.md).
+| option | default | effect |
+|---|---|---|
+| `--parallel N` / `--workers N` | 8 | concurrent requests (driver / server) |
+| `--no-cuda` | off | CPU-only path |
+| `--keepwarm SEC` | 30 | keep the GPU clock up between requests (server) |
+| `PT_V21_CPUS` | one core | `all`, or a list such as `2,3` |
+| `PT_V21_WAIT_US` | 200 | GPU wait poll interval; `0` = driver wait |
+| `PT_V21_STREAM_WIN`, `PT_V21_STREAM_CTX` | 48, 16 | streaming window / context, in frames |
 
-**One request = one utterance, streamed.** The encoder runs once and the *decoder tail* (the 245
-nodes between the frames tensor and the waveform) executes on sliding windows with 16 frames of
-context — overlap-save, the same design the reference streaming demo uses. Measured against a
-single full-graph run, the windowed output converges to max|d| 9e-8 (identical) and is already
-83-88 dB at 14-16 frames. Consequences:
+Two CPU cores are recommended when short utterances must stay real-time under full load.
 
-- **Continuous prosody, one decoder start per request** — no per-sentence restarts, so no thumps at
-  punctuation and no need for edge fading in the server (the previous workaround is gone).
-- **Audio starts early anyway**: first window is short (48 frames), later windows are long (256) so
-  the overlap cost stays ~1.3x on the decoder.
+## Quality and testing
 
-| request (measured, 1 core, 8 workers, gateway in the loop) | first audio | total | audio |
-|---|---|---|---|
-| 12-char sentence | 0.44 s | 0.64 s | 2.00 s |
-| 58-char paragraph | 1.45 s | 2.61 s | 10.93 s |
-| 4 concurrent paragraphs | 1.5 / 3.1 / 4.2 / 5.1 s | 6.53 s wall | 4 x 10.93 s (6.7x realtime) |
-| golden T20 / T81 / T120 / sid1_T29 (ids in) | 0.21-0.36 s | 0.32-0.90 s | SNDR 68.04 / 68.15 / 66.25 / 64.68 dB vs the float goldens (PCM16 quantization only) |
+- `.auto/checks.sh` — integrity manifest of model, goldens and gate, plus SNDR ≥ 60 dB on the Nano
+  (GPU and CPU paths).
+- `tests/v21_parity_c.py --from-dumps <dir>` — per-node comparison against the reference
+  (4010 nodes, 0 over tolerance).
+- `demo/test/playback_e2e.mjs` — checks that the demo player renders exactly the delivered samples.
 
-**Try it live:** [huggingface.co/spaces/Luigi/PrimeTTS-Nano](https://huggingface.co/spaces/Luigi/PrimeTTS-Nano) —
-a static page (in [`demo/`](demo/)) whose JS client posts text to the public gateway and plays the
-Nano's streamed PCM through an AudioWorklet FIFO at 16 kHz; verified in Chrome to render exactly the
-samples of the downloadable WAV (the earlier player dropped bytes at odd-sized network chunks,
-overflowed past 8 s and cut the last ~0.2-1.6 s of each request — all three fixed).
-All synthesis happens remotely on the Jetson Nano.
+Parity runs use `noise_scale = 0`; sampling noise is not implemented yet.
 
-## What the Nano actually gives you (measured, `bench/gpu/RESULTS.md`)
+## Known limitations
 
-- fp32 tiled GEMM **62 GFLOP/s**; fp16-storage + fp32-acc **70 GFLOP/s**; issue ceilings
-  88 GFLOP/s fp32 and **168 GFLOP/s half2** (a half2-compute runtime is the only way past ~5 streams).
-- **1 SM** (128 CUDA cores — `cudaGetDeviceProperties` says `multiProcessorCount = 1` on both
-  boxes; early notes here said 2, corrected during the latency session), 64 KB shared per SM,
-  65536 regs/SM, launch overhead ~26 µs, cooperative launch unavailable, device memcpy 5-5.9 GB/s,
-  and GPU memory (NvMap) counts against system RAM — so RSS understates real memory pressure and
-  free-RAM sampling is part of every measurement. Theoretical fp32 peak is 235.9 GFLOP/s; the
-  measured pure-FMA rate (`.auto/peak_test.cu`) is 97.6 GFMA/s ≈ 195 GFLOP/s.
-- v2.1 costs 11.9 GFLOP per audio-second: fp32 carries the 4-stream target at 8.1× realtime
-  aggregate, and N=8 still fits (3.8 s wall, RAM flat).
+- `noise_scale` has no effect (output is deterministic).
+- Output formats: `pcm` and `wav` only.
+- The Nano exposes one SM; scaling beyond ~8 concurrent requests would need fp16 (half2) compute.
 
-## Kernel rules this branch learned
+## Further reading
 
-1. **Stage weights in shared memory, cooperatively, once per block.** The naive conv kernel gave
-   each thread the whole `K × cin` weight row for its group of 4 output channels, so all 256 threads
-   in a block re-read the same 12 KB from L2. Staging that slice once per block: conv 2526 → 1855 ms,
-   conv_transpose 359 → 249 ms. Bit-identical, because the summation order and every fp32 product
-   are untouched.
-2. **Do not tile the input with per-chunk barriers.** A variant that cooperatively staged input
-   tiles 16 channels at a time was **2.7× slower** (conv 2.5 s → 6.9 s): ~48 `__syncthreads` per
-   block per launch dominate on a single-SM part. Read activations straight from global, coalesced.
-3. **`__syncthreads()` must be reached by every thread in the block.** A `continue` that can skip a
-   barrier is undefined behaviour. It produced a 6.6 % faster conv_transpose kernel that was
-   deterministically wrong on exactly the nodes where the staged path was active (SNDR 6.47 dB on
-   T20), and bit-exact on the fallback nodes. Rewriting the loop with a predicate instead of
-   `continue` made it bit-identical and kept the speed.
-4. **Accumulation order is a contract.** fp32 sums are not associative: seed accumulators with the
-   bias like the reference does, keep the same tap/channel order. Reordering shows up as SNDR drops,
-   not as a clean relative-error number.
-5. **Keep weights, biases and host-side weight conversions resident and shared.** The 39 fp16
-   decoder records are 13.6M elements: each stream used to build its own 54.5 MB fp32 copy. Sharing
-   them (ctab-keyed, refcounted, mutex-guarded, container-path guarded) removed ~164 MB at N=4 and
-   the per-call `cudaMalloc`+copy for every conv's bias.
-6. **Host-side wins do not move the N=4 wall — when cores are free.** With 4 cores the wall is
-   GPU-contention-bound and host work hides behind it. On a 1-core cap that stops being true, and
-   the biggest host cost was not graph ops at all but **threads waiting on the GPU**: the yield
-   wait burned ~0.9 s of the single core per N=4 run (`time`: sys 1.14 s of a 2.46 s run).
-   Measure CPU accounting (user/sys) before optimizing host work in a core-capped regime — a
-   per-op wall profile cannot see wait-loop CPU.
-7. **A buffer pool for activation tensors is not a win here**: no measurable latency gain, and
-   ~200 MB of retained memory at N=4 (glibc was already reusing the freed blocks).
-8. **Audit the per-instruction global access pattern, not just the tile shape.** The last big conv
-   win of the session (-162 ms at N=4, run 1574) came from noticing that each thread's four scalar
-   loads 16 B apart fetched every 32 B L2 sector for 2 useful floats; staging columns
-   `lq, lq+16, …` instead gives contiguous 64 B per half-warp per load. Tile shape, timing, cache
-   config and occupancy had all been tuned before anyone looked at sector efficiency — and sm_53
-   does not cache plain global loads in L1, so there is no second chance to fix it.
-
-9. **Sleep while waiting only when someone else needs the core.** A plain sleep-poll freed the core
-   (−194 ms at N=4) but cost a lone stream +43 ms of wake latency; sleeping only while another
-   stream is doing host work, and yield-polling otherwise, kept the gain at N=4 and made N=1 a tie.
-10. **Stream by splitting the model, not the text.** Splitting text into per-sentence requests makes
-    the model restart its decoder at every punctuation mark: a zero-state transient each time and
-    prosody reset per sentence (that is what forced edge fading and made the demo sound stitched).
-    Splitting the *model* instead — encoder once, decoder tail on overlapping windows — keeps one
-    start per utterance and still delivers audio early. Verified by construction: the windowed
-    output converges to the full-graph output (max|d| 9e-8 at 20 frames of context; 83-88 dB at 14-16).
-    The tail was provably local: 245 nodes, no SCATTERND/RANGE, relative slices only, iSTFT phase
-    derived from the signal rather than from a sample index.
-11. **A context must survive many runs.** The benchmark ran each context once, which hid a bug:
-    fusion state (skip flags, aliased tensors) leaked into the next run and segfaulted it. Server
-    mode exposed it on its second request; `pt_v21_run` now resets per-run state.
-
-## Where the session ended
-
-Every optimization axis is closed by measurement or arithmetic; the mechanisms are recorded in
-`.auto/ideas.md`. Highlights of the closures:
-
-- **Kernel algorithms**: implicit-GEMM tiling (64/128/256-column variants benched, 128 kept),
-  window-direct and templated-K (faster in isolation, +640 ms at N=4 — a single-kernel bench
-  cannot predict the contended regime), FFT (10× slower), Winograd F(2,3) (1.6× MORE work for
-  these 1-D convs — the 2.25× figure is a 2-D number).
-- **Data placement**: full device residency implemented and measured **+261 ms** — the staging
-  copies it removes were already hidden behind GPU work; the added device passes are not.
-- **Scheduling**: batch-4 lockstep +390 ms (natural stream desync is worth more than wave
-  alignment); CUDA graphs ~1–2 ms of launch overhead, below the confirmability bar; affinity
-  pinning a tie; blocking CUDA sync worse on both 4 cores (+118 ms) and 1 core (+45 ms).
-- **1-core regime (phase 9)**: fp32 container aliasing (a tie, its second kill) and
-  `-mcpu=cortex-a57` (+30 ms) closed; the adaptive GPU wait kept (above).
-- **Startup**: 287 ms serialized (context 85 + ramp + record pass + upload), bounded below by the
-  governor's clock ramp — every attack that removes GPU work from that window measures worse.
-- **Occupancy/carveout**: register-limited at 4 blocks/SM by design; forcing changes to blocks/SM
-  moved zero of 11 kernels and measured neutral-to-worse.
-
-Done after the session, outside the benchmark's timer (it would be timer-scope gaming inside it):
-
-- **Server mode** — `pt_v21_serve` pays the 287 ms startup once per process, not per request,
-  and holds the GPU clock between requests (the governor otherwise idles it within seconds and
-  the next request runs ~2.5× slower). OpenAI-compatible `/v1/audio/speech` plus a text gateway
-  for HF speech-to-speech; see [`docs/server.md`](docs/server.md).
-
-What remains:
-
-- **Chunked vocoding** — audio within one sentence arrives when the sentence is done; streaming
-  inside a sentence needs the decoder/iSTFT run in windows.
-- **Stochastic sampling** — the runtime evaluates the sampler as zeros (the parity setting), so
-  `noise_scale` has no effect yet.
-- **Half2 compute** if the concurrency target moves well beyond 4 streams (issue ceiling 168
-  GFLOP/s half2 vs 88 fp32).
-- **Production guidance**: the drivers and the server **self-cap to one core by default**
-  (`PT_V21_CPUS=all` disables, `PT_V21_CPUS="2,3"` pins an explicit set; the cap keeps the
-  upper-most allowed cpu, leaving cpu0 to IRQs/system) for maximal co-tenant headroom. Measured
-  at 1 core: T81-class speech holds ~6.9× realtime (RTF ~0.58), but short utterances (T20) sit
-  at RTF 0.96–1.02 — at/over the real-time line. **Two cores is the floor for the full case
-  range** (T20 RTF 0.88 at 2 cores; 7.8–8.7× realtime at T81) for the per-process driver; the
-  server removes the per-process startup, which was 28 % of T20's wall (not yet measured for T20
-  at N=4 through the server). SNDR is identical in every arm —
-  scheduling cannot change numerics. On a loaded box a co-tenant costs a further +2.9 % per busy
-  core, and a cold first request +6.7 %.
-
-## Reproduction and integrity
-
-`.auto/checks.sh` verifies by md5 manifest that the container (`build/v21.ptk`), the spec, the
-golden audio, the golden feeds, the probe dump, the reference oracle and the parity gate's
-tolerances (rel 1e-3 fp32 groups, 2e-3 decoder, SNDR ≥ 60 dB) are the exact bytes they were when
-the latency session started. Parity runs use `noise_scale = 0.0` from the golden feeds (the model is
-stochastic; never compare runs at `noise_scale > 0`). `runtime/v21/gen/pt_graph.c` is generated —
-regenerate it with `make -f runtime/v21/Makefile gen`, never hand-edit it.
-
-## Device notes
-
-Two original Nanos are in use: a primary measurement box and a second, measurably faster and
-quieter box used as an A/B confirmation target (a change that only wins on one of the two is not a
-win). Both are unprivileged targets: no `sudo`/`apt`, guard ≥ 60 MB free system RAM before every
-sweep, never kill a co-tenant server on the box. Host names live in the harness's `NANO`
-environment variable, not in the code.
-
-The broader product context (Gemini Live on the text leg, the v1b_8k CPU runtime, cost per
-caller-minute) is documented in `docs/` and on `main`.
+- [`docs/server.md`](docs/server.md) — server and gateway protocol
+- `.auto/ideas.md` — optimization notes and measurements
+- `bench/gpu/RESULTS.md` — Nano GPU roofline
