@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrimeTTS v2.1 · live on a Jetson Nano</title>
+<style>
+  :root { --bg:#0e1116; --card:#171c26; --fg:#e6edf3; --mut:#8b98a9; --acc:#5eead4; --acc2:#38bdf8; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 -apple-system,Segoe UI,Roboto,"Noto Sans TC",sans-serif; background:var(--bg); color:var(--fg); }
+  .wrap { max-width:720px; margin:0 auto; padding:32px 20px 64px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--mut); margin:0 0 24px; font-size:13px; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#0b2b28; color:var(--acc); font-size:11px; font-weight:600; }
+  .card { background:var(--card); border:1px solid #232a36; border-radius:14px; padding:18px; }
+  textarea { width:100%; min-height:96px; resize:vertical; background:#0b0f16; color:var(--fg); border:1px solid #2a3342; border-radius:10px; padding:12px; font-size:15px; }
+  .row { display:flex; gap:12px; align-items:center; margin-top:14px; flex-wrap:wrap; }
+  button { background:linear-gradient(135deg,var(--acc),var(--acc2)); color:#04121a; border:0; font-weight:700; padding:11px 22px; border-radius:10px; cursor:pointer; font-size:15px; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; color:var(--acc); border:1px solid #2a3342; font-weight:400; padding:5px 10px; font-size:13px; }
+  .stat { font-variant-numeric:tabular-nums; color:var(--mut); font-size:13px; }
+  .stat b { color:var(--fg); }
+  .meter { height:6px; background:#0b0f16; border-radius:6px; overflow:hidden; margin-top:16px; }
+  .meter > i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--acc),var(--acc2)); transition:width .1s; }
+  .chips { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
+  .chip { font-size:12px; color:var(--mut); border:1px solid #2a3342; padding:4px 10px; border-radius:999px; cursor:pointer; }
+  .chip:hover { color:var(--fg); border-color:var(--acc); }
+  label.opt { color:var(--mut); font-size:13px; display:flex; align-items:center; gap:6px; }
+  select, input[type=text] { background:#0b0f16; color:var(--fg); border:1px solid #2a3342; border-radius:8px; padding:5px 8px; font-size:13px; }
+  .sectitle { font-size:12px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--mut); margin:30px 0 12px; }
+  #err { display:none; margin-top:12px; padding:10px 12px; background:#2b1414; border:1px solid #5a2626; border-radius:10px; font-size:13px; }
+  .foot { color:var(--mut); font-size:12px; margin-top:24px; }
+  .foot a { color:var(--acc); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>PrimeTTS v2.1 · live on a Jetson Nano <span class="badge" id="backend">…</span></h1>
+  <p class="sub">zh-TW + English TTS. Type text, hear speech — every waveform is synthesized on a
+  <b>single Jetson Nano Gen1</b> (8 warm workers, 1 CPU core) and streamed back sentence by
+  sentence as 16 kHz PCM. UI inspired by the
+  <a href="https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming" style="color:var(--acc)">PrimeTTS-Streaming</a>
+  demo — inference runs on real Jetson hardware, not in your browser.</p>
+
+  <div class="sectitle">Type &amp; speak</div>
+  <div class="card">
+    <textarea id="text" placeholder="輸入中文或 English…">您好,幫您轉接給 Jason 王經理,他的分機是 2580。</textarea>
+    <div class="chips" id="chips"></div>
+    <div class="row">
+      <button id="go">▶ Speak (stream)</button>
+      <button id="stop" class="ghost" disabled>■ Stop</button>
+      <label class="opt">voice
+        <select id="voice"><option>0</option><option>1</option><option>2</option></select>
+      </label>
+      <label class="opt">speed
+        <select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
+      </label>
+      <span class="stat">first-audio <b id="first">–</b> · chunks <b id="nc">0</b> · <b id="audio">0.0s</b></span>
+      <a id="dl" download="primetts-nano.wav" style="display:none;color:var(--acc);font-size:13px;text-decoration:none;border:1px solid #2a3342;border-radius:8px;padding:5px 10px;">⬇ WAV</a>
+    </div>
+    <div class="meter"><i id="bar"></i></div>
+    <div id="err"></div>
+  </div>
+
+  <div class="sectitle">Backend</div>
+  <div class="card">
+    <div class="row" style="margin-top:0">
+      <span class="stat" id="health">checking…</span>
+      <button id="retry" class="ghost">↻ recheck</button>
+    </div>
+  </div>
+
+  <p class="foot">Shared demo box (600 chars/request). First request after the Nano idles can take
+  ~1–2 s (GPU clock ramp); then sentences stream as they synthesize. If the page was redeployed,
+  the gateway URL below may have rotated — see the repo <tt>demo/README.md</tt>.<br>
+  Code: <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime/demo">demo/</a> ·
+  runtime: <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime">custom-runtime</a>.</p>
+</div>
+<script src="./app.js"></script>
+</body>
+</html>

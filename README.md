@@ -4,6 +4,12 @@ A from-scratch runtime that runs **PrimeTTS v2.1** (`v21_mbistft_16k`, 37.9M par
 iSTFT decoder) on an original **Jetson Nano** (Tegra X1: 4× Cortex-A57 + 128-core Maxwell,
 `sm_53`, 4 GB of RAM shared between CPU and GPU).
 
+> 🔊 **Live demo: [huggingface.co/spaces/Luigi/PrimeTTS-Nano](https://huggingface.co/spaces/Luigi/PrimeTTS-Nano)** —
+> type zh-TW / English text, hear speech synthesized on a real Jetson Nano Gen1 and streamed back
+> sentence by sentence (static page + JS client, inspired by the
+> [PrimeTTS-Streaming](https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming) demo; inference
+> runs remotely on the Nano, see [`demo/`](demo/) and [`docs/server.md`](docs/server.md)).
+
 Everything is **C (gnu11) + CUDA C + pthreads**. No PyTorch, no ONNX Runtime, no TensorRT, no
 framework at runtime. Host-side Python is used only to export the model into a container, generate
 the graph tables, and check parity against goldens.
@@ -71,11 +77,13 @@ runtime/v21/src/pt_v21_cuda.cu  sm_53 kernels: conv, conv_transpose, matmul; res
 runtime/v21/src/pt_v21.h        shared types, pt_ctx, kernel signatures
 runtime/v21/src/main_v21.c      single-stream driver (parity)
 runtime/v21/src/main_v21_par.c  multi-stream driver (N threads: own ctx/stream/arena, shared weights;
-                                defaults to a 1-core CPU cap — PT_V21_CPUS=all to disable)
+                                defaults: 8 parallel, CUDA on, 1-core CPU cap — see --parallel,
+                                --no-cuda, PT_V21_CPUS)
 runtime/v21/src/main_v21_serve.c persistent server: warm workers, OpenAI-shaped POST /v1/audio/speech
 runtime/v21/src/pt_cpucap.h     the CPU cap shared by the par driver and the server
 server/tts_gateway.py           text frontend gateway (g2pw + g2p_en) -> Nano server, for HF s2s
 docs/server.md                  server protocol, setup, measured latencies
+demo/                           HF Space static site (index.html + app.js): type text, hear the Nano
 runtime/v21/gen/pt_graph.c      generated graph tables (from spec/v21_layers.json + the ONNX model)
 tools/gen_v21_graph.py          regenerates those tables; legitimate place to bake in optimizations
 tools/export_v21.py             ONNX -> build/v21.ptk container
@@ -101,11 +109,11 @@ make -f runtime/v21/Makefile par      # multi-stream driver
 make -f runtime/v21/Makefile host     # CPU-only build for the x86 parity box
 make -f runtime/v21/Makefile gen      # regenerate runtime/v21/gen/pt_graph.c
 
-# one request, GPU path, parity against the golden
-./build/pt_v21_nano --container build/v21.ptk --case tests/golden_v21/T81 --cuda
-# four concurrent requests
-./build/pt_v21_par --container build/v21.ptk --case tests/golden_v21/T81 --cuda --parallel 4
-# persistent server (docs/server.md)
+# one request, parity against the golden (CUDA is the default; --no-cuda for the CPU path)
+./build/pt_v21_nano --container build/v21.ptk --case tests/golden_v21/T81
+# eight concurrent requests (the default; --parallel 4 for the session's N=4 metric)
+./build/pt_v21_par --container build/v21.ptk --case tests/golden_v21/T81
+# persistent server (docs/server.md): 8 warm workers by default
 make -f runtime/v21/Makefile serve
 ./build/pt_v21_serve --container build/v21.ptk --port 8090
 ```
@@ -122,7 +130,7 @@ GPU/host split (kernels, staging copies, arena, alloc); `PT_V21_EKIND=2` adds th
 GPU times; `PT_V21_DUMP_T=<node>` writes `/tmp/pt_dump_<node>.bin` (raw fp32) for byte-exact A/B of
 a kernel variant against the CPU reference; `PT_V21_GPU=conv|convT|matmul` restricts the GPU to one
 kind; `PT_V21_ARENA_MB` sizes the per-stream device arena. Deployment knobs: `PT_V21_CPUS`
-(`all` / `"2,3"`; default one core), `PT_V21_WAIT_US` (GPU wait poll interval, default 100;
+(`all` / `"2,3"`; default one core), `PT_V21_WAIT_US` (GPU wait poll interval, default 200;
 `0` = the driver's yield wait), `PT_V21_WAIT_ADAPT=0` (always sleep while waiting).
 
 The measurement harness is `./.auto/measure.sh` (syncs to the Nano, rebuilds, samples free RAM
@@ -138,8 +146,14 @@ holds full clock between requests (post-idle T81 0.56-0.62 s instead of 1.3-1.7 
 `server/tts_gateway.py` runs the zh-TW/en text frontend (g2pw + g2p_en, needs torch) on the
 s2s host and exposes the standard text API; sentences stream back as PCM16 16 kHz as they finish,
 scheduled earliest-deadline-first. Through the gateway: first audio of a paragraph 0.34 s alone,
-0.42-0.98 s with 4 concurrent paragraphs, no playback underrun. Full protocol, setup and the
+0.42-0.98 s with 4 concurrent paragraphs, no playback underrun. 8 concurrent T81 requests on one
+core: **3.17 s wall** (per-stream RTF ~0.87) vs ~3.7 s per-process. Full protocol, setup and the
 `speech-to-speech --tts openai` command: [`docs/server.md`](docs/server.md).
+
+**Try it live:** [huggingface.co/spaces/Luigi/PrimeTTS-Nano](https://huggingface.co/spaces/Luigi/PrimeTTS-Nano) —
+a static page (in [`demo/`](demo/)) whose JS client posts text to the public gateway and plays the
+Nano's streamed PCM via Web Audio. All synthesis happens remotely on the Jetson Nano; the page
+itself does no inference.
 
 ## What the Nano actually gives you (measured, `bench/gpu/RESULTS.md`)
 

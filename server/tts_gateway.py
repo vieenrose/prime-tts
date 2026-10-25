@@ -201,6 +201,16 @@ def make_handler(gw: Gateway):
         def log_message(self, fmt, *args):  # one line per request, to stderr
             sys.stderr.write("gateway: " + (fmt % args) + "\n")
 
+        def end_headers(self):  # browsers fetch the public demo from another origin (CORS)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            super().end_headers()
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.end_headers()
+
         def _json(self, code: int, obj) -> None:
             b = json.dumps(obj).encode()
             self.send_response(code)
