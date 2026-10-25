@@ -191,6 +191,25 @@ static int synth(pt_ctx *c, job *j) {
   float *wav = 0;
   int64_t wn = 0;
   if (pt_v21_run(c, f, &wav, &wn)) return -1;
+  /* Edge conditioning (measured, not assumed): every synthesis starts with 0-125 ms of clean
+   * silence followed by a ~100-150 ms decoder startup burst (peak 0.33, -23 dB RMS -- audible as
+   * a thump before each sentence), and ends with low-level trailing rumble. Neither is speech:
+   * skip the clean leading silence, fade in over the burst span, fade out the tail. Operates on
+   * the float waveform before int16 conversion; the engine path itself is untouched. */
+  {
+    int64_t i0 = 0;
+    while (i0 < wn && fabsf(wav[i0]) < 0.01f) i0++;
+    int64_t fin = (int64_t) (0.150 * SR);   /* burst span */
+    for (int64_t i = 0; i < fin && i0 + i < wn; i++) {
+      float g = 0.5f - 0.5f * cosf((float) M_PI * (float) i / (float) fin);
+      wav[i0 + i] *= g;
+    }
+    int64_t fout = (int64_t) (0.120 * SR);  /* trailing rumble + end-click guard */
+    for (int64_t i = 0; i < fout && i < wn; i++) {
+      float g = 0.5f - 0.5f * cosf((float) M_PI * (float) i / (float) fout);
+      wav[wn - 1 - i] *= g;
+    }
+  }
   j->pcm = (int16_t *) malloc((size_t) (wn > 0 ? wn : 1) * 2);
   if (!j->pcm) return -1;
   for (int64_t i = 0; i < wn; i++) {

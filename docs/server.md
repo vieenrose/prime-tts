@@ -72,7 +72,11 @@ make -f runtime/v21/Makefile serve        # on the Nano (CUDA)
 A request with text but no `input_ids` gets a 400 that names the gateway. Errors use the OpenAI
 shape `{"error":{"message","type"}}`.
 
-Audio quality: the float output is bit-identical to the benchmark path (SNDR 70.09 dB on T81);
+Audio quality: the float engine output is bit-identical to the benchmark path (SNDR 70.09 dB on
+T81). The server conditions each synthesis' edges before PCM conversion (measured decoder
+startup burst: ~100-150 ms up to 0.33 peak before speech onset, plus trailing rumble — skipped
+clean leading silence, 150 ms raised-cosine fade-in, 120 ms fade-out), so per-sentence chunks
+join without thumps at punctuation; delivery as PCM16 adds the usual ~2 dB quantization cost.
 delivering it as PCM16 adds int16 quantization, which brings SNDR vs the float golden to 68.12 dB
 (T81) / 68.08 (T20) / 64.62 (sid1_T29) — exactly the predicted quantization+model combination.
 Any PCM16 endpoint has this cost.
