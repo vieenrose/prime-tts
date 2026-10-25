@@ -22,7 +22,7 @@
 
 #include "pt_v21.h"
 
-/* Sleep-polled stream wait (PT_V21_WAIT_US=<us>, default 100; 0 = the driver wait). With the stream threads capped to one
+/* Sleep-polled stream wait (PT_V21_WAIT_US=<us>, default 200; 0 = the driver wait). With the stream threads capped to one
  * core, the driver's yield wait burns the core the other streams need (measured: sys CPU 1.14 s
  * of a 2.46 s run), and the blocking wait wakes late. Polling cudaStreamQuery with a short sleep
  * between polls bounds the wake latency and leaves the core to the working streams. Called before
@@ -33,7 +33,7 @@ static int g_wait_adapt = 1;                    /* PT_V21_WAIT_ADAPT=0: always s
 static void pt_wait(cudaStream_t s) {
   if (g_wait_us < 0) {
     g_wait_adapt = getenv("PT_V21_WAIT_ADAPT") ? atoi(getenv("PT_V21_WAIT_ADAPT")) : 1;
-    g_wait_us = getenv("PT_V21_WAIT_US") ? atoi(getenv("PT_V21_WAIT_US")) : 100;
+    g_wait_us = getenv("PT_V21_WAIT_US") ? atoi(getenv("PT_V21_WAIT_US")) : 200;
   }
   if (g_wait_us <= 0) return;
   static __thread int slack_set;

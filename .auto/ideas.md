@@ -1006,3 +1006,23 @@ RESULTS (8/6/4-pair order-alternating, ab1.sh, bit-exact SNDR 70.09):
 Knobs: PT_V21_WAIT_US=0 = old driver wait (bisection), PT_V21_WAIT_ADAPT=0 = always sleep, PT_V21_SLACK0.
 LESSON: measure CPU accounting (user/sys via `time`) before optimizing host work in a core-capped
 regime; the per-op wall profile hides wait-loop CPU entirely.
+
+## PHASE 10 (operator request): 8 parallel requests on 1 core + CUDA
+Baseline (current tree, 1-core cap, WAIT 100): par N=8 wall 3859, slowest stream ~3300 (RTF 0.92),
+SNDR 70.09, min_free 841, peak_rss 342. `time`: user ~2.2 s + sys ~1.3 s on a 3.7 s wall -- the core
+is ~95% busy; GPU work (8 x ~300 ms serialized) leaves ~1200 ms of exposed host/wait (vs ~430 at N=4).
+- WAIT_US sweep at N=8: 200 vs 100 = -62 (3/4 pairs); 400 vs 200 = +9 (1/4, tie). At N=4: 200 vs 100
+  = -12 (3/4). Plateau 100-400, 25 worse. Default moved 100 -> 200 (bit-exact, SNDR identical):
+  par N=8 official 3701 (was 3859), N=4 unchanged-to-slightly-better.
+- Startup knobs at N=8 (1 core): OPEN_PAR 0 vs 1 = -7 tie; UP_PAR 0 vs 1 = -7 tie. Startup is ~8%
+  of the N=8 wall; no lever there.
+- Workers for 8 concurrent (server): 8 workers wall 3167 vs 4 workers 3195 = tie (2 waves of 4 =
+  1 wave of 8 on the serialized SM). Queue + EDF work as designed.
+- CPU cap reference (not a change): 2 cores vs 1 core at N=8 par = -478 (4/4). The 1-core
+  constraint exposes ~480 ms; host-op fusion (Add->Leaky, Slice->act) is the remaining lever,
+  estimated ~40-120 ms wall, project-scale risk (liveness/skip aliasing) -- not attempted.
+- SERVER MODE is the N=8 optimization: 8 warm workers skip the ~287 ms startup AND the
+  first-touch/cold-clock cost every par draw pays. Server 8 concurrent T81 ids: wall 3167
+  (streams 3088-3165, RTF ~0.87, throughput 9.14x realtime) vs par 3701 = -534. SNDR identical
+  (float path bit-exact; PCM16 delivery adds the known ~2 dB quantization cost, not engine error).
+  RTF < 1 per stream: 8 parallel requests hold real-time on ONE core.
