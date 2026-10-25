@@ -5,10 +5,10 @@
  * Every cut therefore lands mid-speech as a discontinuity (4/s at 0.25 s pieces). One big buffer
  * has no such seams -- which is why "buffered" mode sounds clean -- but it kills streaming.
  *
- * This worklet keeps a ring buffer of input-rate samples and interpolates CONTINUOUSLY across
- * chunk boundaries, so the output stream has no internal edges, and playback can still begin
- * after a short prebuffer. Catmull-Rom cubic interpolation keeps the imaging of a 3x upsample
- * well below audibility (linear interpolation would add a faint HF sheen).
+ * The demo opens the AudioContext AT THE SOURCE RATE, so nothing is resampled here: the ring is a
+ * pure copy and the browser converts to the device rate with its own high-quality resampler.
+ * (Measured: doing that conversion in this worklet with cubic interpolation left mirror images in
+ * the 8-16 kHz band only 14 dB below the speech -- an audible buzz. That was the artefact.)
  */
 class PrimeTTSPlayer extends AudioWorkletProcessor {
   constructor(options) {
@@ -45,6 +45,18 @@ class PrimeTTSPlayer extends AudioWorkletProcessor {
       return true;
     }
     let starved = 0;
+    if (this.ratio === 1) {                    /* same rate: straight copy, no interpolation */
+      for (let i = 0; i < out.length; i++) {
+        if (this.pos + 1 > this.w) { out[i] = 0; starved++; continue; }
+        out[i] = this.at(this.pos);
+        this.pos += 1;
+      }
+      if (starved) {
+        this.underrunSamples += starved;
+        this.port.postMessage({ underrunSamples: this.underrunSamples });
+      }
+      return true;
+    }
     for (let i = 0; i < out.length; i++) {
       if (this.w - this.pos < 3) {           // no lookahead left: silence, count it
         out[i] = 0;

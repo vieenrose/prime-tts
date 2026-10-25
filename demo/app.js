@@ -73,12 +73,73 @@ function toFloat(bytes) {
   return f;
 }
 
+/* Fallback for browsers that refuse a 16 kHz context: one buffer, browser-side conversion. */
+async function speakBuffered(text) {
+  playing = true;
+  $("go").disabled = true; $("stop").disabled = false;
+  $("first").textContent = "…"; $("gaps").textContent = "0";
+  ctrl = new AbortController();
+  const t0 = performance.now();
+  try {
+    const resp = await fetch(GATEWAY_URL + "/v1/audio/speech", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "primetts-v21", input: text, voice: $("voice").value,
+        speed: parseFloat($("speed").value), response_format: "pcm", stream_format: "audio",
+      }),
+      signal: ctrl.signal,
+    });
+    if (!resp.ok) {
+      let msg = "HTTP " + resp.status;
+      try { msg = (await resp.json()).error.message || msg; } catch (_) {}
+      throw new Error(msg);
+    }
+    const parts = [], reader = resp.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      parts.push(value);
+      $("audio").textContent = (parts.reduce((a, b) => a + b.length, 0) / 2 / SR).toFixed(1) + "s";
+    }
+    const total = parts.reduce((a, b) => a + b.length, 0), pcm = new Uint8Array(total);
+    let off = 0;
+    for (const b of parts) { pcm.set(b, off); off += b.length; }
+    $("dl").href = URL.createObjectURL(wavBlob(pcm));
+    $("dl").style.display = "inline";
+    const f = toFloat(pcm);
+    const buf = ctx.createBuffer(1, f.length, SR), ch = buf.getChannelData(0);
+    ch.set(f);
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    src.start();
+    $("first").textContent = ((performance.now() - t0) / 1000).toFixed(2) + " s (all)";
+    $("audio").textContent = (f.length / SR).toFixed(1) + "s";
+    $("bar").style.width = "100%";
+    await new Promise((r) => { src.onended = r; });
+  } catch (e) {
+    if (e.name !== "AbortError") showErr("Synthesis failed: " + e.message);
+  } finally {
+    playing = false; $("go").disabled = false; $("stop").disabled = true;
+  }
+}
+
 async function speak() {
   const text = textEl.value.trim();
   if (!text || playing) return;
   clearErr();
   $("dl").style.display = "none";
-  if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (!ctx) {
+    // Open the context AT THE SOURCE RATE: the browser then does the device conversion with its
+    // own resampler, and the worklet is a pure copy (see player.worklet.js).
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try { ctx = new AC({ sampleRate: SR }); } catch (_) { ctx = new AC(); }
+    if (ctx.sampleRate !== SR) {
+      // This browser would not open at 16 kHz. Playback is then one whole buffer so the BROWSER
+      // does the rate conversion (the worklet must never resample: measured -14 dB images).
+      $("health").textContent += ` · browser audio ${ctx.sampleRate} Hz (buffered playback)`;
+      return speakBuffered(text);
+    }
+  }
   if (ctx.state === "suspended") await ctx.resume();
   if (!ctx.audioWorklet) { showErr("This browser has no AudioWorklet support."); return; }
 
