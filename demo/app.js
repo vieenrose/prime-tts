@@ -74,24 +74,40 @@ async function speak() {
   $("first").textContent = "…"; $("nc").textContent = "0"; $("audio").textContent = "0.0s";
   $("bar").style.width = "0";
   const t0 = performance.now();
-  let firstMs = null, nChunks = 0, audioS = 0, received = new Uint8Array(0), playAt = ctx.currentTime + 0.05;
+  const outRate = ctx.sampleRate, ratio = SR / outRate;  // resample only if the browser ignored 16 kHz
+  const IN_CHUNK = 4000;  // 0.25 s of input samples per scheduled piece: gapless queue
+  let firstMs = null, nChunks = 0, audioS = 0, fq = new Float32Array(0), playAt = ctx.currentTime + 0.05;
   const full = [];
   ctrl = new AbortController();
-  const timer = setInterval(() => {
-    while (received.length >= 8000) {
-      const piece = received.slice(0, 8000);
-      received = received.slice(8000);
-      const n = piece.length / 2, buf = ctx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
-      for (let i = 0; i < n; i++) ch[i] = (piece[2 * i + 1] << 8 | piece[2 * i]) / 32768;
-      const src = ctx.createBufferSource();
-      src.buffer = buf; src.connect(ctx.destination);
-      playAt = Math.max(playAt, ctx.currentTime + 0.02);
-      src.start(playAt); playAt += n / SR;
-      nChunks++; audioS += n / SR;
-      $("nc").textContent = nChunks; $("audio").textContent = audioS.toFixed(1) + "s";
-      $("bar").style.width = Math.min(100, audioS / Math.max(1, text.length / 5) * 100) + "%";
+  const pushBytes = (bytes) => {  // s16le -> float with SIGN extension (unsigned decode distorts)
+    const n = bytes.length >> 1, f = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      let v = (bytes[2 * i + 1] << 8) | bytes[2 * i];
+      if (v >= 0x8000) v -= 0x10000;
+      f[i] = v / 32768;
     }
-  }, 100);
+    const m = new Float32Array(fq.length + n);
+    m.set(fq); m.set(f, fq.length);
+    fq = m;
+  };
+  const playIn = (nIn) => {  // schedule nIn input samples (linear resample to the context rate)
+    const outN = Math.max(1, Math.round(nIn / ratio));
+    const buf = ctx.createBuffer(1, outN, outRate), ch = buf.getChannelData(0);
+    for (let i = 0; i < outN; i++) {
+      const pos = i * ratio, i0 = Math.floor(pos), fr = pos - i0;
+      const a = fq[i0], b = fq[Math.min(i0 + 1, fq.length - 1)];
+      ch[i] = a + (b - a) * fr;
+    }
+    fq = fq.slice(nIn);
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.connect(ctx.destination);
+    playAt = Math.max(playAt, ctx.currentTime + 0.02);
+    src.start(playAt); playAt += outN / outRate;
+    nChunks++; audioS += nIn / SR;
+    $("nc").textContent = nChunks; $("audio").textContent = audioS.toFixed(1) + "s";
+    $("bar").style.width = Math.min(100, audioS / Math.max(1, text.length / 5) * 100) + "%";
+  };
+  const timer = setInterval(() => { while (fq.length >= IN_CHUNK) playIn(IN_CHUNK); }, 100);
   try {
     const resp = await fetch(GATEWAY_URL + "/v1/audio/speech", {
       method: "POST",
@@ -114,21 +130,10 @@ async function speak() {
       if (done) break;
       if (firstMs === null) { firstMs = performance.now() - t0; $("first").textContent = firstMs.toFixed(0) + " ms"; }
       full.push(value);
-      const merged = new Uint8Array(received.length + value.length);
-      merged.set(received); merged.set(value, received.length);
-      received = merged;
+      pushBytes(value);
     }
     await new Promise((r) => setTimeout(r, 150));
-    if (received.length >= 2) {
-      const n = Math.floor(received.length / 2), buf = ctx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
-      for (let i = 0; i < n; i++) ch[i] = (received[2 * i + 1] << 8 | received[2 * i]) / 32768;
-      const src = ctx.createBufferSource();
-      src.buffer = buf; src.connect(ctx.destination);
-      playAt = Math.max(playAt, ctx.currentTime + 0.02);
-      src.start(playAt);
-      audioS += n / SR;
-      $("audio").textContent = audioS.toFixed(1) + "s";
-    }
+    if (fq.length > 0) playIn(fq.length);  // flush the tail
     const total = full.reduce((a, b) => a + b.length, 0), pcm = new Uint8Array(total);
     let off = 0;
     for (const b of full) { pcm.set(b, off); off += b.length; }
