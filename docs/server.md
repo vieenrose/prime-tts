@@ -42,8 +42,11 @@ make -f runtime/v21/Makefile serve        # on the Nano (CUDA)
 ./build/pt_v21_serve --container build/v21.ptk --cuda --port 8090 [--workers 4] [--keepwarm 30]
 ```
 
-- `--workers N` (default 4): warm contexts = concurrent syntheses; more requests queue (max 64,
-  then 503). The process keeps the 1-core CPU cap of the other drivers (`PT_V21_CPUS`).
+- `--workers N` (default 4, max 8): warm contexts = concurrent syntheses; more requests queue
+  (max 64, then 503). The process keeps the 1-core CPU cap of the other drivers (`PT_V21_CPUS`).
+  For 8 parallel T81 on one core: 8 workers serve them in **3.17 s wall** (streams 3.09-3.17 s,
+  per-stream RTF ~0.87, 9.14x realtime aggregate) vs ~3.7 s per-process -- server mode is the N=8
+  optimization. 4 vs 8 workers for 8 concurrent requests is a tie (the SM serializes either way).
 - `--keepwarm SEC` (default 30, 0 = off): the GPU governor drops to 76.8 MHz within seconds of
   idle, and the next request then runs ~2.5x slower (T81: 1316-1665 ms after 5 s idle vs 542-577
   ms warm). For SEC seconds after the last request, a background thread issues short ALU bursts
