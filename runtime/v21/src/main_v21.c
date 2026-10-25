@@ -40,6 +40,7 @@ int main(int argc, char **argv) {
   const char *shapes = 0;
   int trace_idx = -1;
   int use_cuda = 1;   /* CUDA is the default; --no-cuda / --cpu selects the portable CPU path */
+  int s_win = 0, s_ctx = 0;   /* --stream WIN CTX: overlap-save decoder verification */
   const char *out = 0;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--container") && i + 1 < argc) container = argv[++i];
@@ -51,6 +52,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(argv[i], "--shapes") && i + 1 < argc) shapes = argv[++i];
     else if (!strcmp(argv[i], "--out") && i + 1 < argc) out = argv[++i];
     else if (!strcmp(argv[i], "--cuda")) use_cuda = 1;   /* accepted for compatibility */
+    else if (!strcmp(argv[i], "--stream") && i + 2 < argc) { s_win = atoi(argv[++i]); s_ctx = atoi(argv[++i]); }
     else if (!strcmp(argv[i], "--no-cuda") || !strcmp(argv[i], "--cpu")) use_cuda = 0;
   }
   if (use_cuda)
@@ -106,7 +108,45 @@ int main(int argc, char **argv) {
     if (load_feed(dir, feeds_names[i], &feeds[i])) return 3;
   float *wav = 0;
   int64_t wn = 0;
-  if (pt_v21_run(c, feeds, &wav, &wn)) {
+  if (s_win > 0) {
+    /* overlap-save decoder: encoder once, then sliding windows; emit each window's interior */
+    int64_t T = 0;
+    int hop = 0;
+    if (pt_v21_stream_open(c, feeds, &T, &hop)) {
+      fprintf(stderr, "main_v21: stream open failed\n");
+      return 4;
+    }
+    size_t cap = (size_t) (T + 2 * s_win) * (size_t) (hop > 0 ? hop : 256);
+    float *out = (float *) malloc(cap * 4);
+    int64_t olen = 0;
+    int64_t step = s_win - 2 * s_ctx;
+    if (step < 1) step = 1;
+    for (int64_t a = 0;; a += step) {
+      int64_t win_eff = s_win;
+      if (a + win_eff > T) win_eff = T - a;
+      int first = (a == 0), last = (a + win_eff >= T);
+      float *pcm = 0;
+      int64_t n = 0;
+      if (pt_v21_stream_chunk(c, a, win_eff, &pcm, &n)) { fprintf(stderr, "chunk failed\n"); return 4; }
+      int64_t lo = first ? 0 : (int64_t) s_ctx * hop;
+      int64_t hi = last ? n : (int64_t) (win_eff - s_ctx) * hop;
+      if (hi > n) hi = n;
+      if (getenv("PT_V21_STREAMLOG"))
+        fprintf(stderr, "win a=%lld win=%lld n=%lld lo=%lld hi=%lld olen=%lld\n",
+                (long long) a, (long long) win_eff, (long long) n, (long long) lo, (long long) hi,
+                (long long) olen);
+      if (hi > lo && olen + (hi - lo) <= (int64_t) cap) {
+        memcpy(out + olen, pcm + lo, (size_t) (hi - lo) * 4);
+        olen += hi - lo;
+      }
+      if (last) break;
+    }
+    pt_v21_stream_close(c);
+    wav = out;
+    wn = olen;
+    fprintf(stderr, "stream: T=%lld hop=%d win=%d ctx=%d -> %lld samples\n", (long long) T, hop,
+            s_win, s_ctx, (long long) olen);
+  } else if (pt_v21_run(c, feeds, &wav, &wn)) {
     fprintf(stderr, "main_v21: run failed\n");
     return 4;
   }

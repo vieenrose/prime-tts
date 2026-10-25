@@ -11,13 +11,13 @@
   .wrap { max-width:720px; margin:0 auto; padding:32px 20px 64px; }
   h1 { font-size:22px; margin:0 0 4px; }
   .sub { color:var(--mut); margin:0 0 24px; font-size:13px; }
+  .sub a { color:var(--acc); }
   .badge { display:inline-block; padding:2px 8px; border-radius:999px; background:#0b2b28; color:var(--acc); font-size:11px; font-weight:600; }
   .card { background:var(--card); border:1px solid #232a36; border-radius:14px; padding:18px; }
   textarea { width:100%; min-height:96px; resize:vertical; background:#0b0f16; color:var(--fg); border:1px solid #2a3342; border-radius:10px; padding:12px; font-size:15px; }
   .row { display:flex; gap:12px; align-items:center; margin-top:14px; flex-wrap:wrap; }
   button { background:linear-gradient(135deg,var(--acc),var(--acc2)); color:#04121a; border:0; font-weight:700; padding:11px 22px; border-radius:10px; cursor:pointer; font-size:15px; }
   button:disabled { opacity:.5; cursor:default; }
-  button.ghost2 { background:transparent; color:var(--acc2); border:1px solid #2a3342; font-weight:600; padding:11px 16px; font-size:14px; }
   button.ghost { background:transparent; color:var(--acc); border:1px solid #2a3342; font-weight:400; padding:5px 10px; font-size:13px; }
   .stat { font-variant-numeric:tabular-nums; color:var(--mut); font-size:13px; }
   .stat b { color:var(--fg); }
@@ -27,7 +27,7 @@
   .chip { font-size:12px; color:var(--mut); border:1px solid #2a3342; padding:4px 10px; border-radius:999px; cursor:pointer; }
   .chip:hover { color:var(--fg); border-color:var(--acc); }
   label.opt { color:var(--mut); font-size:13px; display:flex; align-items:center; gap:6px; }
-  select, input[type=text] { background:#0b0f16; color:var(--fg); border:1px solid #2a3342; border-radius:8px; padding:5px 8px; font-size:13px; }
+  select { background:#0b0f16; color:var(--fg); border:1px solid #2a3342; border-radius:8px; padding:5px 8px; font-size:13px; }
   .sectitle { font-size:12px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; color:var(--mut); margin:30px 0 12px; }
   #err { display:none; margin-top:12px; padding:10px 12px; background:#2b1414; border:1px solid #5a2626; border-radius:10px; font-size:13px; }
   .foot { color:var(--mut); font-size:12px; margin-top:24px; }
@@ -37,19 +37,17 @@
 <body>
 <div class="wrap">
   <h1>PrimeTTS v2.1 · live on a Jetson Nano <span class="badge" id="backend">…</span></h1>
-  <p class="sub">zh-TW + English TTS. Type text, hear speech — every waveform is synthesized on a
-  <b>single Jetson Nano Gen1</b> (8 warm workers, 1 CPU core) and streamed back sentence by
-  sentence as 16 kHz PCM. UI inspired by the
-  <a href="https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming" style="color:var(--acc)">PrimeTTS-Streaming</a>
-  demo — inference runs on real Jetson hardware, not in your browser.</p>
+  <p class="sub">zh-TW + English TTS. Every waveform is synthesized on a single <b>Jetson Nano Gen1</b>
+  — one continuous utterance per request, streamed back as it is produced. UI inspired by the
+  <a href="https://huggingface.co/spaces/Luigi/PrimeTTS-Streaming">PrimeTTS-Streaming</a> demo;
+  inference runs on real Jetson hardware.</p>
 
   <div class="sectitle">Type &amp; speak</div>
   <div class="card">
     <textarea id="text" placeholder="輸入中文或 English…">您好,幫您轉接給 Jason 王經理,他的分機是 2580。</textarea>
     <div class="chips" id="chips"></div>
     <div class="row">
-      <button id="go">▶ Speak (stream)</button>
-      <button id="goBuf" class="ghost2">▶ Speak (buffered)</button>
+      <button id="go">▶ Speak</button>
       <button id="stop" class="ghost" disabled>■ Stop</button>
       <label class="opt">voice
         <select id="voice"><option>0</option><option>1</option><option>2</option></select>
@@ -57,7 +55,7 @@
       <label class="opt">speed
         <select id="speed"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select>
       </label>
-      <span class="stat">first-audio <b id="first">–</b> · chunks <b id="nc">0</b> · gaps <b id="gaps">0</b> · <b id="audio">0.0s</b></span>
+      <span class="stat">first-audio <b id="first">–</b> · audio <b id="audio">0.0s</b> · gaps <b id="gaps">0</b> ms</span>
       <a id="dl" download="primetts-nano.wav" style="display:none;color:var(--acc);font-size:13px;text-decoration:none;border:1px solid #2a3342;border-radius:8px;padding:5px 10px;">⬇ WAV</a>
     </div>
     <div class="meter"><i id="bar"></i></div>
@@ -72,16 +70,11 @@
     </div>
   </div>
 
-  <p class="foot"><b>Comparing the two buttons:</b> "stream" schedules audio as it arrives (lowest
-  latency, and the gaps counter must stay 0); "buffered" waits for everything and plays one buffer
-  (no scheduling at all). If buffered is clean and stream is not, the artefact is in playback
-  timing; if both sound identical, it is not in this page. Player <b id="pver">?</b>. Stream mode now plays through a continuous AudioWorklet ring buffer, so there are no per-buffer resampler seams; the gaps field shows milliseconds of inserted silence if the network ever starves it.<br>
-  Shared demo box (600 chars/request). First request after the Nano idles can take
-  ~1–2 s (GPU clock ramp); then sentences stream as they synthesize. If the page was redeployed,
-  the gateway URL below may have rotated — see the repo <tt>demo/README.md</tt>.<br>
-  Code: <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime/demo">demo/</a> ·
-  runtime: <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime">custom-runtime</a>.</p>
+  <p class="foot">Shared demo box. The first request after the Nano idles can take ~1 s longer (GPU
+  clock ramp). Code:
+  <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime">custom-runtime</a> ·
+  <a href="https://github.com/vieenrose/prime-tts/blob/custom-runtime/docs/server.md">docs/server.md</a>.</p>
 </div>
-<script src="./app.js?v=5"></script>
+<script src="./app.js?v=6"></script>
 </body>
 </html>

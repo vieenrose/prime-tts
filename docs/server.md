@@ -47,6 +47,9 @@ make -f runtime/v21/Makefile serve        # on the Nano (CUDA)
   For 8 parallel T81 on one core: 8 workers serve them in **3.17 s wall** (streams 3.09-3.17 s,
   per-stream RTF ~0.87, 9.14x realtime aggregate) vs ~3.7 s per-process -- server mode is the N=8
   optimization. 4 vs 8 workers for 8 concurrent requests is a tie (the SM serializes either way).
+- Streaming knobs (rarely needed): `PT_V21_STREAM_WIN` (frames per decoded window, default 48) and
+  `PT_V21_STREAM_CTX` (context frames kept on each side, default 16). The first chunk of audio is
+  `(WIN - CTX)` frames ≈ 0.5 s; smaller WIN cuts first-audio latency, at a little more overlap work.
 - `--keepwarm SEC` (default 30, 0 = off): the GPU governor drops to 76.8 MHz within seconds of
   idle, and the next request then runs ~2.5x slower (T81: 1316-1665 ms after 5 s idle vs 542-577
   ms warm). For SEC seconds after the last request, a background thread issues short ALU bursts
@@ -72,11 +75,14 @@ make -f runtime/v21/Makefile serve        # on the Nano (CUDA)
 A request with text but no `input_ids` gets a 400 that names the gateway. Errors use the OpenAI
 shape `{"error":{"message","type"}}`.
 
-Audio quality: the float engine output is bit-identical to the benchmark path (SNDR 70.09 dB on
-T81). The server conditions each synthesis' edges before PCM conversion (measured decoder
-startup burst: ~100-150 ms up to 0.33 peak before speech onset, plus trailing rumble — skipped
-clean leading silence, 150 ms raised-cosine fade-in, 120 ms fade-out), so per-sentence chunks
-join without thumps at punctuation; delivery as PCM16 adds the usual ~2 dB quantization cost.
+Audio quality: streaming is **exact**. One request = one utterance: the encoder runs once and the
+decoder tail (245 local nodes) executes on sliding windows with 16 frames (256 ms) of context —
+measured against a single full-graph run this converges to max|d| 9e-8 (133 dB) at 20 frames and
+83-88 dB at 14-16 frames. Delivery as PCM16 adds the usual ~2 dB quantization cost (SNDR 68.2 dB on
+T81 vs the float golden).
+
+There is deliberately **no edge fading**: the server streams inside one synthesis, so prosody is
+continuous and the model starts once per request — the workaround a per-sentence split needed.
 delivering it as PCM16 adds int16 quantization, which brings SNDR vs the float golden to 68.12 dB
 (T81) / 68.08 (T20) / 64.62 (sid1_T29) — exactly the predicted quantization+model combination.
 Any PCM16 endpoint has this cost.

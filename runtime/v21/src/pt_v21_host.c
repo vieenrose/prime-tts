@@ -490,7 +490,6 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
       else o[i] = a[i] < 0.0f ? -a[i] : a[i];
     }
 #else
-    int64_t n2 = A->n;
     if (op == PT_LEAKYRELU) {
       for (int64_t i = 0; i < n2; i++) o[i] = a[i] >= 0.0f ? a[i] : alpha * a[i];
     } else if (op == PT_RELU) {
@@ -2498,6 +2497,23 @@ void pt_v21_cuda_shutdown(pt_ctx *c) { (void) c; }
 void pt_v21_cuda_active(int delta) { (void) delta; }
 int pt_v21_cuda_keepwarm(int iters) { (void) iters; return -1; }
 long pt_v21_gpu_cur_freq(void) { return -1; }
+double pt_v21_cuda_weights_mib(pt_ctx *c) { (void) c; return 0.0; }
+int pt_v21_cuda_prewarm(void) { return 0; }
+int pt_v21_conv_pads_in_kernel(pt_ctx *c) { (void) c; return 0; }
+/* device-residency entry points: a CPU-only build never uses them (PT_V21_DEVADD is off by
+ * default and there is no device), but the interpreter references them, so they must link. */
+void pt_v21_dev_reclaim(pt_ctx *c) { (void) c; }
+float *pt_v21_dev_upload(pt_ctx *c, const void *h, int64_t n) { (void) c; (void) h; (void) n; return 0; }
+void pt_v21_dev_sync_host(pt_ctx *c, void *host, const void *dev, int64_t n) {
+  (void) c; (void) host; (void) dev; (void) n;
+}
+void *pt_v21_dev_alloc(pt_ctx *c, size_t bytes) { (void) c; (void) bytes; return 0; }
+void pt_v21_dev_free(pt_ctx *c, void *p) { (void) c; (void) p; }
+int pt_v21_devadd_run(pt_ctx *c, const float *a, const float *b, float *y, int64_t n, int epi,
+                      float alpha) { (void) c; (void) a; (void) b; (void) y; (void) n; (void) epi; (void) alpha; return 0; }
+int pt_v21_devleaky_run(pt_ctx *c, const float *a, float *y, int64_t n, float alpha) {
+  (void) c; (void) a; (void) y; (void) n; (void) alpha; return 0;
+}
 
 int pt_v21_conv(pt_ctx *c, const float *X, int64_t ldx, int64_t cin, float *Y, int64_t ldy,
                 int64_t n, int cout, int K, int stride, int pad, int dil, const float *wp,
@@ -2566,6 +2582,168 @@ static void ck_save(pt_ctx *c, int tid) {
   }
 }
 
+/* ---- streaming decoder (overlap-save) -------------------------------------------------------
+ * The decoder tail is everything from /dec/conv_pre to the waveform: 245 nodes of conv, convT,
+ * leakyrelu, mul, add, slice, reshape and the iSTFT basis einsums. Checked against the generated
+ * tables: no PT_SCATTERND, no PT_RANGE and no global reduction in that range, and its slices are
+ * relative (1, -1) -- so it is local in time and can be executed on sliding windows. The encoder
+ * (text -> frames) runs once, which is what keeps a single decoder start per utterance.
+ */
+static int g_stream_tail = -1, g_stream_src = -1;   /* node split: read-only once located */
+typedef struct { int id, dt, ndim; int64_t d[PT_V21_MAX_RANK], n, bytes; float *buf; } pt_stream_seed;
+/* All mutable streaming state is PER CONTEXT: the server runs one context per worker thread and
+ * several workers stream at once (keeping it in globals crashed the server under 4 concurrent
+ * requests). */
+typedef struct {
+  float *frames;                  /* private copy of the frames tensor */
+  int64_t n, d[PT_V21_MAX_RANK];
+  int ndim, dt, hop;
+  pt_stream_seed *seeds;          /* tensors the tail consumes from the encoder part */
+  int nseeds;
+} pt_stream_state;
+
+static void stream_locate(void) {
+  if (g_stream_tail >= 0) return;
+  for (int i = 0; i < PT_N_NODE; i++) {
+    const pt_node_def *nd = &pt_ndefs[i];
+    if (nd->op != PT_CONV || nd->out[0] < 0) continue;
+    const char *nm = pt_graph_tnames[nd->out[0]];
+    if (nm && !strncmp(nm, "/dec/conv_pre/", 14)) {
+      g_stream_tail = i;
+      g_stream_src = nd->in[0];
+      return;
+    }
+  }
+  g_stream_tail = PT_N_NODE;   /* not found: streaming unavailable */
+}
+
+static pt_stream_state *st(pt_ctx *c) {
+  if (!c->stream_state) c->stream_state = calloc(1, sizeof(pt_stream_state));
+  return (pt_stream_state *) c->stream_state;
+}
+
+int pt_v21_stream_open(pt_ctx *c, const pt_tv *feeds, int64_t *frames, int *hop) {
+  stream_locate();
+  if (g_stream_tail >= PT_N_NODE || g_stream_src < 0) return -1;
+  pt_stream_state *S = st(c);
+  if (!S) return -1;
+  /* drop any previous state for this context */
+  for (int q = 0; q < S->nseeds; q++) free(S->seeds[q].buf);
+  free(S->seeds);
+  S->seeds = NULL;
+  S->nseeds = 0;
+  free(S->frames);
+  S->frames = NULL;
+  c->run_from = 0;
+  c->run_to = g_stream_tail;
+  float *w = 0;
+  int64_t wn = 0;
+  int rc = pt_v21_run(c, feeds, &w, &wn);
+  c->run_from = c->run_to = 0;
+  if (rc) return -1;
+  pt_tv *f = &c->V[g_stream_src];
+  if (!f->p || f->n <= 0) return -1;
+  S->ndim = f->ndim;
+  S->dt = f->dt;
+  S->n = f->n;
+  for (int q = 0; q < PT_V21_MAX_RANK; q++) S->d[q] = f->d[q];
+  S->frames = (float *) malloc((size_t) S->n * 4);
+  if (!S->frames) return -1;
+  memcpy(S->frames, f->p, (size_t) S->n * 4);
+  int64_t T = f->d[f->ndim - 1];
+  /* capture every tensor the tail consumes from outside itself */
+  int cap = 0;
+  for (int idx = g_stream_tail; idx < PT_N_NODE; idx++) {
+    const pt_node_def *nd = &pt_ndefs[idx];
+    for (int k = 0; k < PT_V21_MAX_IN; k++) {
+      int t = nd->in[k];
+      if (t < 0 || t == g_stream_src) continue;
+      int producer = -1;
+      for (int q = 0; q < PT_N_NODE; q++)
+        if (pt_ndefs[q].out[0] == t) { producer = q; break; }
+      if (producer >= g_stream_tail) continue;    /* produced inside the tail: recomputed */
+      if (!c->V[t].p || c->V[t].n <= 0) continue;
+      int dup = 0;
+      for (int q = 0; q < S->nseeds; q++)
+        if (S->seeds[q].id == t) { dup = 1; break; }
+      if (dup) continue;
+      if (S->nseeds == cap) {
+        cap = cap ? cap * 2 : 32;
+        pt_stream_seed *nb = (pt_stream_seed *) realloc(S->seeds, (size_t) cap * sizeof(*nb));
+        if (!nb) break;
+        S->seeds = nb;
+      }
+      pt_stream_seed *sd = &S->seeds[S->nseeds];
+      sd->id = t;
+      sd->dt = c->V[t].dt;
+      sd->ndim = c->V[t].ndim;
+      sd->n = c->V[t].n;
+      for (int q = 0; q < PT_V21_MAX_RANK; q++) sd->d[q] = c->V[t].d[q];
+      sd->bytes = sd->n * dt_sz(c->V[t].dt);
+      sd->buf = (float *) malloc((size_t) sd->bytes);
+      if (!sd->buf) continue;
+      memcpy(sd->buf, c->V[t].p, (size_t) sd->bytes);
+      S->nseeds++;
+    }
+  }
+  if (frames) *frames = T;
+  /* hop: one short window tells us samples-per-frame */
+  int64_t probe = T < 16 ? T : 16;
+  float *pp = 0;
+  int64_t pn = 0;
+  if (pt_v21_stream_chunk(c, 0, probe, &pp, &pn) == 0 && pn > 0) S->hop = (int) (pn / probe);
+  if (hop) *hop = S->hop;
+  return 0;
+}
+
+int pt_v21_stream_chunk(pt_ctx *c, int64_t a, int64_t win, float **pcm, int64_t *n) {
+  pt_stream_state *S = (pt_stream_state *) c->stream_state;
+  if (g_stream_tail >= PT_N_NODE || !S || !S->frames) return -1;
+  int64_t T = S->d[S->ndim - 1];
+  if (a < 0) a = 0;
+  if (win < 1) win = 1;
+  if (a + win > T) win = T - a;
+  if (win < 1) return -1;
+  int64_t per = S->n / T;                    /* elements per frame (channels) */
+  pt_tv inj;
+  memset(&inj, 0, sizeof inj);
+  inj.dt = S->dt;
+  inj.ndim = S->ndim;
+  for (int q = 0; q < PT_V21_MAX_RANK; q++) inj.d[q] = S->d[q];
+  inj.d[S->ndim - 1] = win;
+  inj.n = per * win;
+  inj.p = (float *) malloc((size_t) inj.n * 4);
+  if (!inj.p) return -1;
+  int64_t lead = 1;
+  for (int q = 0; q < S->ndim - 1; q++) lead *= S->d[q];
+  for (int64_t ch = 0; ch < lead; ch++)
+    memcpy((float *) inj.p + ch * win, S->frames + ch * T + a, (size_t) win * 4);
+  c->stream_inject = &inj;
+  c->stream_inject_id = g_stream_src;
+  c->stream_seeds = S->seeds;
+  c->stream_nseeds = S->nseeds;
+  c->run_from = g_stream_tail;
+  c->run_to = PT_N_NODE;
+  int rc = pt_v21_run(c, NULL, pcm, n);
+  c->run_from = c->run_to = 0;
+  c->stream_inject = NULL;
+  c->stream_inject_id = -1;
+  c->stream_seeds = NULL;
+  c->stream_nseeds = 0;
+  free(inj.p);
+  return rc;
+}
+
+void pt_v21_stream_close(pt_ctx *c) {
+  pt_stream_state *S = (pt_stream_state *) c->stream_state;
+  if (!S) return;
+  for (int q = 0; q < S->nseeds; q++) free(S->seeds[q].buf);
+  free(S->seeds);
+  free(S->frames);
+  free(S);
+  c->stream_state = NULL;
+}
+
 static int pt_v21_run_graph(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n);
 int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n) {
   if (c->use_cuda) pt_v21_cuda_active(1);
@@ -2592,9 +2770,11 @@ static int pt_v21_run_graph(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t 
   c->conv_in_dev = NULL;
   c->conv_keep = c->conv_keep_res = 0;
   c->conv_out_dev = NULL;
+  int idx_from = c->run_from > 0 ? c->run_from : 0;
+  int idx_to = c->run_to > 0 && c->run_to <= PT_N_NODE ? c->run_to : PT_N_NODE;
   /* graph inputs (ids in table order, all origin "IN") alias the caller's feeds */
   int ni = 0;
-  for (int i = 0; i < PT_N_TENSOR && strncmp(pt_tdefs[i].origin, "IN", 2) == 0; i++) {
+  for (int i = 0; i < PT_N_TENSOR && idx_from == 0 && strncmp(pt_tdefs[i].origin, "IN", 2) == 0; i++) {
     pt_tv *t = &c->V[i];
     t->dt = feeds[ni].dt;
     t->ndim = feeds[ni].ndim;
@@ -2605,7 +2785,30 @@ static int pt_v21_run_graph(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t 
     t->alive = 1;
     ni++;
   }
-  for (int idx = 0; idx < PT_N_NODE; idx++) {
+  /* streaming decoder: re-seed the tensors the tail consumes from the encoder part */
+  if (c->stream_seeds && c->stream_nseeds > 0) {
+    const pt_stream_seed *sd = (const pt_stream_seed *) c->stream_seeds;
+    for (int q = 0; q < c->stream_nseeds; q++) {
+      int t = sd[q].id;
+      if (t < 0 || t >= PT_N_TENSOR || !sd[q].buf) continue;
+      pt_tv *tv = &c->V[t];
+      memset(tv, 0, sizeof *tv);
+      tv->dt = (int8_t) sd[q].dt;
+      tv->ndim = sd[q].ndim;
+      for (int r = 0; r < PT_V21_MAX_RANK; r++) tv->d[r] = sd[q].d[r];
+      tv->n = sd[q].n;
+      tv->p = sd[q].buf;
+      tv->dev = 2;      /* caller-owned: never freed by the interpreter */
+      tv->alive = 1;
+    }
+  }
+  /* streaming decoder: seed the frames tensor with the caller's window (dev 2 = never freed) */
+  if (c->stream_inject && c->stream_inject_id >= 0 && c->stream_inject_id < PT_N_TENSOR) {
+    c->V[c->stream_inject_id] = *c->stream_inject;
+    c->V[c->stream_inject_id].dev = 2;
+    c->V[c->stream_inject_id].alive = 1;
+  }
+  for (int idx = idx_from; idx < idx_to; idx++) {
     const pt_node_def *nd = &pt_ndefs[idx];
     pt_tv *in[PT_V21_MAX_IN], *out[PT_V21_MAX_OUT];
     for (int i = 0; i < PT_V21_MAX_IN; i++) {
@@ -3173,6 +3376,12 @@ static int pt_v21_run_graph(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t 
       int t = nd->in[i];
       if (t >= 0 && c->V[t].dev != 2 && pt_graph_last_use[t] == idx) tv_free(c, &c->V[t]);
     }
+  }
+  if (idx_to < PT_N_NODE) {   /* partial run (streaming encoder pass): no waveform expected */
+    if (wav) *wav = NULL;
+    if (wav_n) *wav_n = 0;
+    c->t_total = pt_v21_now() - t0;
+    return 0;
   }
   pt_tv *w = &c->V[pt_graph_wav_tensor];
   if (!w->p) {

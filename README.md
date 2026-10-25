@@ -140,20 +140,33 @@ while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split
 ## Server mode: OpenAI-compatible `/v1/audio/speech` (HF speech-to-speech ready)
 
 `build/pt_v21_serve` (Nano, `make -f runtime/v21/Makefile serve`) keeps 8 warm contexts and the
-resident weights for the life of the process, so requests skip the ~287 ms per-process startup:
-4 concurrent T81 requests in **1.61 s** (vs ~2 s per-process), with a GPU keep-warm window that
-holds full clock between requests (post-idle T81 0.56-0.62 s instead of 1.3-1.7 s).
-`server/tts_gateway.py` runs the zh-TW/en text frontend (g2pw + g2p_en, needs torch) on the
-s2s host and exposes the standard text API; sentences stream back as PCM16 16 kHz as they finish,
-scheduled earliest-deadline-first. Through the gateway: first audio of a paragraph 0.34 s alone,
-0.42-0.98 s with 4 concurrent paragraphs, no playback underrun. 8 concurrent T81 requests on one
-core: **3.17 s wall** (per-stream RTF ~0.87) vs ~3.7 s per-process. Full protocol, setup and the
+resident weights for the life of the process, so requests skip the ~287 ms per-process startup.
+`server/tts_gateway.py` runs the zh-TW/en text frontend (g2pw + g2p_en, needs torch) on the s2s
+host and exposes the standard text API. Full protocol, setup and the
 `speech-to-speech --tts openai` command: [`docs/server.md`](docs/server.md).
+
+**One request = one utterance, streamed.** The encoder runs once and the *decoder tail* (the 245
+nodes between the frames tensor and the waveform) executes on sliding windows with 16 frames of
+context — overlap-save, the same design the reference streaming demo uses. Measured against a
+single full-graph run, the windowed output converges to max|d| 9e-8 (identical) and is already
+83-88 dB at 14-16 frames. Consequences:
+
+- **Continuous prosody, one decoder start per request** — no per-sentence restarts, so no thumps at
+  punctuation and no need for edge fading in the server (the previous workaround is gone).
+- **Audio starts early anyway**: first window is short (48 frames), later windows are long (256) so
+  the overlap cost stays ~1.3x on the decoder.
+
+| request (measured, 1 core, 8 workers, gateway in the loop) | first audio | total | audio |
+|---|---|---|---|
+| 12-char sentence | 0.44 s | 0.64 s | 2.00 s |
+| 58-char paragraph | 1.45 s | 2.61 s | 10.93 s |
+| 4 concurrent paragraphs | 1.5 / 3.1 / 4.2 / 5.1 s | 6.53 s wall | 4 x 10.93 s (6.7x realtime) |
+| golden T20 / T81 / T120 / sid1_T29 (ids in) | 0.21-0.36 s | 0.32-0.90 s | SNDR 68.04 / 68.15 / 66.25 / 64.68 dB vs the float goldens (PCM16 quantization only) |
 
 **Try it live:** [huggingface.co/spaces/Luigi/PrimeTTS-Nano](https://huggingface.co/spaces/Luigi/PrimeTTS-Nano) —
 a static page (in [`demo/`](demo/)) whose JS client posts text to the public gateway and plays the
-Nano's streamed PCM via Web Audio. All synthesis happens remotely on the Jetson Nano; the page
-itself does no inference.
+Nano's streamed PCM through an AudioWorklet ring buffer (continuous stream: no per-buffer seams).
+All synthesis happens remotely on the Jetson Nano.
 
 ## What the Nano actually gives you (measured, `bench/gpu/RESULTS.md`)
 
@@ -208,7 +221,15 @@ itself does no inference.
 9. **Sleep while waiting only when someone else needs the core.** A plain sleep-poll freed the core
    (−194 ms at N=4) but cost a lone stream +43 ms of wake latency; sleeping only while another
    stream is doing host work, and yield-polling otherwise, kept the gain at N=4 and made N=1 a tie.
-10. **A context must survive many runs.** The benchmark ran each context once, which hid a bug:
+10. **Stream by splitting the model, not the text.** Splitting text into per-sentence requests makes
+    the model restart its decoder at every punctuation mark: a zero-state transient each time and
+    prosody reset per sentence (that is what forced edge fading and made the demo sound stitched).
+    Splitting the *model* instead — encoder once, decoder tail on overlapping windows — keeps one
+    start per utterance and still delivers audio early. Verified by construction: the windowed
+    output converges to the full-graph output (max|d| 9e-8 at 20 frames of context; 83-88 dB at 14-16).
+    The tail was provably local: 245 nodes, no SCATTERND/RANGE, relative slices only, iSTFT phase
+    derived from the signal rather than from a sample index.
+11. **A context must survive many runs.** The benchmark ran each context once, which hid a bug:
     fusion state (skip flags, aliased tensors) leaked into the next run and segfaulted it. Server
     mode exposed it on its second request; `pt_v21_run` now resets per-run state.
 

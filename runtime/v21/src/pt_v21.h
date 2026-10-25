@@ -129,6 +129,14 @@ struct pt_ctx {
   size_t arena_alloc_bytes;   /* arena high-water mark */
   char *skip;           /* PT_N_NODE: nodes folded into a producer kernel, not executed */
   int fuse;             /* epilogue fusion enabled for this context */
+  /* streaming decoder (server mode): execute only [run_from, run_to) of the node list, so the
+   * local decoder tail can be re-run on sliding windows of the frames tensor (overlap-save). */
+  int run_from, run_to;
+  int stream_inject_id;    /* tensor id to seed with stream_inject before a partial run, -1 none */
+  pt_tv *stream_inject;
+  void *stream_seeds;      /* pt_stream_seed*: tensors computed before the tail, re-seeded per window */
+  int stream_nseeds;
+  void *stream_state;      /* per-context overlap-save state (frames copy, seeds, hop) */
   double *prof_node;   /* per-node ms (prof == 2); allocated lazily */
   double t_ekind[96];
   long n_ekind[96];
@@ -169,6 +177,16 @@ int pt_v21_cont_itemsize(pt_ctx *c, int ctab_idx);
  * x_lengths, sid, noise_scale, length_scale).  On return the out-wav/out-wav-n arguments receive
  * the output waveform (host, fp32) owned by the context (valid until the next run). */
 int pt_v21_run(pt_ctx *c, const pt_tv *feeds, float **wav, int64_t *wav_n);
+
+/* ---- streaming decoder (overlap-save) -------------------------------------------------------
+ * pt_v21_stream_open runs the graph up to the frames tensor (the encoder) and keeps a private copy.
+ * pt_v21_stream_chunk then executes only the local decoder tail (convs/convT/activation/einsum,
+ * all local in time) on the frames window [a, a+win), returning that window's waveform. The caller
+ * emits the interior and discards `ctx` frames at each end, so consecutive chunks join exactly as
+ * they do in a single full run -- one encoder pass, one decoder start per utterance. */
+int pt_v21_stream_open(pt_ctx *c, const pt_tv *feeds, int64_t *frames, int *hop);
+int pt_v21_stream_chunk(pt_ctx *c, int64_t a, int64_t win, float **pcm, int64_t *n);
+void pt_v21_stream_close(pt_ctx *c);
 
 void pt_v21_trace(int idx);
 void pt_v21_shape_log(FILE *f);

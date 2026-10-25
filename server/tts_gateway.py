@@ -46,35 +46,6 @@ from pathlib import Path
 SR = 16000
 REPO = Path(__file__).resolve().parent.parent
 
-# sentence boundaries: CJK and ASCII terminal punctuation (kept with their sentence), newlines
-_SPLIT = re.compile(r"(?<=[。！？!?；;…\n])|(?<=[.])(?=\s)")
-
-
-def split_sentences(text: str, max_chars: int = 120, first_clause: int = 10) -> list[str]:
-    """Sentences, with the FIRST one cut at its first comma when it is longer than `first_clause`
-    characters: a short opening chunk gets through the frontend and the Nano sooner, so audio
-    starts earlier (the comma is a pause in the speech anyway). 0 disables the cut."""
-    out = []
-    for part in _SPLIT.split(text):
-        part = part.strip()
-        if not part:
-            continue
-        # very long run without punctuation: cut at commas, then hard-cut, to bound per-request T
-        while len(part) > max_chars:
-            cut = max(part.rfind(c, 0, max_chars) for c in "，,、 ")
-            cut = cut + 1 if cut > max_chars // 3 else max_chars
-            out.append(part[:cut].strip())
-            part = part[cut:].strip()
-        if part:
-            out.append(part)
-    if first_clause and out and len(out[0]) > first_clause:
-        m = re.search(r"[，,、；;：:]", out[0][3:])   # at least 3 chars before the cut
-        if m and m.end() + 3 < len(out[0]):
-            k = m.end() + 3
-            out[0:1] = [out[0][:k].strip(), out[0][k:].strip()]
-    return out
-
-
 def wav_header(n_bytes: int) -> bytes:
     return (b"RIFF" + struct.pack("<I", 36 + n_bytes) + b"WAVEfmt " +
             struct.pack("<IHHIIHH", 16, 1, 1, SR, SR * 2, 2, 16) + b"data" + struct.pack("<I", n_bytes))
@@ -84,9 +55,7 @@ class Frontend:
     """text -> blank-interleaved phone/tone/lang ids.
 
     g2pw is not re-entrant and contends badly across threads (GIL + torch intra-op threads), so all
-    calls run on ONE worker thread fed by a deadline-ordered queue: the first sentence of every
-    request is converted before anyone's later sentences (measured: with a plain lock, 3 of 4
-    concurrent paragraphs waited 6.6 s for their first audio while the Nano sat idle).
+    calls run on ONE worker thread fed by a small queue.
     """
 
     def __init__(self, scripts_dir: Path, add_blank: bool = True) -> None:
@@ -146,51 +115,31 @@ def est_audio_s(text: str) -> float:
 
 
 class Gateway:
+    """text -> ids (frontend) -> ONE Nano request -> streamed PCM back to the client.
+
+    One request per utterance is what keeps prosody continuous and gives the model a single start:
+    the Nano runs the encoder once and streams the decoder output in windows (overlap-save), so the
+    audio is one continuous synthesis rather than per-sentence restarts.
+    """
+
     def __init__(self, nano: str, frontend: Frontend, timeout: float) -> None:
         self.nano = nano.rstrip("/")
         self.fe = frontend
-        self.pool = cf.ThreadPoolExecutor(max_workers=32)
         self.timeout = timeout
 
-    def synth(self, ids: dict, voice, speed: float, extra: dict, deadline: float) -> bytes:
-        body = {"input_ids": ids, "voice": voice, "speed": speed, "response_format": "pcm",
-                "priority": deadline, **extra}
+    def stream(self, text: str, voice, speed: float, extra: dict):
+        ids = self.fe.ids(text)
+        if ids is None:
+            return
+        body = {"input_ids": ids, "voice": voice, "speed": speed, "response_format": "pcm", **extra}
         req = urllib.request.Request(self.nano + "/v1/audio/speech", json.dumps(body).encode(),
                                      {"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            return r.read()
-
-    def stream(self, text: str, voice, speed: float, extra: dict):
-        """Yield PCM bytes per sentence, in order. Every sentence is queued at once with a deadline
-        = request arrival + estimated playback time of the sentences before it, and both queues
-        (frontend here, workers on the Nano) are earliest-deadline-first."""
-        sents = split_sentences(text)
-        t0 = time.time() * 1000.0
-        futs = []
-        ahead = 0.0
-        for s in sents:
-            deadline = t0 + 1000.0 * ahead / max(speed, 0.25)
-            ahead += est_audio_s(s)
-            nano_fut: cf.Future = cf.Future()
-
-            def on_ids(f, nano_fut=nano_fut, deadline=deadline):
-                try:
-                    ids = f.result()
-                except Exception as e:  # noqa: BLE001
-                    nano_fut.set_exception(e)
+            while True:
+                chunk = r.read(8192)     # returns as soon as bytes arrive: pass them straight on
+                if not chunk:
                     return
-                if ids is None:
-                    nano_fut.set_result(b"")
-                    return
-                inner = self.pool.submit(self.synth, ids, voice, speed, extra, deadline)
-                inner.add_done_callback(
-                    lambda g: nano_fut.set_exception(g.exception()) if g.exception()
-                    else nano_fut.set_result(g.result()))
-
-            self.fe.submit(deadline, s).add_done_callback(on_ids)
-            futs.append(nano_fut)
-        for f in futs:
-            yield f.result()
+                yield chunk
 
 
 def make_handler(gw: Gateway):

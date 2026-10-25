@@ -62,6 +62,8 @@ static double now_ms(void) {
   return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
 }
 
+static int sink_chunk(int fd, const void *data, size_t n);   /* HTTP/1.1 chunk writer (below) */
+
 /* ---------------------------------------------------------------- job queue */
 typedef struct job {
   int64_t T;
@@ -69,6 +71,8 @@ typedef struct job {
   int64_t sid;
   float noise, length_scale;
   double prio;             /* deadline, unix ms: smaller runs first (default = arrival time) */
+  int sink_fd;             /* >= 0: stream PCM to this socket as it is synthesized */
+  int64_t sent;            /* bytes already streamed */
   /* result */
   int16_t *pcm;
   int64_t n;
@@ -160,13 +164,17 @@ typedef struct {
   int use_cuda, id;
 } worker_arg;
 
-static int synth(pt_ctx *c, job *j) {
+typedef struct { int64_t xl, sid; float ns, ls; } feed_scalars;
+
+/* The scalar feeds must outlive the run: the tensors alias these fields. */
+static void build_feeds(job *j, pt_tv f[8], feed_scalars *sc) {
   int64_t T = j->T;
-  int64_t xl = T, sid = j->sid;
-  float ns = j->noise, ls = j->length_scale;
+  sc->xl = T;
+  sc->sid = j->sid;
+  sc->ns = j->noise;
+  sc->ls = j->length_scale;
+  memset(f, 0, sizeof(pt_tv) * 8);
   /* feed order = graph input order: x, tone, lang, x_lengths, sid, noise_scale, length_scale */
-  pt_tv f[8];
-  memset(f, 0, sizeof(f));
   for (int i = 0; i < 3; i++) {
     f[i].dt = DT_I64;
     f[i].ndim = 2;
@@ -175,47 +183,97 @@ static int synth(pt_ctx *c, job *j) {
     f[i].n = T;
     f[i].p = j->ids + (size_t) i * T;
   }
-  void *sc[4] = {&xl, &sid, &ns, &ls};
+  void *sp[4] = {&sc->xl, &sc->sid, &sc->ns, &sc->ls};
   int dts[4] = {DT_I64, DT_I64, DT_F32, DT_F32};
   for (int i = 0; i < 4; i++) {
     f[3 + i].dt = dts[i];
     f[3 + i].ndim = 1;
     f[3 + i].d[0] = 1;
     f[3 + i].n = 1;
-    f[3 + i].p = sc[i];
+    f[3 + i].p = sp[i];
   }
   for (int i = 0; i < 7; i++) {
     for (int q = f[i].ndim; q < PT_V21_MAX_RANK; q++) f[i].d[q] = 1;
     f[i].alive = 1;
   }
+}
+
+static int16_t to_s16(float v) {
+  float x = v * 32767.0f;
+  return (int16_t) (x > 32767.0f ? 32767 : x < -32768.0f ? -32768 : lrintf(x));
+}
+
+/* Streaming synthesis: one encoder pass, then the decoder tail on sliding windows (overlap-save),
+ * so the response carries ONE utterance -- one decoder start, continuous prosody -- while audio is
+ * still delivered as it is produced. Context of PT_V21_STREAM_CTX frames (default 16) makes
+ * the result numerically identical to a single full-graph run (measured: 133 dB vs full). */
+static int synth_stream(pt_ctx *c, job *j) {
+  pt_tv f[8];
+  feed_scalars sc;
+  build_feeds(j, f, &sc);
+  int64_t T = 0;
+  int hop = 0;
+  if (pt_v21_stream_open(c, f, &T, &hop)) return -1;
+  /* Overlap-save windows: the FIRST window is short (fast first audio), later windows are long
+   * (less overlap recomputed). Cost is (W / (W - 2*CTX)) on the decoder part. */
+  int ctx = 16, win_first = 48, win = 256;
+  if (getenv("PT_V21_STREAM_CTX")) ctx = atoi(getenv("PT_V21_STREAM_CTX"));
+  if (getenv("PT_V21_STREAM_WIN")) win_first = win = atoi(getenv("PT_V21_STREAM_WIN"));
+  if (getenv("PT_V21_STREAM_WIN_FIRST")) win_first = atoi(getenv("PT_V21_STREAM_WIN_FIRST"));
+  if (getenv("PT_V21_STREAM_WIN_MAX")) win = atoi(getenv("PT_V21_STREAM_WIN_MAX"));
+  if (win_first < 2 * ctx + 8) win_first = 2 * ctx + 8;
+  if (win < 2 * ctx + 8) win = 2 * ctx + 8;
+  int16_t *buf = NULL;
+  int64_t bufcap = 0;
+  int rc = 0;
+  int64_t a = 0, emitted = 0;
+  while (emitted < T) {
+    int64_t w = (a == 0) ? win_first : win;
+    int64_t win_eff = w;
+    if (a + win_eff > T) win_eff = T - a;
+    int last = (a + win_eff >= T);
+    float *pcm = 0;
+    int64_t n = 0;
+    if (pt_v21_stream_chunk(c, a, win_eff, &pcm, &n)) { rc = -1; break; }
+    int64_t lo = (a == 0) ? 0 : ctx;
+    int64_t hi = last ? win_eff : (win_eff - ctx);
+    int64_t e0 = a + lo, e1 = a + hi;
+    if (e0 < emitted) e0 = emitted;
+    if (e1 > T) e1 = T;
+    int64_t cnt = e1 > e0 ? (e1 - e0) * hop : 0;
+    int64_t skip = (e0 - a) * hop;
+    if (cnt > 0 && skip >= 0 && skip + cnt <= n) {
+      if (cnt > bufcap) {
+        bufcap = cnt;
+        buf = (int16_t *) realloc(buf, (size_t) bufcap * 2);
+        if (!buf) { rc = -1; break; }
+      }
+      for (int64_t i = 0; i < cnt; i++) buf[i] = to_s16(pcm[skip + i]);
+      if (sink_chunk(j->sink_fd, buf, (size_t) cnt * 2)) { rc = -1; break; }   /* client gone */
+      j->sent += cnt * 2;
+      j->n += cnt;
+      emitted = e1;
+    }
+    if (last) break;
+    a = e1 - ctx;
+    if (a <= 0) a = 1;
+  }
+  free(buf);
+  pt_v21_stream_close(c);
+  return rc;
+}
+
+static int synth(pt_ctx *c, job *j) {
+  pt_tv f[8];
+  feed_scalars sc;
+  build_feeds(j, f, &sc);
+  if (j->sink_fd >= 0) return synth_stream(c, j);
   float *wav = 0;
   int64_t wn = 0;
   if (pt_v21_run(c, f, &wav, &wn)) return -1;
-  /* Edge conditioning (measured, not assumed): every synthesis starts with 0-125 ms of clean
-   * silence followed by a ~100-150 ms decoder startup burst (peak 0.33, -23 dB RMS -- audible as
-   * a thump before each sentence), and ends with low-level trailing rumble. Neither is speech:
-   * skip the clean leading silence, fade in over the burst span, fade out the tail. Operates on
-   * the float waveform before int16 conversion; the engine path itself is untouched. */
-  {
-    int64_t i0 = 0;
-    while (i0 < wn && fabsf(wav[i0]) < 0.01f) i0++;
-    int64_t fin = (int64_t) (0.150 * SR);   /* burst span */
-    for (int64_t i = 0; i < fin && i0 + i < wn; i++) {
-      float g = 0.5f - 0.5f * cosf((float) M_PI * (float) i / (float) fin);
-      wav[i0 + i] *= g;
-    }
-    int64_t fout = (int64_t) (0.120 * SR);  /* trailing rumble + end-click guard */
-    for (int64_t i = 0; i < fout && i < wn; i++) {
-      float g = 0.5f - 0.5f * cosf((float) M_PI * (float) i / (float) fout);
-      wav[wn - 1 - i] *= g;
-    }
-  }
   j->pcm = (int16_t *) malloc((size_t) (wn > 0 ? wn : 1) * 2);
   if (!j->pcm) return -1;
-  for (int64_t i = 0; i < wn; i++) {
-    float v = wav[i] * 32767.0f;
-    j->pcm[i] = (int16_t) (v > 32767.0f ? 32767 : v < -32768.0f ? -32768 : lrintf(v));
-  }
+  for (int64_t i = 0; i < wn; i++) j->pcm[i] = to_s16(wav[i]);
   j->n = wn;
   return 0;
 }
@@ -248,6 +306,7 @@ static void *worker_main(void *arg) {
     wj.T = WT;
     wj.ids = ids;
     wj.length_scale = 1.0f;
+    wj.sink_fd = -1;   /* buffered warm-up: no socket */
     if (synth(c, &wj)) {
       fprintf(stderr, "serve: worker %d: warm-up synthesis failed\n", w->id);
       exit(4);
@@ -394,6 +453,15 @@ static int send_all(int fd, const void *buf, size_t n) {
   return 0;
 }
 
+/* one HTTP/1.1 chunk (Transfer-Encoding: chunked) */
+static int sink_chunk(int fd, const void *data, size_t n) {
+  char hdr[32];
+  int hn = snprintf(hdr, sizeof hdr, "%zx\r\n", n);
+  if (send_all(fd, hdr, (size_t) hn)) return -1;
+  if (send_all(fd, data, n)) return -1;
+  return send_all(fd, "\r\n", 2);
+}
+
 static void reply(int fd, int code, const char *ctype, const void *body, size_t n) {
   const char *msg = code == 200 ? "OK" : code == 400 ? "Bad Request" : code == 404 ? "Not Found" :
                     code == 405 ? "Method Not Allowed" : code == 413 ? "Payload Too Large" :
@@ -524,9 +592,20 @@ static void handle_speech(int fd, const char *body, size_t blen) {
   j.noise = (float) noise;
   j.length_scale = (float) (1.0 / speed);
   j.t_enq = now_ms();
+  /* pcm streams: headers go out now, then the worker writes body chunks as it synthesizes
+   * (one encoder pass, windowed decoder -> one utterance, continuous prosody, early audio) */
+  j.sink_fd = is_pcm ? fd : -1;
+  if (is_pcm) {
+    static const char hdr[] = "HTTP/1.1 200 OK\r\nContent-Type: audio/pcm\r\n"
+                              "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+    if (send_all(fd, hdr, sizeof(hdr) - 1)) {
+      free(ids);
+      return;
+    }
+  }
   if (queue_push(&j)) {
     free(ids);
-    reply_err(fd, 503, "queue full");
+    if (!is_pcm) reply_err(fd, 503, "queue full");
     return;
   }
   pthread_mutex_lock(&j.mu);
@@ -538,12 +617,12 @@ static void handle_speech(int fd, const char *body, size_t blen) {
     reply_err(fd, 500, "synthesis failed");
     return;
   }
-  size_t pb = (size_t) j.n * 2;
+  size_t pb = (size_t) j.n * 2;   /* pcm: bytes already streamed (j.sent) */
   fprintf(stderr, "serve: T=%lld sid=%lld audio=%.2fs queue=%.0fms synth=%.0fms rtf=%.3f fmt=%s\n",
           (long long) T, (long long) sid, j.n / (double) SR, j.t_start - j.t_enq,
           j.t_end - j.t_start, (j.t_end - j.t_start) / 1000.0 / (j.n / (double) SR + 1e-9), fmt);
   if (is_pcm) {
-    reply(fd, 200, "audio/pcm", j.pcm, pb);
+    send_all(fd, "0\r\n\r\n", 5);   /* end of the chunked body */
   } else {
     unsigned char *w = (unsigned char *) malloc(44 + pb);
     if (!w) {
