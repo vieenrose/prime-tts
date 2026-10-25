@@ -19,7 +19,7 @@ gateway owns text and the Nano owns audio. Both speak the same OpenAI request sh
 
 The per-process benchmark driver pays ~287 ms of serialized startup per request (container
 record pass, CUDA context, 111 MB weight upload, clock ramp). The server pays it once at boot
-(`ready in ~1.3 s` with 4 warm workers). Measured on picard (1-core cap, T81 golden ids):
+(`ready in ~2.1 s` with 8 warm workers). Measured on picard (1-core cap, T81 golden ids):
 
 | | per-process driver | server |
 |---|---|---|
@@ -39,10 +39,10 @@ End-to-end through the gateway (text in, HF s2s request shape, this host → pic
 
 ```bash
 make -f runtime/v21/Makefile serve        # on the Nano (CUDA)
-./build/pt_v21_serve --container build/v21.ptk --cuda --port 8090 [--workers 4] [--keepwarm 30]
+./build/pt_v21_serve --container build/v21.ptk --cuda --port 8090 [--workers 8] [--keepwarm 30]
 ```
 
-- `--workers N` (default 4, max 8): warm contexts = concurrent syntheses; more requests queue
+- `--workers N` (default 8, max 8): warm contexts = concurrent syntheses; more requests queue
   (max 64, then 503). The process keeps the 1-core CPU cap of the other drivers (`PT_V21_CPUS`).
   For 8 parallel T81 on one core: 8 workers serve them in **3.17 s wall** (streams 3.09-3.17 s,
   per-stream RTF ~0.87, 9.14x realtime aggregate) vs ~3.7 s per-process -- server mode is the N=8

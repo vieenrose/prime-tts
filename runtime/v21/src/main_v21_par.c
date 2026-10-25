@@ -118,7 +118,7 @@ int main(int argc, char **argv) {
   apply_cpu_cap();
   const char *container = "build/v21.ptk";
   const char *dir = "tests/golden_v21/T81";
-  int use_cuda = 0, N = 1;
+  int use_cuda = 0, N = 8;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--container") && i + 1 < argc) container = argv[++i];
     else if (!strcmp(argv[i], "--case") && i + 1 < argc) dir = argv[++i];

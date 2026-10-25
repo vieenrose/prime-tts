@@ -1,6 +1,6 @@
 /* main_v21_serve.c - persistent PrimeTTS v2.1 server: OpenAI-shaped POST /v1/audio/speech.
  *
- *   ./pt_v21_serve --container build/v21.ptk --cuda [--port 8090] [--bind 0.0.0.0] [--workers 4]
+ *   ./pt_v21_serve --container build/v21.ptk --cuda [--port 8090] [--bind 0.0.0.0] [--workers 8]
  *                  [--noise 0] [--default-sid 0]
  *
  * Server mode is the latency lever the benchmark driver cannot show: the container record pass,
@@ -642,7 +642,7 @@ out:
 int main(int argc, char **argv) {
   apply_cpu_cap();
   const char *container = "build/v21.ptk", *bind_ip = "0.0.0.0";
-  int use_cuda = 0, port = 8090, nw = 4;
+  int use_cuda = 0, port = 8090, nw = 8;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--container") && i + 1 < argc) container = argv[++i];
     else if (!strcmp(argv[i], "--port") && i + 1 < argc) port = atoi(argv[++i]);

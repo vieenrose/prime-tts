@@ -131,7 +131,7 @@ while running N=4 and N=1, prints `METRIC name=value` lines plus the phase split
 
 ## Server mode: OpenAI-compatible `/v1/audio/speech` (HF speech-to-speech ready)
 
-`build/pt_v21_serve` (Nano, `make -f runtime/v21/Makefile serve`) keeps 4 warm contexts and the
+`build/pt_v21_serve` (Nano, `make -f runtime/v21/Makefile serve`) keeps 8 warm contexts and the
 resident weights for the life of the process, so requests skip the ~287 ms per-process startup:
 4 concurrent T81 requests in **1.61 s** (vs ~2 s per-process), with a GPU keep-warm window that
 holds full clock between requests (post-idle T81 0.56-0.62 s instead of 1.3-1.7 s).
