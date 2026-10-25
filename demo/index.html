@@ -75,13 +75,13 @@
   <p class="foot"><b>Comparing the two buttons:</b> "stream" schedules audio as it arrives (lowest
   latency, and the gaps counter must stay 0); "buffered" waits for everything and plays one buffer
   (no scheduling at all). If buffered is clean and stream is not, the artefact is in playback
-  timing; if both sound identical, it is not in this page. Player <b id="pver">?</b>.<br>
+  timing; if both sound identical, it is not in this page. Player <b id="pver">?</b>. Stream mode now plays through a continuous AudioWorklet ring buffer, so there are no per-buffer resampler seams; the gaps field shows milliseconds of inserted silence if the network ever starves it.<br>
   Shared demo box (600 chars/request). First request after the Nano idles can take
   ~1–2 s (GPU clock ramp); then sentences stream as they synthesize. If the page was redeployed,
   the gateway URL below may have rotated — see the repo <tt>demo/README.md</tt>.<br>
   Code: <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime/demo">demo/</a> ·
   runtime: <a href="https://github.com/vieenrose/prime-tts/tree/custom-runtime">custom-runtime</a>.</p>
 </div>
-<script src="./app.js?v=4"></script>
+<script src="./app.js?v=5"></script>
 </body>
 </html>

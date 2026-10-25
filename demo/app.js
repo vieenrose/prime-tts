@@ -11,7 +11,7 @@
  * so the indicator line reports evidence rather than assumptions.
  */
 const GATEWAY_URL = "https://variation-joan-requirement-delivers.trycloudflare.com";
-const PLAYER_VERSION = "v4";
+const PLAYER_VERSION = "v5";
 const SR = 16000;
 const EXAMPLES = [
   "您好，歡迎使用語音助理。",
@@ -116,47 +116,52 @@ function publishWav(pcmBytes) {
   dl.style.display = "inline";
 }
 
-/* ---------------- mode 1: streaming, with prebuffer and underrun accounting ---------------- */
+/* ---------------- mode 1: streaming through a continuous AudioWorklet ----------------
+ * Pieces are posted to a ring buffer inside the worklet, which interpolates continuously across
+ * piece boundaries. Scheduling N AudioBufferSourceNodes instead made the browser resample each
+ * piece independently -- a resampler restart at every 0.25 s cut, i.e. an audible discontinuity
+ * 4x/s mid-speech (the artefact that "buffered" mode did not have). */
 async function speakStream() {
   const text = textEl.value.trim();
   if (!text || playing) return;
   await ensureCtx();
+  if (!ctx.audioWorklet) {                       // very old browser: one buffer, no streaming
+    showErr("This browser has no AudioWorklet; using buffered playback.");
+    return speakBuffered();
+  }
   const t0 = beginRun();
-  const IN_CHUNK = 4000;   // 0.25 s at 16 kHz
-  const PREBUF = 12000;    // 0.75 s banked before the first piece starts
-  let firstMs = null, nChunks = 0, audioS = 0, gaps = 0;
-  let fq = new Float32Array(0), playAt = 0, started = false;
+  const PREBUF = 6400;                            // 0.4 s banked before playback starts
+  let firstMs = null, audioS = 0, posted = 0, gaps = 0, startAt = null;
   const full = [];
 
+  await ctx.audioWorklet.addModule("./player.worklet.js");
+  const node = new AudioWorkletNode(ctx, "primetts-player", {
+    numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
+    processorOptions: { inRate: SR },
+  });
+  node.connect(ctx.destination);
+  node.port.onmessage = (e) => {
+    if (e.data && e.data.underrunSamples) {
+      gaps = Math.round((e.data.underrunSamples / SR) * 1000);   // ms of silence inserted
+      $("gaps").textContent = gaps + " ms";
+    }
+  };
   const stats = () => {
-    $("nc").textContent = nChunks;
+    $("nc").textContent = String(posted);
     $("audio").textContent = audioS.toFixed(1) + "s";
-    $("gaps").textContent = String(gaps);
     $("bar").style.width = Math.min(100, audioS / Math.max(1, text.length / 5) * 100) + "%";
   };
-  const schedule = () => {
-    if (!started) {
-      if (fq.length < PREBUF) { if (firstMs === null) $("first").textContent = "buffering…"; return; }
-      started = true;
-      playAt = ctx.currentTime + 0.05;
+  const push = (bytes) => {
+    const f = toFloat(bytes);
+    node.port.postMessage(f);
+    posted++; audioS += f.length / SR; stats();
+    if (firstMs === null && audioS * SR >= PREBUF) {   // enough banked: start the clock
+      node.port.postMessage("start");
       firstMs = performance.now() - t0;
+      startAt = performance.now();
       $("first").textContent = firstMs.toFixed(0) + " ms";
     }
-    while (fq.length >= IN_CHUNK) {
-      // buffers stay at the 16 kHz source rate: the browser resamples natively
-      const buf = ctx.createBuffer(1, IN_CHUNK, SR), ch = buf.getChannelData(0);
-      ch.set(fq.subarray(0, IN_CHUNK));
-      fq = fq.slice(IN_CHUNK);
-      const src = ctx.createBufferSource();
-      src.buffer = buf; src.connect(ctx.destination);
-      if (playAt < ctx.currentTime - 0.05) { gaps++; playAt = ctx.currentTime + 0.02; }
-      const at = Math.max(playAt, ctx.currentTime + 0.02);
-      src.start(at);
-      playAt = at + IN_CHUNK / SR;
-      nChunks++; audioS += IN_CHUNK / SR; stats();
-    }
   };
-  const timer = setInterval(schedule, 100);
   try {
     const resp = await fetch(GATEWAY_URL + "/v1/audio/speech", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -172,28 +177,27 @@ async function speakStream() {
       const { done, value } = await reader.read();
       if (done) break;
       full.push(value);
-      const f = toFloat(value), m = new Float32Array(fq.length + f.length);
-      m.set(fq); m.set(f, fq.length); fq = m;
+      push(value);
     }
-    await new Promise((r) => setTimeout(r, 150));
-    while (fq.length > 0) {   // flush the tail through the same path
-      const n = Math.min(IN_CHUNK, fq.length);
-      const buf = ctx.createBuffer(1, n, SR), ch = buf.getChannelData(0);
-      ch.set(fq.subarray(0, n)); fq = fq.slice(n);
-      const src = ctx.createBufferSource();
-      src.buffer = buf; src.connect(ctx.destination);
-      if (playAt < ctx.currentTime - 0.05) { gaps++; playAt = ctx.currentTime + 0.02; }
-      const at = Math.max(playAt, ctx.currentTime + 0.02);
-      src.start(at); playAt = at + n / SR;
-      nChunks++; audioS += n / SR; stats();
+    if (firstMs === null) {                        // shorter than the prebuffer
+      node.port.postMessage("start");
+      firstMs = performance.now() - t0;
+      startAt = performance.now();
+      $("first").textContent = firstMs.toFixed(0) + " ms";
     }
-    const total = full.reduce((a, b) => a + b.length, 0), pcm = new Uint8Array(total);
+    const pcmAll = new Uint8Array(full.reduce((a, b) => a + b.length, 0));
     let off = 0;
-    for (const b of full) { pcm.set(b, off); off += b.length; }
-    publishWav(pcm);
+    for (const b of full) { pcmAll.set(b, off); off += b.length; }
+    publishWav(pcmAll);
+    // wait only for the part of the audio that has not played yet
+    const remaining = audioS * 1000 - (performance.now() - (startAt || performance.now())) + 300;
+    if (remaining > 0) await new Promise((r) => setTimeout(r, remaining));
   } catch (e) {
     if (e.name !== "AbortError") showErr("Synthesis failed: " + e.message);
-  } finally { clearInterval(timer); endRun(); }
+  } finally {
+    try { node.port.postMessage("stop"); node.disconnect(); } catch (_) {}
+    endRun();
+  }
 }
 
 /* ---------------- mode 2: buffered, one buffer, no scheduling seams ---------------- */
