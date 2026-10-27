@@ -86,6 +86,8 @@ typedef struct {
   int dev_res;          /* 1 = current values live only in dev_p (device arena, conv chain) */
   void *dev_p;
   int alive;
+  void *base;           /* pooled buffer this payload lives in (refcounted), NULL = not owned */
+  int view;             /* 1 = p points into another tensor's buffer (zero-copy slice) */
 } pt_tv;
 
 struct pt_ctx {
@@ -122,6 +124,10 @@ struct pt_ctx {
   int prof;
   int prof_node_on;
   long host_bytes_live, host_bytes_peak;   /* bytes of live activation tensors, and the high-water mark */
+  /* tensor buffer pool (per context = per thread): freed activation buffers are kept on size-class
+   * free lists and reused by later ops and later requests instead of going back to the kernel */
+  void *pool[64];
+  long pool_bytes, pool_cap;
   long host_alloc_count;
   double dev_bytes_weights, dev_bytes_arena, dev_bytes_stray;
   double dev_bytes_res;           /* device-residency sub-arena size (PT_V21_DEVADD) */

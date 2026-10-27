@@ -6,7 +6,7 @@
  * split samples at arbitrary byte boundaries) and plays it through an AudioWorklet FIFO in a 16 kHz
  * AudioContext: a 1:1 sample copy, with the browser converting to the device rate.
  */
-const GATEWAY_URL = "https://variation-joan-requirement-delivers.trycloudflare.com";
+const GATEWAY_URL = "https://priority-mason-gis-tongue.trycloudflare.com";
 const SR = 16000;
 const PREBUF = 6400;   // 0.4 s banked before playback starts (network jitter only)
 

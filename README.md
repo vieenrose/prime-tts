@@ -17,21 +17,23 @@ English, 16 kHz) on the original **Jetson Nano** (Tegra X1: 4× Cortex-A57, 128-
 
 ## Performance
 
-Measured on a Jetson Nano, reference utterance T81 (3.62 s of audio):
+Measured on a Jetson Nano, one CPU core for TTS, reference utterance T81 (3.62 s of audio):
 
 | scenario | wall time | realtime factor |
 |---|---|---|
-| 1 request | 0.54 s | 6.8× |
+| 1 request | 0.50 s | 7.2× |
 | 4 concurrent requests (4 CPU cores) | 1.78 s | 8.1× aggregate |
-| 4 concurrent requests, server mode (1 core) | 1.61 s | 9.0× aggregate |
-| 8 concurrent requests, server mode (1 core) | 3.17 s | 9.1× aggregate |
+| 8 concurrent requests, server mode | 3.2 s | 9.1× aggregate |
 
-Streaming through the server (1 core, text in, first audio → end of synthesis):
+**Time to first audio** with 8 concurrent calls on one core (server mode, streaming):
 
-| input | first audio | complete | audio length |
-|---|---|---|---|
-| short sentence (12 chars) | 0.44 s | 0.64 s | 2.0 s |
-| paragraph (58 chars) | 1.45 s | 2.61 s | 10.9 s |
+| calls | 3.6 s sentence each | short clause each (0.9 s) |
+|---|---|---|
+| all 8 start at the same instant | 1.37 s median | 0.85 s median |
+| arriving at random, ~0.5 s apart | 0.52 s median, 0.80 s max | 0.17 s median, 0.41 s max |
+
+Single request through the text gateway: first audio 0.44 s for a short sentence, 1.45 s for a
+58-character paragraph.
 
 Against the starting point of this runtime, 4-request latency improved **5.8×** (10.3 s → 1.78 s) and
 single-request latency **7.2×** (3.86 s → 0.54 s).
@@ -47,6 +49,9 @@ single-request latency **7.2×** (3.86 s → 0.54 s).
   register-tiled, coalesced staging; weights uploaded once and shared by all streams.
 - **Concurrency:** each request has its own context, CUDA stream and device arena; waiting threads
   sleep only when another stream needs the CPU.
+- **Low CPU overhead per request:** tensor buffers are recycled from a per-worker pool (no page
+  faults after warm-up), contiguous slices are zero-copy views, and table activations are vectorized
+  — the host side is the bottleneck when TTS runs on a single core.
 - **Streaming decoder:** the text encoder runs once per request; the decoder runs on overlapping
   windows (overlap-save), so audio starts early while remaining identical to a single full
   synthesis (max deviation 9e-8).
@@ -146,6 +151,7 @@ as it is synthesized.
 | `PT_V21_CPUS` | one core | `all`, or a list such as `2,3` |
 | `PT_V21_WAIT_US` | 200 | GPU wait poll interval; `0` = driver wait |
 | `PT_V21_STREAM_WIN`, `PT_V21_STREAM_CTX` | 48, 16 | streaming window / context, in frames |
+| `PT_V21_POOL_MB` | 32 | per-worker tensor buffer pool; `0` disables |
 
 Two CPU cores are recommended when short utterances must stay real-time under full load.
 

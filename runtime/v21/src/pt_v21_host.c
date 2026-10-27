@@ -47,6 +47,48 @@ static inline float tanh_tab65536_eval(float x) {
   float frac = scaled - (float) i;
   return tanh_tab65536[i] + frac * (tanh_tab65536[i + 1] - tanh_tab65536[i]);
 }
+/* Batched table evaluation, bit-identical to tanh_tab65536_eval (verified over 42M inputs incl.
+ * +-8, NaN, +-inf, +-0): the index/fraction math and the interpolation run 4-wide in NEON, the
+ * indices go through a small stack array so the table is gathered with plain integer-indexed
+ * loads (moving NEON lanes to integer registers is what made a naive version barely faster), and
+ * the +-8 saturation is a select. 1.5x faster than the scalar loop on the A57 (7.8 vs 11.9 ns).
+ * sig = 1 evaluates the sigmoid form 0.5 * (tanh(x * 0.5) + 1), as un_op does. */
+static void tanh_tab65536_eval_n(const float *a, float *o, int64_t n, int sig) {
+  int64_t k = 0;
+#if defined(__aarch64__)
+  const float32x4_t c8 = vdupq_n_f32(8.0f), cs = vdupq_n_f32(65536.0f / 16.0f), m8 = vdupq_n_f32(-8.0f);
+  const float32x4_t p1 = vdupq_n_f32(1.0f), n1 = vdupq_n_f32(-1.0f), half = vdupq_n_f32(0.5f);
+  const int32x4_t z = vdupq_n_s32(0), mx = vdupq_n_s32(65535);
+  for (; k + 16 <= n; k += 16) {
+    int32_t idx[16] __attribute__((aligned(16)));
+    float lo[16] __attribute__((aligned(16))), hi[16] __attribute__((aligned(16)));
+    float32x4_t fr[4], x[4];
+    for (int j = 0; j < 4; j++) {
+      x[j] = vld1q_f32(a + k + 4 * j);
+      if (sig) x[j] = vmulq_f32(x[j], half);
+      float32x4_t sc = vmulq_f32(vaddq_f32(x[j], c8), cs);
+      int32x4_t i = vminq_s32(vmaxq_s32(vcvtq_s32_f32(sc), z), mx);
+      fr[j] = vsubq_f32(sc, vcvtq_f32_s32(i));
+      vst1q_s32(idx + 4 * j, i);
+    }
+    for (int j = 0; j < 16; j++) {
+      const float *t = tanh_tab65536 + idx[j];
+      lo[j] = t[0];
+      hi[j] = t[1];
+    }
+    for (int j = 0; j < 4; j++) {
+      float32x4_t l = vld1q_f32(lo + 4 * j), h = vld1q_f32(hi + 4 * j);
+      float32x4_t r = vfmaq_f32(l, fr[j], vsubq_f32(h, l));
+      r = vbslq_f32(vcgeq_f32(x[j], c8), p1, r);
+      r = vbslq_f32(vcleq_f32(x[j], m8), n1, r);
+      if (sig) r = vmulq_f32(half, vaddq_f32(r, p1));
+      vst1q_f32(o + k + 4 * j, r);
+    }
+  }
+#endif
+  for (; k < n; k++)
+    o[k] = sig ? 0.5f * (tanh_tab65536_eval(a[k] * 0.5f) + 1.0f) : tanh_tab65536_eval(a[k]);
+}
 
 #define PT_MAGIC_V21 0x50544B31u   /* "PTK1", same magic as runtime/include/pt.h */
 
@@ -104,11 +146,85 @@ static int64_t tv_n(const pt_tv *t) {
   return n;
 }
 
+/* ---- tensor buffer pool -----------------------------------------------------------------------
+ * Every op allocates its output and the interpreter frees each tensor at its last use, so a request
+ * allocates and frees its whole working set (~4000 buffers). glibc returns large blocks to the
+ * kernel (munmap / arena trim), so every request re-faulted that memory: ~8300 page faults
+ * (~33 MB of kernel-zeroed pages) per request, measured. The pool keeps freed buffers on per-context
+ * free lists (a context is only ever used by one thread: no locking) in size classes of four steps
+ * per octave (<= 19% slack), so the working set is faulted once and reused. Small buffers bypass
+ * it. Each buffer carries a 64-byte header with its class. PT_V21_POOL_MB caps the bytes kept per
+ * context (default 32: the measured per-worker working set fits; 0 disables pooling). */
+#define PT_POOL_MIN 65536
+#define PT_POOL_HDR 64
+/* Buffers are reference counted (header word 1) so a zero-copy slice can keep its source alive:
+ * the owner tensor and every view hold one reference; the buffer is recycled at the last release. */
+static void buf_ref_init(void *p) { ((int *) ((char *) p - PT_POOL_HDR))[1] = 1; }
+static void buf_ref_add(void *p) { ((int *) ((char *) p - PT_POOL_HDR))[1]++; }
+static size_t pool_cls_size(int k) { return (size_t) (PT_POOL_MIN / 4) * (size_t) (4 + (k & 3)) << (k >> 2); }
+static int pool_cls(size_t bytes) {
+  int k = 0;
+  while (k < 63 && pool_cls_size(k) < bytes) k++;
+  return k;
+}
+static long pool_cap_bytes(void) {
+  static long cap = -1;
+  if (cap < 0) cap = (getenv("PT_V21_POOL_MB") ? atol(getenv("PT_V21_POOL_MB")) : 32) << 20;
+  return cap;
+}
+static void *buf_get(pt_ctx *c, size_t bytes) {
+  int k = -1;
+  size_t alloc = bytes;
+  if (bytes >= PT_POOL_MIN && pool_cap_bytes() > 0) {
+    k = pool_cls(bytes);
+    alloc = pool_cls_size(k);
+    void *h = c->pool[k];
+    if (h) {                                   /* reuse: pop the class free list */
+      c->pool[k] = *(void **) ((char *) h + 8);
+      c->pool_bytes -= (long) alloc;
+      buf_ref_init((char *) h + PT_POOL_HDR);
+      return (char *) h + PT_POOL_HDR;
+    }
+  }
+  char *h = (char *) aligned_alloc(64, ((alloc + 63) & ~(size_t) 63) + PT_POOL_HDR);
+  if (!h) return NULL;
+  *(int *) h = k;                              /* class, -1 = not pooled */
+  ((int *) h)[1] = 1;
+  return h + PT_POOL_HDR;
+}
+
+static void buf_put(pt_ctx *c, void *p) {
+  char *h = (char *) p - PT_POOL_HDR;
+  if (--((int *) h)[1] > 0)                    /* still referenced by a view (or its owner) */
+    return;
+  int k = *(int *) h;
+  if (k >= 0 && c->pool_bytes + (long) pool_cls_size(k) <= pool_cap_bytes()) {
+    *(void **) (h + 8) = c->pool[k];           /* push onto the class free list */
+    c->pool[k] = h;
+    c->pool_bytes += (long) pool_cls_size(k);
+    return;
+  }
+  free(h);
+}
+static void pool_drain(pt_ctx *c) {
+  for (int k = 0; k < 64; k++)
+    while (c->pool[k]) {
+      char *h = (char *) c->pool[k];
+      c->pool[k] = *(void **) (h + 8);
+      free(h);
+    }
+  c->pool_bytes = 0;
+}
+
 static void tv_free(pt_ctx *c, pt_tv *t) {
   if (t->alive && t->p) {
-    free(t->p);
-    c->host_bytes_live -= (long) t->n * dt_sz(t->dt);
+    if (t->base)
+      buf_put(c, t->base);                     /* drops one reference: owner or view */
+    if (!t->view)
+      c->host_bytes_live -= (long) t->n * dt_sz(t->dt);
   }
+  t->base = NULL;
+  t->view = 0;
   if (t->dev_res) {
     /* the interpreter frees a tensor exactly at its last use, which is exactly when its device
      * buffer may be recycled (the residency sub-arena ignores pointers it does not own) */
@@ -157,7 +273,9 @@ static int tv_alloc_nz(pt_ctx *c, pt_tv *t, int dt, const int64_t *d, int ndim, 
     fprintf(stderr, " ]\n");
     return -1;
   }
-  t->p = aligned_alloc(64, (bytes + 63) & ~(size_t) 63);
+  t->p = buf_get(c, bytes);
+  t->base = t->p;
+  t->view = 0;
   if (!t->p) {
     c->n_alloc_fail++;
     return -1;
@@ -433,15 +551,13 @@ static int un_op(pt_ctx *c, int op, const pt_tv *A, const pt_tv *G, pt_tv *O, fl
       for (int64_t i = 0; i < n; i++) o[i] = cosf(a[i]);
     else if (ft && op == PT_TANH) {
       tanh_tab65536_init();
-      for (int64_t i = 0; i < n; i++)
-        o[i] = tanh_tab65536_eval(a[i]);
+      tanh_tab65536_eval_n(a, o, n, 0);
     }
     else if (op == PT_TANH)
       for (int64_t i = 0; i < n; i++) o[i] = tanhf(a[i]);
     else if (ft && op == PT_SIGMOID) {
       tanh_tab65536_init();
-      for (int64_t i = 0; i < n; i++)
-        o[i] = 0.5f * (tanh_tab65536_eval(a[i] * 0.5f) + 1.0f);
+      tanh_tab65536_eval_n(a, o, n, 1);
     }
     else if (op == PT_SIGMOID)
       for (int64_t i = 0; i < n; i++) o[i] = 1.0f / (1.0f + expf(-a[i]));
@@ -1196,6 +1312,10 @@ void pt_v21_close(pt_ctx *c) {
   free(c->cont_shared);
   free(c->cont_path);
   free(c->cont_dims);
+  if (c->V)
+    for (int i = 0; i < PT_N_TENSOR; i++)
+      if (c->V[i].dev != 2) tv_free(c, &c->V[i]);
+  pool_drain(c);
   free(c->V);
   free(c->wav);
   free(c);
@@ -1229,7 +1349,7 @@ static int op_reshape(pt_ctx *c, const pt_tv *A, const pt_tv *S, pt_tv *O) {
     d[neg] = tgt ? A->n / tgt : 0;
   }
   if (nd > PT_V21_MAX_RANK) return -1;
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;   /* the copy below fills it */
   if (O->n != A->n) {
     /* element-count mismatch: the target shape vector does not describe the data (a shape-vector
      * bug upstream).  Copy what fits and keep going - the parity dump will show where. */
@@ -1238,6 +1358,8 @@ static int op_reshape(pt_ctx *c, const pt_tv *A, const pt_tv *S, pt_tv *O) {
   }
   int64_t cnt = A->n < O->n ? A->n : O->n;
   memcpy(O->p, A->p, (size_t) (cnt * dt_sz(A->dt)));
+  if (O->n > cnt)   /* mismatch only: keep the tail zero, as the zero-filled buffer did */
+    memset((char *) O->p + cnt * dt_sz(A->dt), 0, (size_t) ((O->n - cnt) * dt_sz(A->dt)));
   return 0;
 }
 
@@ -1395,6 +1517,46 @@ static int op_slice(pt_ctx *c, const pt_tv *A, const int64_t *starts, const int6
     d[i] = sp[i] > 0 ? (en[i] - st[i] + sp[i] - 1) / sp[i] : (en[i] - st[i]) / sp[i];
   for (int i = 0; i < nd; i++)
     if (d[i] < 0) d[i] = 0;
+  /* Zero-copy view. The selected region is one contiguous block of A exactly when, for some axis
+   * k, every axis after k is taken whole with step 1, axis k is a step-1 range, and every axis
+   * before k contributes one index. The output then points into A's buffer (holding a reference
+   * on it) instead of copying it: the flow's gate slices are of this form, ~3 MB per request. */
+  static int sview = -1;
+  if (sview < 0) sview = getenv("PT_V21_SLICE_VIEW") ? atoi(getenv("PT_V21_SLICE_VIEW")) : 1;
+  if (sview && nd >= 1 && A->p) {
+    int k = nd - 1;
+    while (k > 0 && st[k] == 0 && d[k] == A->d[k] && sp[k] == 1) k--;
+    int ok = sp[k] == 1 || d[k] <= 1;
+    for (int q = 0; q < k && ok; q++)
+      if (d[q] != 1) ok = 0;
+    int64_t n = 1;
+    for (int q = 0; q < nd; q++) n *= d[q];
+    if (ok && n > 0) {
+      int64_t stride = 1, off = 0;
+      for (int q = nd - 1; q >= 0; q--) {
+        off += st[q] * stride;
+        stride *= A->d[q];
+      }
+      O->dt = A->dt;
+      O->ndim = nd;
+      for (int q = 0; q < PT_V21_MAX_RANK; q++) O->d[q] = q < nd ? d[q] : 1;
+      O->n = n;
+      O->p = (char *) A->p + off * dt_sz(A->dt);
+      O->dev_res = 0;
+      O->dev_p = NULL;
+      O->alive = 1;
+      O->view = 1;
+      if (A->base) {            /* pooled source: share it, released at this view's last use */
+        buf_ref_add(A->base);
+        O->base = A->base;
+        O->dev = 0;
+      } else {                  /* container / feed / seed storage outlives the run: never freed */
+        O->base = NULL;
+        O->dev = 2;
+      }
+      return 0;
+    }
+  }
   if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;
   int es = dt_sz(A->dt);
   int64_t si[PT_V21_MAX_RANK], so[PT_V21_MAX_RANK];
@@ -1443,7 +1605,8 @@ static int op_pad(pt_ctx *c, const pt_tv *A, const int64_t *pads, double cv, int
     d[i] = A->d[i] + pads[i] + pads[nd + i];
     if (d[i] < 0) return -1;
   }
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  /* every path below writes every output element (the constant path zero-fills itself) */
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;
   int es = dt_sz(A->dt);
   int64_t si[PT_V21_MAX_RANK], so[PT_V21_MAX_RANK];
   si[nd - 1] = 1;
@@ -1732,7 +1895,7 @@ static int op_layernorm(pt_ctx *c, const pt_tv *A, int axis, float eps, const fl
   if (axis < 0) axis += nd;
   int64_t d[PT_V21_MAX_RANK];
   memcpy(d, A->d, sizeof(d));
-  if (tv_alloc(c, O, DT_F32, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, DT_F32, d, nd, 0) < 0) return -1;   /* every row is written */
   int64_t outer = 1, K = 1;
   for (int i = 0; i < axis; i++) outer *= d[i];
   for (int i = axis; i < nd; i++) K *= d[i];
@@ -1996,7 +2159,7 @@ static int op_unsqueeze(pt_ctx *c, const pt_tv *A, const int64_t *axes, int n, p
   for (int i = 0; i < n; i++) d[ax[i]] = 1;
   int k = 0;
   for (int i = 0; i < nd; i++) if (d[i] < 0) d[i] = A->d[k++];
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;   /* fully copied below */
   memcpy(O->p, A->p, (size_t) (A->n * dt_sz(A->dt)));
   return 0;
 }
@@ -2020,7 +2183,7 @@ static int op_squeeze(pt_ctx *c, const pt_tv *A, const int64_t *axes, int n, pt_
     d[0] = 1;
     nd = 1;
   }
-  if (tv_alloc(c, O, A->dt, d, nd) < 0) return -1;
+  if (tv_alloc_nz(c, O, A->dt, d, nd, 0) < 0) return -1;   /* fully copied below */
   memcpy(O->p, A->p, (size_t) (A->n * dt_sz(A->dt)));
   return 0;
 }
@@ -2658,10 +2821,7 @@ int pt_v21_stream_open(pt_ctx *c, const pt_tv *feeds, int64_t *frames, int *hop)
     for (int k = 0; k < PT_V21_MAX_IN; k++) {
       int t = nd->in[k];
       if (t < 0 || t == g_stream_src) continue;
-      int producer = -1;
-      for (int q = 0; q < PT_N_NODE; q++)
-        if (pt_ndefs[q].out[0] == t) { producer = q; break; }
-      if (producer >= g_stream_tail) continue;    /* produced inside the tail: recomputed */
+      if (g_prod[t] >= g_stream_tail) continue;   /* produced inside the tail: recomputed */
       if (!c->V[t].p || c->V[t].n <= 0) continue;
       int dup = 0;
       for (int q = 0; q < S->nseeds; q++)
@@ -2687,13 +2847,19 @@ int pt_v21_stream_open(pt_ctx *c, const pt_tv *feeds, int64_t *frames, int *hop)
     }
   }
   if (frames) *frames = T;
-  /* hop: one short window tells us samples-per-frame */
-  int64_t probe = T < 16 ? T : 16;
-  float *pp = 0;
-  int64_t pn = 0;
-  if (pt_v21_stream_chunk(c, 0, probe, &pp, &pn) == 0 && pn > 0) S->hop = (int) (pn / probe);
+  /* hop (samples per frame) is a property of the model, not of the request: learn it from one
+   * short window the first time and reuse it, instead of an extra decoder pass per request */
+  static volatile int model_hop;
+  if (model_hop <= 0) {
+    int64_t probe = T < 16 ? T : 16;
+    float *pp = 0;
+    int64_t pn = 0;
+    if (pt_v21_stream_chunk(c, 0, probe, &pp, &pn) == 0 && pn > 0 && pn % probe == 0)
+      model_hop = (int) (pn / probe);
+  }
+  S->hop = model_hop;
   if (hop) *hop = S->hop;
-  return 0;
+  return S->hop > 0 ? 0 : -1;
 }
 
 int pt_v21_stream_chunk(pt_ctx *c, int64_t a, int64_t win, float **pcm, int64_t *n) {
