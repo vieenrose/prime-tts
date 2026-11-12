@@ -7,9 +7,13 @@
  */
 #include "pt_v21.h"
 #include "pt_graph_tab.h"
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 #include <math.h>
 
 static int load_feed(const char *dir, const char *name, pt_tv *t) {
@@ -32,6 +36,90 @@ static int load_feed(const char *dir, const char *name, pt_tv *t) {
   return 0;
 }
 
+/* One request's work, extracted verbatim from main so --serve-fifo can repeat it on an
+ * already-warm context: the container record pass, CUDA context, weight upload and clock ramp
+ * belong to main, not to this. Returns the SNDR in dB, or -1 when the case could not be loaded
+ * or run.
+ *
+ * Feed lifetime: load_feed mallocs each payload and the engine copies them into the graph during
+ * the run, so the previous request's set is freed at the START of the next one -- every pointer is
+ * live for the whole run, and nothing accumulates across requests. The waveform is owned by the
+ * engine (pt_v21_run_graph frees c->wav on the next run and at close), so it is never freed here. */
+static double run_case(pt_ctx *c, const char *dir, const char *out, void **feedp) {
+  static const char *feeds_names[] = {"x", "tone", "lang", "x_lengths", "sid", "noise_scale",
+                                      "length_scale"};
+  for (int i = 0; i < 7; i++) { free(feedp[i]); feedp[i] = 0; }
+  pt_tv feeds[8];
+  memset(feeds, 0, sizeof(feeds));
+  for (int i = 0; i < 7; i++)
+    if (load_feed(dir, feeds_names[i], &feeds[i])) return -1;
+  for (int i = 0; i < 7; i++) feedp[i] = feeds[i].p;
+  float *wav = 0;
+  int64_t wn = 0;
+  if (pt_v21_run(c, feeds, &wav, &wn)) return -1;
+  /* parity vs the golden waveform */
+  void *gp;
+  int dt, nd;
+  int64_t gd[PT_V21_MAX_RANK], gn;
+  char path[512];
+  snprintf(path, sizeof(path), "%s/wav.npy", dir);
+  if (pt_npy_load_v21(path, &gp, &dt, &nd, gd, &gn)) {
+    fprintf(stderr, "main_v21: cannot load %s\n", path);
+    free(gp);
+    return -1;
+  }
+  const float *g = (const float *) gp;
+  int64_t n = wn < gn ? wn : gn;
+  double se = 0.0, sp = 0.0, mx = 0.0;
+  for (int64_t i = 0; i < n; i++) {
+    double d = (double) wav[i] - (double) g[i];
+    se += d * d;
+    sp += (double) g[i] * (double) g[i];
+    if (fabs(d) > mx) mx = fabs(d);
+  }
+  double sndr = se > 0 ? 10.0 * log10(sp / se) : 1e9;
+  printf("case %s: L=%lld golden=%lld  max|d|=%.3e  SNDR=%.2f dB\n", dir, (long long) wn,
+         (long long) gn, mx, sndr);
+  if (out) {
+    int64_t d3[3] = {1, 1, wn};
+    pt_npy_save_f32_v21(out, wav, 3, d3);
+    printf("  wrote %s\n", out);
+  }
+  free(gp);
+  return sndr;
+}
+
+/* One request line from the serve fifo, read the way a per-request client requires: never block
+   on a writer, reopen when the last one closes (a non-blocking fifo read gives EAGAIN while a
+   writer is idle and 0 when none is open). Returns 0 only when the fifo cannot be opened. */
+static int serve_read(const char *path, char *out, size_t cap) {
+  int fd = open(path, O_RDONLY | O_NONBLOCK);
+  if (fd < 0) { fprintf(stderr, "main_v21: cannot open %s (%s)\n", path, strerror(errno)); return 0; }
+  size_t n = 0; int idle = 0;
+  for (;;) {
+    char ch;
+    ssize_t r = read(fd, &ch, 1);
+    if (r == 1) {
+      idle = 0;
+      if (ch == '\n') break;
+      if (n + 1 < cap) out[n++] = ch;
+      continue;
+    }
+    if (r < 0 && errno != EAGAIN && errno != EINTR) { close(fd); return 0; }
+    if (n && ++idle > 5) break;                      /* writer done without a trailing newline */
+    if (!n) {                                          /* no writer: reopen and poll */
+      close(fd);
+      fd = open(path, O_RDONLY | O_NONBLOCK);
+      if (fd < 0) return 0;
+    }
+    struct timespec ts = { 0, 20000000 };
+    nanosleep(&ts, 0);
+  }
+  out[n] = 0;
+  close(fd);
+  return 1;
+}
+
 int main(int argc, char **argv) {
   const char *container = "build/v21.ptk";
   const char *dir = "tests/golden_v21/T81";
@@ -42,9 +130,11 @@ int main(int argc, char **argv) {
   int use_cuda = 1;   /* CUDA is the default; --no-cuda / --cpu selects the portable CPU path */
   int s_win = 0, s_ctx = 0;   /* --stream WIN CTX: overlap-save decoder verification */
   const char *out = 0;
+  const char *serve_fifo = 0;   /* --serve-fifo PATH: stay up, one case per request line */
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--container") && i + 1 < argc) container = argv[++i];
     else if (!strcmp(argv[i], "--case") && i + 1 < argc) dir = argv[++i];
+    else if (!strcmp(argv[i], "--serve-fifo") && i + 1 < argc) serve_fifo = argv[++i];
     else if (!strcmp(argv[i], "--checkpoints") && i + 1 < argc) ck = argv[++i];
     else if (!strcmp(argv[i], "--ckdir") && i + 1 < argc) ckdir = argv[++i];
     else if (!strcmp(argv[i], "--trace") && i + 1 < argc) trace_idx = atoi(argv[++i]);
@@ -75,6 +165,33 @@ int main(int argc, char **argv) {
     }
   }
   if (trace_idx >= 0 || trace_idx == -2) pt_v21_trace(trace_idx);
+  if (serve_fifo) {
+    /* Resident TTS. A one-shot process pays ~0.4 s before it computes anything (container record
+       pass, CUDA context, weight upload, clock ramp -- the same startup the HTTP server documents);
+       in a conversation that tax is per turn. Here it is paid once at boot and each turn is one
+       request line: "<case dir>" or "<case dir> <out.npy>", answered by "PT_DONE <n> rc=<rc>
+       sndr=<dB>" on stdout, which is what the client waits for. The computation is run_case(),
+       the same code the one-shot path runs, and the harness gates the two arms' waveforms against
+       each other byte for byte. */
+    void *feedp[7] = { 0, 0, 0, 0, 0, 0, 0 };
+    for (int req = 0; ; req++) {
+      char rl[1024];
+      printf("PT_AWAIT %d\n", req);
+      fflush(stdout);
+      if (!serve_read(serve_fifo, rl, sizeof rl)) break;
+      if (!rl[0]) { req--; continue; }
+      if (!strcmp(rl, "Q")) break;
+      char *sp = strchr(rl, ' ');
+      if (sp) *sp++ = 0;
+      double sndr = run_case(c, rl, (sp && *sp) ? sp : 0, feedp);
+      printf("PT_DONE %d rc=%d sndr=%.2f\n", req, (sndr >= 0.0 && sndr >= 60.0) ? 0 : 1, sndr);
+      fflush(stdout);
+      if (sndr < 0.0) break;      /* a case that cannot be loaded or run is not a transient fault */
+    }
+    for (int i = 0; i < 7; i++) free(feedp[i]);
+    pt_v21_close(c);
+    return 0;
+  }
   if (shapes) {
     FILE *f = fopen(shapes, "w");
     if (!f) {
