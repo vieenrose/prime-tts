@@ -2660,6 +2660,7 @@ void pt_v21_cuda_shutdown(pt_ctx *c) { (void) c; }
 void pt_v21_cuda_active(int delta) { (void) delta; }
 int pt_v21_cuda_keepwarm(int iters) { (void) iters; return -1; }
 long pt_v21_gpu_cur_freq(void) { return -1; }
+long pt_v21_gpu_max_freq(void) { return -1; }
 double pt_v21_cuda_weights_mib(pt_ctx *c) { (void) c; return 0.0; }
 int pt_v21_cuda_prewarm(void) { return 0; }
 int pt_v21_conv_pads_in_kernel(pt_ctx *c) { (void) c; return 0; }

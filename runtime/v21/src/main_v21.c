@@ -92,6 +92,45 @@ static double run_case(pt_ctx *c, const char *dir, const char *out, void **feedp
 /* One request line from the serve fifo, read the way a per-request client requires: never block
    on a writer, reopen when the last one closes (a non-blocking fifo read gives EAGAIN while a
    writer is idle and 0 when none is open). Returns 0 only when the fifo cannot be opened. */
+static double now_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+/* Clock ramp on arrival (conversation latency, invisible to a back-to-back benchmark).
+ * nvhost_podgov parks the GPU within ~2 s of idle: on this board a T81 request costs 0.48 s at
+ * the 921.6 MHz max and 1.0-1.7 s at the parked 76.8 MHz (measured, PULSAR-ASM .auto/combined
+ * run #277). In a conversation the gap between the ASR finishing and the reply text being ready
+ * is exactly that idle window -- so the stage the user actually waits for is the one that runs
+ * on a parked clock. When a request arrives parked, hold the SM busy on the same ALU kernel the
+ * startup ramp uses until the governor reaches max (or a budget expires), then serve.
+ * When the clock is already at max -- back-to-back traffic, and what the harness measures -- this
+ * returns without launching anything, so it cannot perturb a measured turn. The burst is a
+ * private stream over a private buffer (pt_v21_cuda_keepwarm); no graph data is touched and the
+ * waveform is bit-identical either way.
+ * PT_V21_RAMP_MS=0 disables it. The startup ramp uses 64000 iters and takes ~287 ms from parked,
+ * so 16000 per burst polls the clock four times per that ramp's worth of work. */
+static void serve_ramp(void) {
+  const char *e = getenv("PT_V21_RAMP_MS");
+  double budget = e ? atof(e) : 500.0;
+  if (budget <= 0.0) return;
+  int iters = getenv("PT_V21_RAMP_ITERS") ? atoi(getenv("PT_V21_RAMP_ITERS")) : 16000;
+  if (iters <= 0) return;
+  long mx = pt_v21_gpu_max_freq(), cur = pt_v21_gpu_cur_freq();
+  if (mx <= 0 || cur <= 0 || cur >= mx) return;   /* at max (or unreadable): nothing to do */
+  long c0 = cur;
+  double t0 = now_ms();
+  int nb = 0;
+  while (cur < mx && now_ms() - t0 < budget) {
+    if (pt_v21_cuda_keepwarm(iters)) break;
+    nb++;
+    cur = pt_v21_gpu_cur_freq();
+  }
+  fprintf(stderr, "pt_v21 serve: clock parked at request, ramped %ld -> %ld MHz in %d bursts (%.0f ms)\n",
+          c0 / 1000000, cur / 1000000, nb, now_ms() - t0);
+}
+
 static int serve_read(const char *path, char *out, size_t cap) {
   int fd = open(path, O_RDONLY | O_NONBLOCK);
   if (fd < 0) { fprintf(stderr, "main_v21: cannot open %s (%s)\n", path, strerror(errno)); return 0; }
@@ -181,6 +220,7 @@ int main(int argc, char **argv) {
       if (!serve_read(serve_fifo, rl, sizeof rl)) break;
       if (!rl[0]) { req--; continue; }
       if (!strcmp(rl, "Q")) break;
+      if (use_cuda) serve_ramp();   /* no-op unless the governor parked the clock */
       char *sp = strchr(rl, ' ');
       if (sp) *sp++ = 0;
       double sndr = run_case(c, rl, (sp && *sp) ? sp : 0, feedp);

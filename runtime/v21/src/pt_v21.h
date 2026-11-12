@@ -225,6 +225,7 @@ double pt_v21_cuda_weights_mib(pt_ctx *c);
 void pt_v21_cuda_active(int delta);
 int pt_v21_cuda_keepwarm(int iters);   /* one short ALU burst (server keep-warm) */
 long pt_v21_gpu_cur_freq(void);        /* devfreq cur_freq in Hz, -1 if unreadable */
+long pt_v21_gpu_max_freq(void);        /* devfreq max_freq in Hz, -1 if unreadable */
 /* 1 when the CUDA conv path takes unpadded inputs (the GEMM kernel pads in-kernel) */
 int pt_v21_conv_pads_in_kernel(pt_ctx *c);
 /* Device-resident residual Add (PT_V21_DEVADD): both operands device-resident, result stays in the

@@ -593,6 +593,16 @@ int pt_v21_cuda_keepwarm(int iters) {
 }
 
 /* current GPU clock in Hz from devfreq sysfs (uncached), -1 if unreadable */
+long pt_v21_gpu_max_freq(void) {
+  FILE *f = fopen("/sys/devices/platform/host1x/57000000.gpu/devfreq/57000000.gpu/max_freq", "r");
+  char buf[32];
+  long v = -1;
+  if (f && fgets(buf, sizeof buf, f)) v = atol(buf);
+  if (f) fclose(f);
+  return v;
+}
+
+/* current GPU clock in Hz from devfreq sysfs (uncached), -1 if unreadable */
 long pt_v21_gpu_cur_freq(void) {
   FILE *f = fopen("/sys/devices/platform/host1x/57000000.gpu/devfreq/57000000.gpu/cur_freq", "r");
   char buf[32];
