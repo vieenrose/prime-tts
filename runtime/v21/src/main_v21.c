@@ -51,9 +51,15 @@ static double run_case(pt_ctx *c, const char *dir, const char *out, void **feedp
   for (int i = 0; i < 7; i++) { free(feedp[i]); feedp[i] = 0; }
   pt_tv feeds[8];
   memset(feeds, 0, sizeof(feeds));
-  for (int i = 0; i < 7; i++)
+  /* Hand each feed to the caller as it is loaded. The first version loaded all seven and only
+     then published them, so a case that failed to load at, say, "sid" returned with x/tone/lang
+     allocated and unowned: feedp still held the PREVIOUS request's pointers (freed at the top of
+     this function), and the partial feeds leaked -- once per bad request, forever, in a service
+     that outlives its clients. Published as we go, the next request's free cleans them up. */
+  for (int i = 0; i < 7; i++) {
     if (load_feed(dir, feeds_names[i], &feeds[i])) return -1;
-  for (int i = 0; i < 7; i++) feedp[i] = feeds[i].p;
+    feedp[i] = feeds[i].p;
+  }
   float *wav = 0;
   int64_t wn = 0;
   if (pt_v21_run(c, feeds, &wav, &wn)) return -1;
@@ -213,6 +219,7 @@ int main(int argc, char **argv) {
        the same code the one-shot path runs, and the harness gates the two arms' waveforms against
        each other byte for byte. */
     void *feedp[7] = { 0, 0, 0, 0, 0, 0, 0 };
+    int nbad = 0;
     for (int req = 0; ; req++) {
       char rl[1024];
       printf("PT_AWAIT %d\n", req);
@@ -224,9 +231,30 @@ int main(int argc, char **argv) {
       char *sp = strchr(rl, ' ');
       if (sp) *sp++ = 0;
       double sndr = run_case(c, rl, (sp && *sp) ? sp : 0, feedp);
-      printf("PT_DONE %d rc=%d sndr=%.2f\n", req, (sndr >= 0.0 && sndr >= 60.0) ? 0 : 1, sndr);
+      /* rc 0 = rendered and matches the case's golden, 1 = rendered but SNDR < 60 dB (an engine
+         or context problem: audible garbage would show here), 2 = the case could not be loaded or
+         the run failed (a bad request). Distinguished because the client reacts differently. */
+      printf("PT_DONE %d rc=%d sndr=%.2f\n", req, sndr < 0.0 ? 2 : (sndr >= 60.0 ? 0 : 1), sndr);
       fflush(stdout);
-      if (sndr < 0.0) break;      /* a case that cannot be loaded or run is not a transient fault */
+      /* A request that cannot be loaded or run is a bad REQUEST, not a dead service. Exiting here
+         (the first version's behaviour) took the TTS down for every later turn of the session --
+         the one resident stage with no recovery, unlike the encoder (#272: answers rc=3 and
+         retires, the client falls back) and the backbone (#282: refuses and keeps serving). A
+         client that passes one malformed case dir would silently lose speech for the rest of the
+         conversation. Continue instead: every request self-checks its waveform against the case's
+         own golden at SNDR >= 60 dB, so a genuinely broken context surfaces as rc=1 rather than
+         as silence. A service that fails PT_V21_SERVE_MAXFAIL requests in a row is not sick, it
+         is dead, and it exits rather than spinning. */
+      if (sndr < 0.0) {
+        int cap = getenv("PT_V21_SERVE_MAXFAIL") ? atoi(getenv("PT_V21_SERVE_MAXFAIL")) : 3;
+        nbad++;
+        if (cap > 0 && nbad >= cap) {   /* PT_V21_SERVE_MAXFAIL<=0: never give up on the session */
+          fprintf(stderr, "main_v21: %d consecutive unloadable/unrunnable cases, exiting\n", nbad);
+          break;
+        }
+      } else {
+        nbad = 0;
+      }
     }
     for (int i = 0; i < 7; i++) free(feedp[i]);
     pt_v21_close(c);
