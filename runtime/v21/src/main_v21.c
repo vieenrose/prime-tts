@@ -8,6 +8,7 @@
 #include "pt_v21.h"
 #include "pt_graph_tab.h"
 #include <errno.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -137,7 +138,14 @@ static void serve_ramp(void) {
           c0 / 1000000, cur / 1000000, nb, now_ms() - t0);
 }
 
-static int serve_read(const char *path, char *out, size_t cap) {
+/* Request reader for --serve-fifo. The old form polled every 20 ms and reopened the fifo whenever
+ * no writer was present: half an interval (~10 ms) of every request was spent waiting for the
+ * next poll, on the critical path of a turn. Now the fifo is opened ONCE O_RDWR|O_NONBLOCK for the
+ * service's life -- this process is then always a writer, so a read never sees EOF and a client's
+ * O_WRONLY open never sees ENXIO -- and the reader sleeps in poll() until data arrives. A line
+ * without a trailing newline is still accepted after 100 ms of silence, as before.
+ * PT_V21_FIFO_POLL=1 restores the old 20 ms polling reader (A/B control). */
+static int serve_read_poll(const char *path, char *out, size_t cap) {
   int fd = open(path, O_RDONLY | O_NONBLOCK);
   if (fd < 0) { fprintf(stderr, "main_v21: cannot open %s (%s)\n", path, strerror(errno)); return 0; }
   size_t n = 0; int idle = 0;
@@ -162,6 +170,33 @@ static int serve_read(const char *path, char *out, size_t cap) {
   }
   out[n] = 0;
   close(fd);
+  return 1;
+}
+
+static int serve_read(const char *path, char *out, size_t cap) {
+  static int fd = -1, legacy = -1;
+  if (legacy < 0) legacy = getenv("PT_V21_FIFO_POLL") && atoi(getenv("PT_V21_FIFO_POLL")) != 0;
+  if (legacy) return serve_read_poll(path, out, cap);
+  if (fd < 0) {
+    fd = open(path, O_RDWR | O_NONBLOCK);
+    if (fd < 0) { fprintf(stderr, "main_v21: cannot open %s (%s)\n", path, strerror(errno)); return 0; }
+  }
+  size_t n = 0;
+  for (;;) {
+    char ch;
+    ssize_t r = read(fd, &ch, 1);
+    if (r == 1) {
+      if (ch == '\n') break;
+      if (n + 1 < cap) out[n++] = ch;
+      continue;
+    }
+    if (r < 0 && errno != EAGAIN && errno != EINTR) return 0;
+    struct pollfd pf = { fd, POLLIN, 0 };
+    int pr = poll(&pf, 1, n ? 100 : -1);   /* block for a new request; 100 ms for a line's tail */
+    if (pr == 0) break;                      /* writer done without a trailing newline */
+    if (pr < 0 && errno != EINTR) return 0;
+  }
+  out[n] = 0;
   return 1;
 }
 
